@@ -358,15 +358,23 @@ impl Core {
             core.wait_serving(Duration::from_secs(10))?;
             return Ok(core);
         }
-        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-        // SAFETY: getuid/getgid cannot fail.
-        let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
-        let mut cmd = Command::new("pkexec");
-        cmd.arg(exe)
-            .arg("--tun-helper")
+        // Tests run the built app as the helper.
+        let exe = if cfg!(test) { PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/debug/hitori") } else { std::env::current_exe().map_err(|e| e.to_string())? };
+        // SAFETY: getuid/getgid/geteuid cannot fail.
+        let (uid, gid, root) = unsafe { (libc::getuid(), libc::getgid(), libc::geteuid() == 0) };
+        let mut cmd = if root {
+            Command::new(exe)
+        } else {
+            let mut cmd = Command::new("pkexec");
+            cmd.arg(exe);
+            cmd
+        };
+        cmd.arg("--tun-helper")
             .arg(&xray)
             .arg(&path)
             .args([uid.to_string(), gid.to_string(), (plan.kill_switch as u8).to_string()])
+            // pkexec refuses to run when SHELL is not in /etc/shells (e.g. launched from a nix shell).
+            .env_remove("SHELL")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -716,6 +724,83 @@ mod tests {
         core.reload(&cascade).unwrap();
         assert!(trace(&["--proxy", &format!("http://127.0.0.1:{HTTP_PORT}")]).contains(&other_loc));
         core.stop();
+    }
+
+    /// System-wide mode on this machine through pkexec (asks for the password; build target/debug/hitori first):
+    /// HITORI_TEST_SUB=<subscription JSON> cargo test live_system_wide -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn live_system_wide() {
+        let Ok(path) = std::env::var("HITORI_TEST_SUB") else { return };
+        let sub = crate::sub::parse(&std::fs::read(path).unwrap()).unwrap();
+        crate::data::set_servers(sub.servers);
+        let servers = crate::data::servers();
+        let sh = |cmd: &str| String::from_utf8_lossy(&Command::new("sh").args(["-c", cmd]).output().unwrap().stdout).into_owned();
+        let loc = |tries: u32| {
+            let mut got = String::new();
+            for _ in 0..tries {
+                got = sh("curl -s -m 10 https://1.1.1.1/cdn-cgi/trace | grep ^loc=");
+                if !got.is_empty() {
+                    break;
+                }
+            }
+            got.trim().to_owned()
+        };
+        let country = || {
+            let mut got = String::new();
+            for _ in 0..3 {
+                let start = Instant::now();
+                got = sh("curl -4 -sS -m 15 https://ipinfo.io/country 2>&1").trim().to_owned();
+                eprintln!("ipinfo.io: {got:?} in {:?}", start.elapsed());
+                if got.len() == 2 {
+                    break;
+                }
+            }
+            got
+        };
+        let rules = || sh("ip rule; ip -6 rule").lines().filter(|l| l.starts_with("733")).count();
+        let before = loc(3);
+        assert_eq!(rules(), 0, "leftover rules from an earlier run");
+        let mut up: Vec<_> = probe(&servers, Protocol::Tls).unwrap().into_iter().filter_map(|(id, p)| Some((p?, id))).collect();
+        up.sort();
+        // The fastest server in another country, so the exit is visible.
+        let exit = up.iter().filter_map(|(_, id)| servers.iter().copied().find(|s| s.id == *id)).find(|s| format!("loc={}", s.code) != before).unwrap();
+        let want = format!("loc={}", exit.code);
+        eprintln!("direct {before}, exit {} ({})", exit.id, exit.code);
+
+        let plan = Plan {
+            exit,
+            entry: None,
+            protocol: Protocol::Tls,
+            autoroute: false,
+            tun: true,
+            kill_switch: true,
+            apps: vec![],
+            sites: vec![],
+            servers: servers.clone(),
+            tunnel_rules: Arc::new(sub.tunnel_rules),
+            base_rules: Arc::new(sub.base_rules),
+            dns: Arc::new(sub.dns),
+        };
+        let mut core = Core::start(&plan).unwrap();
+        assert!(rules() >= 5, "policy rules installed");
+        assert_eq!(loc(3), want, "plain curl goes through the tunnel");
+        assert_eq!(format!("loc={}", country()), want, "names resolve and connect through the tunnel");
+        assert!(sh("ip route show table 26869").contains("unreachable default"), "kill switch on");
+        core.set_kill_switch(false);
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(!sh("ip route show table 26869").contains("unreachable"), "kill switch off");
+        core.set_kill_switch(true);
+        core.reload(&plan).unwrap();
+        assert!(core.alive());
+        assert_eq!(loc(3), want, "still tunneled after a restart");
+        eprintln!("system-wide: {want}, restart and kill switch ok");
+
+        core.stop();
+        assert_eq!(rules(), 0, "rules removed");
+        assert!(sh("ip route show table 26869").is_empty(), "table flushed");
+        assert!(sh("ip -br link show dev hitori0 2>&1").contains("does not exist"), "tun gone");
+        assert_eq!(loc(3), before, "direct again");
     }
 }
 

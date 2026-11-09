@@ -13,10 +13,13 @@ use std::time::{Duration, Instant};
 use crate::xray::{MARK, TUN_NAME};
 
 const TABLE: &str = "26869";
-const PREFS: [&str; 4] = ["7330", "7331", "7332", "7333"];
+const PREFS: [&str; 5] = ["7330", "7331", "7332", "7333", "7334"];
+/// Set on packets the core writes into the TUN, so reverse-path checks find them in the TUN table.
+const IN_MARK: u32 = 0x686a;
 /// pkexec clears PATH, so tools are only taken from these system directories.
 const BIN_DIRS: [&str; 5] = ["/run/current-system/sw/bin", "/usr/sbin", "/sbin", "/usr/bin", "/bin"];
 const CAPS: &str = "+net_admin,+net_raw,+net_bind_service";
+const SRC_VALID_MARK: &str = "/proc/sys/net/ipv4/conf/all/src_valid_mark";
 
 static TERMINATED: AtomicBool = AtomicBool::new(false);
 
@@ -83,10 +86,12 @@ fn run(args: &[String]) -> Result<(), String> {
     }
     let ip = find("ip")?;
     let setpriv = if args.uid == 0 { None } else { Some(find("setpriv")?) };
+    let iptables = ["iptables", "ip6tables"].into_iter().filter_map(|t| find(t).ok()).collect();
     let commands = stdin_lines();
-    let mut session = Session { ip, setpriv, args, core: None };
+    let mut session = Session { ip, setpriv, iptables, args, core: None, src_valid_mark: None };
     session.teardown(); // leftovers of a helper that was killed
     session.add_rules()?;
+    session.add_connmark();
     session.set_kill_switch(session.args.kill_switch);
     session.start_core()?;
     while !TERMINATED.load(Ordering::SeqCst) {
@@ -125,8 +130,11 @@ fn stdin_lines() -> mpsc::Receiver<String> {
 struct Session {
     ip: PathBuf,
     setpriv: Option<PathBuf>,
+    iptables: Vec<PathBuf>,
     args: Args,
     core: Option<Child>,
+    /// The value before we set it, to put back on teardown.
+    src_valid_mark: Option<String>,
 }
 
 impl Session {
@@ -150,9 +158,34 @@ impl Session {
         for (pref, proto) in [(PREFS[0], "udp"), (PREFS[1], "tcp")] {
             self.ip46(&["rule", "add", "pref", pref, "fwmark", "0/0xffffffff", "ipproto", proto, "dport", "53", "lookup", TABLE])?;
         }
+        // Replies from the TUN (e.g. from a LAN resolver) would otherwise fail the reverse-path check against `main`.
+        self.ip46(&["rule", "add", "pref", PREFS[2], "fwmark", &format!("{IN_MARK:#x}"), "lookup", TABLE])?;
         // Every non-default route (LAN, links, incoming connections) keeps working as before.
-        self.ip46(&["rule", "add", "pref", PREFS[2], "lookup", "main", "suppress_prefixlength", "0"])?;
-        self.ip46(&["rule", "add", "pref", PREFS[3], "not", "fwmark", &format!("{MARK:#x}"), "lookup", TABLE])
+        self.ip46(&["rule", "add", "pref", PREFS[3], "lookup", "main", "suppress_prefixlength", "0"])?;
+        self.ip46(&["rule", "add", "pref", PREFS[4], "not", "fwmark", &format!("{MARK:#x}"), "lookup", TABLE])
+    }
+
+    /// Strict reverse-path filters (the NixOS firewall's `rpfilter --validmark`, `rp_filter=1`) honour marks: replies to
+    /// the core's connections get its mark back (looked up in `main`), packets from the TUN get IN_MARK (the TUN table).
+    fn add_connmark(&mut self) {
+        for (chain, at, rule) in connmark_rules() {
+            for t in &self.iptables {
+                let mut args: Vec<String> = ["-w", "-t", "mangle", at, chain].map(str::to_owned).to_vec();
+                if at == "-I" {
+                    args.push("1".into());
+                }
+                args.extend(rule.iter().cloned());
+                if let Err(e) = run_tool(t, &args) {
+                    eprintln!("tun helper: {e}");
+                }
+            }
+        }
+        if let Ok(old) = std::fs::read_to_string(SRC_VALID_MARK)
+            && old.trim() != "1"
+            && std::fs::write(SRC_VALID_MARK, "1").is_ok()
+        {
+            self.src_valid_mark = Some(old.trim().to_owned());
+        }
     }
 
     /// An unreachable fallback under the TUN route: while the core is down, traffic is refused instead of leaking.
@@ -224,7 +257,39 @@ impl Session {
             }
             let _ = self.ip(&[family, "route", "flush", "table", TABLE]);
         }
+        for (chain, _, rule) in connmark_rules() {
+            for t in &self.iptables {
+                let args: Vec<String> = ["-w", "-t", "mangle", "-D", chain].iter().map(|s| s.to_string()).chain(rule.iter().cloned()).collect();
+                for _ in 0..100 {
+                    if run_tool(t, &args).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+        if let Some(old) = self.src_valid_mark.take() {
+            let _ = std::fs::write(SRC_VALID_MARK, old);
+        }
     }
+}
+
+/// (chain, how to add, match + target): mark packets from the TUN, restore the mark on incoming packets of the core's
+/// connections, save it on outgoing ones.
+fn connmark_rules() -> [(&'static str, &'static str, Vec<String>); 3] {
+    let (mark, in_mark) = (format!("{MARK:#x}"), format!("{IN_MARK:#x}"));
+    let rule = |head: &[&str], target: &[&str]| -> Vec<String> {
+        [head, &["-m", "comment", "--comment", "hitori", "-j"], target].concat().into_iter().map(str::to_owned).collect()
+    };
+    [
+        ("PREROUTING", "-I", rule(&["-i", TUN_NAME], &["MARK", "--set-mark", &in_mark])),
+        ("PREROUTING", "-I", rule(&["-m", "connmark", "--mark", &mark], &["CONNMARK", "--restore-mark"])),
+        ("POSTROUTING", "-A", rule(&["-m", "mark", "--mark", &mark], &["CONNMARK", "--save-mark"])),
+    ]
+}
+
+fn run_tool(tool: &Path, args: &[impl AsRef<std::ffi::OsStr>]) -> Result<(), String> {
+    let out = Command::new(tool).args(args).stdin(Stdio::null()).output().map_err(|e| format!("{}: {e}", tool.display()))?;
+    if out.status.success() { Ok(()) } else { Err(format!("{}: {}", tool.display(), String::from_utf8_lossy(&out.stderr).trim())) }
 }
 
 impl Drop for Session {
