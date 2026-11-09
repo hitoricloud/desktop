@@ -9,6 +9,7 @@ mod palette;
 mod score;
 mod theme;
 mod tray;
+mod tun;
 mod ui;
 mod views;
 mod vtile;
@@ -66,8 +67,11 @@ fn skip_software_vulkan() {
 
 /// `--tray`: only the tray popup window (screenshots). `--background`: start with just the tray icon.
 fn main() {
-    skip_software_vulkan();
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("--tun-helper") {
+        std::process::exit(tun::helper(&args[2..]));
+    }
+    skip_software_vulkan();
     let tray_only = args.iter().any(|a| a == "--tray");
     let background = args.iter().any(|a| a == "--background");
     Application::new().with_assets(Assets).run(move |cx: &mut App| {
