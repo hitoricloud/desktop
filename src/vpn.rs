@@ -7,10 +7,11 @@ use gpui::{Context, Task};
 use serde_json::Value;
 
 use crate::app::Conn;
-use crate::data::{self, Account, AppRule, Protocol, SiteRule, Suggestion};
+use crate::data::{self, Account, AppRule, Protocol, Scope, SiteRule, Suggestion};
 use crate::net::{self, Geo};
 use crate::store::{self, Login, Rule, Settings};
 use crate::sub;
+use crate::suggest::Tracker;
 use crate::xray::{self, Core, Plan};
 
 #[derive(Clone, PartialEq)]
@@ -148,6 +149,8 @@ pub struct Vpn {
     failures: u32,
     exits: HashMap<String, Exit>,
     autoconnect_done: bool,
+    tracker: Tracker,
+    _scanner: Task<()>,
 }
 
 impl Vpn {
@@ -200,6 +203,8 @@ impl Vpn {
             failures: 0,
             exits,
             autoconnect_done: false,
+            tracker: Tracker::new(),
+            _scanner: Self::scanner(cx),
         };
         if this.login.is_some()
             && let Ok(body) = std::fs::read(subscription_path())
@@ -215,6 +220,76 @@ impl Vpn {
         })
         .detach();
         this
+    }
+
+    /// Which apps use the network, every 10 s (the Add app menu and rule cards).
+    fn scanner(cx: &mut Context<Self>) -> Task<()> {
+        cx.spawn(async move |this, cx| {
+            loop {
+                let exes = cx.background_executor().spawn(async { crate::apps::scan() }).await;
+                data::saw(&exes);
+                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    break;
+                }
+                cx.background_executor().timer(Duration::from_secs(10)).await;
+            }
+        })
+    }
+
+    /// Sites that failed directly a few times and do answer through the tunnel become suggestions.
+    fn suggest(&mut self, cx: &mut Context<Self>) {
+        let Some(core) = self.core.as_ref() else { return };
+        self.tracker.feed(&core.log.take());
+        let probe = core.ports.probe;
+        let known = |host: &str, s: &Shared| {
+            s.sites.iter().any(|(t, _)| host == *t || host.ends_with(&format!(".{t}")))
+                || s.suggestions.iter().any(|x| x.target == host)
+                || s.dismissed.iter().any(|d| d == host)
+        };
+        let mut fresh = vec![];
+        for (host, reason, hits) in self.tracker.candidates(Instant::now()) {
+            if known(&host, &self.s) {
+                self.tracker.forget(&host);
+            } else {
+                fresh.push((host, reason, hits));
+            }
+        }
+        if fresh.is_empty() || !self.s.autoroute {
+            return;
+        }
+        let via = self.s.server_id;
+        cx.spawn(async move |this, cx| {
+            for (host, reason, hits) in fresh {
+                let h = host.clone();
+                if !cx.background_executor().spawn(async move { xray::reachable(probe, &h) }).await {
+                    continue;
+                }
+                let gone = this
+                    .update(cx, |this, cx| {
+                        if known(&host, &this.s) {
+                            return;
+                        }
+                        let target = data::intern(&host);
+                        this.s.suggestions.push(Suggestion {
+                            id: data::intern(&format!("s-{host}")),
+                            app_id: "",
+                            target,
+                            scope: Scope::Site,
+                            reason,
+                            via_id: via,
+                            hits,
+                            at: Instant::now(),
+                            speed: None,
+                        });
+                        cx.notify();
+                    })
+                    .is_err();
+                if gone {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     fn load_me(&mut self, cx: &mut Context<Self>) {
@@ -498,6 +573,7 @@ impl Vpn {
             self.failures = 0;
         }
         self.s.stats = Stats { down, up, latency, total: (m.down + m.up).saturating_sub(self.first_bytes) };
+        self.suggest(cx);
         let pings: Vec<_> = m.delays.iter().filter_map(|(tag, d)| tag.strip_prefix("p-").filter(|id| data::has_server(id)).map(|id| (data::intern(id), *d))).collect();
         if pings.iter().any(|(id, d)| data::ping(id) != *d) {
             data::set_pings(pings);

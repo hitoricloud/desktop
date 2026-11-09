@@ -214,7 +214,8 @@ pub fn config(plan: &Plan, ports: Ports) -> Result<Value, String> {
     let mut dns = (*plan.dns).clone();
     dns["tag"] = json!("dns-internal");
     Ok(json!({
-        "log": {"loglevel": "warning"},
+        // Info carries the failed direct dials that autorouting suggestions come from.
+        "log": {"loglevel": if plan.autoroute { "info" } else { "warning" }},
         "dns": dns,
         "inbounds": inbounds,
         "outbounds": out.list,
@@ -297,7 +298,7 @@ impl Log {
             for line in BufReader::new(stream).lines().map_while(Result::ok) {
                 let mut tail = log.tail.lock().unwrap();
                 tail.push(line.clone());
-                if tail.len() > 40 {
+                if tail.len() > 200 {
                     tail.remove(0);
                 }
                 drop(tail);
@@ -316,7 +317,11 @@ impl Log {
     /// The most telling recent error, without the timestamp.
     pub fn last_error(&self) -> Option<String> {
         let tail = self.tail.lock().unwrap();
-        let line = tail.iter().rev().find(|l| l.contains("Failed") || l.contains("failed") || l.contains("[Error]") || l.contains("error"))?;
+        let line = tail
+            .iter()
+            .rev()
+            .find(|l| l.contains("[Error]") || l.contains("Failed to start") || l.contains("panic:"))
+            .or_else(|| tail.iter().rev().find(|l| l.contains("[Warning]")))?;
         let text = line.split_once("] ").map(|(_, t)| t).unwrap_or(line);
         Some(text.chars().take(160).collect())
     }
@@ -688,8 +693,12 @@ mod tests {
         let core = Core::start(&plan).unwrap();
         let ip = exit_ip(core.ports.probe).expect("exit ip through the tunnel");
         eprintln!("exit ip via {}: {ip}", ee.id);
-        let trace = |args: &[&str]| String::from_utf8(Command::new("curl").args(args).args(["-s", "-m", "15", "https://1.1.1.1/cdn-cgi/trace"]).output().unwrap().stdout).unwrap();
-        assert!(trace(&["--socks5-hostname", &format!("127.0.0.1:{SOCKS_PORT}")]).contains(&main_loc));
+        let trace = |args: &[&str]| {
+            let out = Command::new("curl").args(args).args(["-sS", "-m", "15", "https://1.1.1.1/cdn-cgi/trace"]).output().unwrap();
+            format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))
+        };
+        let got = trace(&["--socks5-hostname", &format!("127.0.0.1:{SOCKS_PORT}")]);
+        assert!(got.contains(&main_loc), "{main_loc}: {got:?} / {:?}", core.log.last_error());
         std::thread::sleep(Duration::from_secs(4));
         let m = metrics(core.ports.metrics).unwrap();
         eprintln!("metrics: down {} up {} proxy delay {:?}", m.down, m.up, m.delays.get("proxy"));

@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-use crate::core::{MARK, TUN_NAME};
+use crate::xray::{MARK, TUN_NAME};
 
 const TABLE: &str = "26869";
 const PREFS: [&str; 4] = ["7330", "7331", "7332", "7333"];
