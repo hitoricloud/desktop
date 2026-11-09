@@ -1,0 +1,13 @@
+# name | size | GPUI HITORI_STATE | web steps (; separated: click:<text> key:<combo> url:<query> wait:<ms>)
+main-off | 1440x900 | | url:?v=1&embed
+main-on | 1440x900 | on | url:?v=1&embed;click:Connect;wait:2500
+nav-menu | 1440x900 | menu:nav | url:?v=1&embed;nav
+palette | 1440x900 | palette:exit | url:?v=1&embed;key:Control+k
+settings | 1440x900 | panel:settings | url:?v=1&embed;nav;item:Settings
+account | 1440x900 | panel:account | url:?v=1&embed;nav;item:Account
+routes | 1440x900 | panel:routes | url:?v=1&embed;click:Manage rules
+rule | 1440x900 | rule:qbittorrent | url:?v=1&embed;rule:qbittorrent
+rule-direct | 1440x900 | rule:steam | url:?v=1&embed;rule:steam
+rule-search | 1440x900 | rule:qbittorrent,type:est | url:?v=1&embed;rule:qbittorrent;type:est
+narrow | 960x640 | | url:?v=1&embed
+tray | 420x760 | tray | url:?v=2&embed
