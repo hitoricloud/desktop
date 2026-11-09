@@ -480,10 +480,7 @@ impl Core {
         if self.helper.take().is_some() {
             // EOF: the helper stops the core and removes its routes.
             let start = Instant::now();
-            while start.elapsed() < Duration::from_secs(5) {
-                if matches!(self.child.try_wait(), Ok(Some(_))) {
-                    return;
-                }
+            while start.elapsed() < Duration::from_secs(5) && matches!(self.child.try_wait(), Ok(None)) {
                 std::thread::sleep(Duration::from_millis(50));
             }
         }
@@ -494,10 +491,9 @@ impl Core {
 }
 
 impl Drop for Core {
+    /// Also when the core died on its own: the config holds server credentials.
     fn drop(&mut self) {
-        if matches!(self.child.try_wait(), Ok(None)) {
-            self.shutdown();
-        }
+        self.shutdown();
     }
 }
 
@@ -723,7 +719,9 @@ mod tests {
         (cascade.exit, cascade.entry) = (ch, Some(ee));
         core.reload(&cascade).unwrap();
         assert!(trace(&["--proxy", &format!("http://127.0.0.1:{HTTP_PORT}")]).contains(&other_loc));
+        let config = core.path.clone();
         core.stop();
+        assert!(!config.exists(), "config with credentials removed");
     }
 
     /// System-wide mode on this machine through pkexec (asks for the password; build target/debug/hitori first):
@@ -796,7 +794,9 @@ mod tests {
         assert_eq!(loc(3), want, "still tunneled after a restart");
         eprintln!("system-wide: {want}, restart and kill switch ok");
 
+        let config = core.path.clone();
         core.stop();
+        assert!(!config.exists(), "config with credentials removed");
         assert_eq!(rules(), 0, "rules removed");
         assert!(sh("ip route show table 26869").is_empty(), "table flushed");
         assert!(sh("ip -br link show dev hitori0 2>&1").contains("does not exist"), "tun gone");
