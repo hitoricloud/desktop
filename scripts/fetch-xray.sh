@@ -41,15 +41,17 @@ sha="$(jq -r .commit.id <<<"$job")"
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-get "$api/jobs/$id/artifacts/dist/xray-linux-amd64" "$tmp/xray-linux-amd64"
-get "$api/jobs/$id/artifacts/dist/SHA256SUMS" "$tmp/SHA256SUMS"
-(cd "$tmp" && sha256sum --check --strict --quiet SHA256SUMS)
-chmod 755 "$tmp/xray-linux-amd64"
-version="$("$tmp/xray-linux-amd64" version | head -n1)"
+# SHA256SUMS names the file as CI built it: dist/xray-linux-amd64.
+mkdir "$tmp/dist"
+get "$api/jobs/$id/artifacts/dist/xray-linux-amd64" "$tmp/dist/xray-linux-amd64"
+get "$api/jobs/$id/artifacts/dist/SHA256SUMS" "$tmp/dist/SHA256SUMS"
+(cd "$tmp" && sha256sum --check --strict --quiet dist/SHA256SUMS)
+chmod 755 "$tmp/dist/xray-linux-amd64"
+version="$("$tmp/dist/xray-linux-amd64" version | head -n1)"
 
 mkdir -p "$out"
-install -m 755 "$tmp/xray-linux-amd64" "$out/xray"
+install -m 755 "$tmp/dist/xray-linux-amd64" "$out/xray"
 jq -n --arg project "$project" --arg ref "$ref" --argjson job "$id" --arg commit "$sha" --arg version "$version" \
-  --arg sha256 "$(cut -d' ' -f1 "$tmp/SHA256SUMS")" --arg fetched "$(date -u +%FT%TZ)" \
+  --arg sha256 "$(cut -d' ' -f1 "$tmp/dist/SHA256SUMS")" --arg fetched "$(date -u +%FT%TZ)" \
   '{project: $project, ref: $ref, job: $job, commit: $commit, version: $version, sha256: $sha256, fetched: $fetched}' >"$out/xray.json"
 echo "fetch-xray: $version (job $id, ${sha:0:8}) -> bin/xray"
