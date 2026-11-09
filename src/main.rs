@@ -1,5 +1,8 @@
 mod app;
 mod data;
+mod store;
+mod sub;
+mod xray;
 mod fx;
 mod input;
 mod map;
@@ -11,6 +14,7 @@ mod theme;
 mod tray;
 mod ui;
 mod views;
+mod vpn;
 mod vtile;
 
 use std::borrow::Cow;
@@ -76,7 +80,8 @@ fn main() {
             .filter_map(|w| Assets::get(&format!("fonts/GoogleSans-{w}.ttf")).map(|f| f.data))
             .collect();
         cx.text_system().add_fonts(fonts).expect("fonts");
-        cx.set_global(theme::Theme::dark());
+        let dark = store::load::<store::Settings>(&store::Settings::path()).unwrap_or_default().dark;
+        cx.set_global(if dark { theme::Theme::dark() } else { theme::Theme::light() });
         cx.bind_keys(app::bindings());
         cx.bind_keys(input::bindings());
         if std::env::var("HITORI_TEXTTEST").is_ok() {

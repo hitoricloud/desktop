@@ -4,7 +4,7 @@ use std::time::Instant;
 use gpui::{AnyElement, Context, Corner, Div, Hsla, MouseButton, SharedString, Window, anchored, deferred, div, prelude::*, px};
 
 use crate::app::{Conn, Hitori, Menu, Mode, Panel, Place};
-use crate::data::{self, ACCOUNT, APPS, AppInfo, AppRule, RuleMode, Scope, SiteRule, Suggestion, ago, app, fixed1, js_num, km, server};
+use crate::data::{self, AppInfo, AppRule, RuleMode, Scope, SiteRule, Suggestion, ago, app, fixed1, js_num, server};
 use crate::map::Padding;
 use crate::fx::{Fx, fx};
 use crate::theme::{Theme, color};
@@ -47,7 +47,7 @@ pub fn site_label(r: SiteRule) -> &'static str {
 }
 
 pub fn subject(s: &Suggestion) -> String {
-    if s.scope == Scope::Site { s.target.to_owned() } else { app(s.app_id).name.to_owned() }
+    if s.scope == Scope::Site || s.app_id.is_empty() { s.target.to_owned() } else { app(s.app_id).name.to_owned() }
 }
 
 pub fn suggestion_detail(s: &Suggestion) -> String {
@@ -280,15 +280,15 @@ impl Hitori {
             .hover(move |s| s.bg(accent))
             .when(open, |d| d.bg(accent))
             .on_click(cx.listener(|this, _, _, cx| this.toggle_menu(Menu::NavUser, cx)))
-            .child(avatar(&ACCOUNT.name[..1].to_uppercase(), &t))
+            .child(avatar(&self.initial(), &t))
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .flex_1()
                     .min_w_0()
-                    .child(div().text_px(14., 16.).medium().truncate().child(ACCOUNT.name))
-                    .child(div().text_px(12., 16.).text_color(t.muted_fg).truncate().child(format!("{} · {} days left", ACCOUNT.plan, ACCOUNT.days_left))),
+                    .child(div().text_px(14., 16.).medium().truncate().child(self.account_name()))
+                    .child(div().text_px(12., 16.).text_color(t.muted_fg).truncate().child(self.account_line())),
             )
             .child(icon("chevrons-up-down", 16., t.foreground));
         let popup = self.menu_phase(Menu::NavUser).map(|ph| {
@@ -300,8 +300,8 @@ impl Hitori {
                         menu_label(&t)
                             .flex()
                             .flex_col()
-                            .child(ACCOUNT.telegram)
-                            .child(div().xs().normal().text_color(t.muted_fg).child(format!("renews {}", ACCOUNT.renews_on)))
+                            .child(self.account_name())
+                            .child(div().xs().normal().text_color(t.muted_fg).child(self.renews()))
                             .into_any_element(),
                         menu_separator(&t).into_any_element(),
                     ];
@@ -327,14 +327,19 @@ impl Hitori {
                 .on_click(cx.listener(|this, _, _, cx| this.open_panel(Panel::Settings, cx)))
                 .into_any_element(),
             menu_separator(t).into_any_element(),
-            menu_item("m-signout", t, true)
-                .child(icon("log-out", 16., t.destructive))
-                .child("Sign out")
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.menu = None;
-                    cx.notify();
-                }))
-                .into_any_element(),
+            if self.s.signed_in {
+                menu_item("m-signout", t, true)
+                    .child(icon("log-out", 16., t.destructive))
+                    .child("Sign out")
+                    .on_click(cx.listener(|this, _, _, cx| this.sign_out(cx)))
+                    .into_any_element()
+            } else {
+                menu_item("m-signin", t, false)
+                    .child(icon("log-in", 16., t.muted_fg))
+                    .child("Sign in")
+                    .on_click(cx.listener(|this, _, _, cx| this.open_panel(Panel::Account, cx)))
+                    .into_any_element()
+            },
         ]
     }
 
@@ -344,7 +349,7 @@ impl Hitori {
         let open = self.menu == Some(Menu::TrayAccount);
         let trigger = button("tray-account", Variant::Ghost, Size::IconLg, true, &t)
             .rest(if open { t.ghost_hover() } else { gpui::transparent_black() })
-            .child(avatar(&ACCOUNT.name[..1].to_uppercase(), &t))
+            .child(avatar(&self.initial(), &t))
             .on_click(cx.listener(|this, _, _, cx| this.toggle_menu(Menu::TrayAccount, cx)));
         let popup = self.menu_phase(Menu::TrayAccount).map(|ph| {
             popover(
@@ -355,8 +360,8 @@ impl Hitori {
                         menu_label(&t)
                             .flex()
                             .flex_col()
-                            .child(ACCOUNT.telegram)
-                            .child(div().xs().normal().text_color(t.muted_fg).child(format!("{} · {} days left", ACCOUNT.plan, ACCOUNT.days_left)))
+                            .child(self.account_name())
+                            .child(div().xs().normal().text_color(t.muted_fg).child(self.account_line()))
                             .into_any_element(),
                         menu_separator(&t).into_any_element(),
                     ];
@@ -487,8 +492,9 @@ impl Hitori {
 
     /// Every app and site with a rule, apps by traffic; anything else is autorouted and not listed.
     pub fn active_rules(&self, big: bool, sites: bool, place: Place, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut apps: Vec<&'static AppInfo> = APPS.iter().filter(|a| self.app_route(a.id).is_some()).collect();
-        apps.sort_by(|a, b| b.mbps.partial_cmp(&a.mbps).unwrap().then(a.last_seen_min.cmp(&b.last_seen_min)));
+        let mut apps: Vec<&'static AppInfo> = self.s.app_routes.iter().map(|(a, _)| app(a)).collect();
+        // Recently active first; apps not seen this session last.
+        apps.sort_by_key(|a| (data::seen_min(a.id).unwrap_or(u32::MAX), a.name));
         let mut col = div().flex().flex_col().when(big, |d| d.gap(px(8.)));
         for a in apps {
             col = col.child(self.app_rule(a, big, place, window, cx));
@@ -578,10 +584,7 @@ impl Hitori {
             if let Some(p) = route.protocol {
                 footer = footer.child(div().child("·")).child(div().child(p.label()));
             }
-            if a.mbps > 0. && route.mode != RuleMode::Block {
-                footer = footer.child(div().child("·")).child(icon("arrow-down", 12., t.muted_fg)).child(div().child(format!("{} Mbit/s", fixed1(a.mbps))));
-            }
-            self.rule_card(id, open, &t).children(self.card_body(app_badge(a), a.process, Some(ago(a.last_seen_min)), &route, footer, &t))
+            self.rule_card(id, open, &t).children(self.card_body(app_badge(a), a.process, data::seen_min(a.id).map(ago), &route, footer, &t))
         } else {
             self.rule_line(id, open, &t)
                 .child(app_badge(a))
@@ -631,7 +634,7 @@ impl Hitori {
 
     pub fn add_app(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme(cx);
-        let rest: Vec<&'static AppInfo> = APPS.iter().filter(|a| self.app_route(a.id).is_none()).collect();
+        let rest: Vec<&'static AppInfo> = data::running().into_iter().filter(|a| self.app_route(a.id).is_none()).collect();
         let trigger = button("add-app", Variant::Ghost, Size::IconSm, true, &t)
             .when(rest.is_empty(), |d| d.opacity(0.5))
             .child(icon("plus", 16., t.foreground))
@@ -644,7 +647,7 @@ impl Hitori {
                     menu_item(SharedString::from(format!("add-{id}")), &t, false)
                         .child(app_badge(a))
                         .child(div().flex_1().child(a.name))
-                        .child(div().xs().text_color(t.muted_fg).child(ago(a.last_seen_min)))
+                        .children(data::seen_min(a.id).map(|m| div().xs().text_color(t.muted_fg).child(ago(m))))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.route(id, Some(AppRule::mode(RuleMode::Vpn)), window, cx);
                             this.open_palette(Mode::Rule(id), window, cx);
@@ -659,7 +662,7 @@ impl Hitori {
 
     pub fn suggestion_card(&self, s: &Suggestion, floating: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme(cx);
-        let a = app(s.app_id);
+        let known = (!s.app_id.is_empty()).then(|| app(s.app_id));
         let (sid, accept_id, dismiss_id) = (s.id, s.id, s.id);
         div()
             .flex()
@@ -675,9 +678,16 @@ impl Hitori {
                     .items_center()
                     .gap(px(8.))
                     .h(px(20.))
-                    .child(if s.scope == Scope::Site { site_badge(&t) } else { app_badge(a) })
-                    .child(div().flex_1().min_w_0().truncate().xs().text_color(t.muted_fg).child(if s.scope == Scope::Site { format!("in {}", a.name) } else { s.target.to_owned() }))
-                    .child(div().xs().text_color(t.muted_fg).child(ago(s.at_min)))
+                    .child(match known {
+                        Some(a) if s.scope == Scope::App => app_badge(a),
+                        _ => site_badge(&t),
+                    })
+                    .child(div().flex_1().min_w_0().truncate().xs().text_color(t.muted_fg).child(match known {
+                        Some(a) if s.scope == Scope::Site => format!("in {}", a.name),
+                        Some(_) => s.target.to_owned(),
+                        None => "website".to_owned(),
+                    }))
+                    .child(div().xs().text_color(t.muted_fg).child(ago((s.at.elapsed().as_secs() / 60) as u32)))
                     .when(floating, |d| {
                         d.child(
                             button(SharedString::from(format!("later-{sid}")), Variant::Ghost, Size::IconXs, true, &t)
@@ -779,7 +789,9 @@ impl Hitori {
             Conn::Connecting => "Connecting…",
             Conn::Off => "Unprotected",
         };
+        let error = self.s.error.clone().filter(|_| self.s.conn == Conn::Off);
         let where_: Option<String> = match self.s.conn {
+            Conn::On if s.ip.is_empty() => Some(format!("{}, {}", s.city, s.country)),
             Conn::On => Some(format!("{} · {}, {}", s.ip, s.city, s.country)),
             Conn::Connecting => Some(format!("{}, {}", s.city, s.country)),
             Conn::Off => self.s.me.as_ref().map(|m| {
@@ -800,9 +812,10 @@ impl Hitori {
                     .flex_col()
                     .min_w_0()
                     .child(div().base().semibold().tight().text_color(tone).child(title))
-                    .child(match where_ {
-                        Some(w) => div().h(px(16.)).truncate().xs().text_color(t.muted_fg).child(w).into_any_element(),
-                        None => div().h(px(16.)).child(skeleton("status-skeleton", 144., 16., &t)).into_any_element(),
+                    .child(match (error, where_) {
+                        (Some(e), _) => div().h(px(16.)).truncate().xs().text_color(t.destructive).child(e).into_any_element(),
+                        (None, Some(w)) => div().h(px(16.)).truncate().xs().text_color(t.muted_fg).child(w).into_any_element(),
+                        (None, None) => div().h(px(16.)).child(skeleton("status-skeleton", 144., 16., &t)).into_any_element(),
                     }),
             )
     }
@@ -889,6 +902,7 @@ impl Hitori {
     pub fn power_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme(cx);
         let (variant, label, fg) = match self.s.conn {
+            Conn::Off if !self.s.signed_in => (Variant::Default, "Sign in", t.primary_fg),
             Conn::Off => (Variant::Default, "Connect", t.primary_fg),
             Conn::Connecting => (Variant::Secondary, "Cancel", t.secondary_fg),
             Conn::On => (Variant::Secondary, "Disconnect", t.secondary_fg),
@@ -904,22 +918,14 @@ impl Hitori {
 
     fn stats(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme(cx);
-        let s = server(self.s.server_id);
         let secs = self.s.connected_at.map(|c| Instant::now().saturating_duration_since(c).as_secs_f64()).unwrap_or(0.);
-        // Mock traffic so the layout can be judged with moving numbers.
-        let down = 18. + 9. * (secs / 3.).sin().abs();
-        let up = 2. + 1.5 * (secs / 4.).cos().abs();
-        let ping = match self.s.entry_id {
-            None => s.ping,
-            Some(e) => {
-                let en = server(e);
-                (en.ping as f64 + km((en.lat, en.lon), (s.lat, s.lon)) / 100. * 1.5 + 2.).round() as u32
-            }
-        };
+        let st = &self.s.stats;
+        let (down, up) = (st.down, st.up);
+        let used = server(self.s.server_id).variant(self.s.protocol).map_or(self.s.protocol, |(p, _)| p);
         let rows = [
-            ("Protocol", self.s.protocol.label().to_owned()),
-            ("Server load", format!("{}%", s.load)),
-            ("Latency", format!("{ping} ms")),
+            ("Protocol", used.label().to_owned()),
+            ("Latency", st.latency.map_or("—".into(), |ms| format!("{ms} ms"))),
+            ("Transferred", data::bytes(st.total)),
             ("Session", uptime(secs as u64)),
         ];
         let speed = |name: &str, label: &str, v: f64| {
@@ -998,5 +1004,31 @@ impl Hitori {
 impl Hitori {
     pub fn menu_phase(&self, which: Menu) -> Option<(f32, bool)> {
         self.menu_fx.phase(which, 150., 150., crate::fx::ease)
+    }
+}
+
+impl Hitori {
+    pub fn account_name(&self) -> String {
+        match &self.s.account {
+            Some(a) if !a.name.is_empty() => a.name.clone(),
+            _ if self.s.signed_in => "Hitori".into(),
+            _ => "Not signed in".into(),
+        }
+    }
+
+    pub fn initial(&self) -> String {
+        self.account_name().chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default()
+    }
+
+    pub fn account_line(&self) -> String {
+        match &self.s.account {
+            Some(a) => a.summary(),
+            None if self.s.signed_in => "Loading…".into(),
+            None => "Paste your subscription link".into(),
+        }
+    }
+
+    pub fn renews(&self) -> String {
+        self.s.account.as_ref().and_then(|a| a.expires.clone()).map(|d| format!("renews {d}")).unwrap_or_default()
     }
 }

@@ -1,15 +1,14 @@
 //! Application state and actions, mirroring the prototype's `state/vpn.ts`.
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use gpui::{
-    App, AppContext, Context, Entity, FocusHandle, Focusable, KeyBinding, Render, Subscription, Task, Window, actions, div, prelude::*,
+    App, AppContext, Context, Entity, FocusHandle, Focusable, KeyBinding, Render, Subscription, Window, actions, div, prelude::*,
 };
 
-use crate::data::{self, AppRule, RuleMode, SiteRule, Suggestion};
+use crate::data::{self, AppRule, RuleMode, SiteRule};
 use crate::fx::Presence;
 use crate::input::TextInput;
 use crate::map::MapState;
-use crate::net::{self, Geo};
 use crate::theme::{Theme, theme};
 use crate::ui::Tw;
 
@@ -131,147 +130,7 @@ impl Render for Shell {
     }
 }
 
-#[derive(Clone, PartialEq)]
-pub struct Me {
-    pub ip: String,
-    pub geo: Option<Geo>,
-}
-
-/// VPN state every window shows: the main window and the tray popup mirror one `Vpn` model.
-#[derive(Clone, PartialEq)]
-pub struct Shared {
-    pub conn: Conn,
-    pub connected_at: Option<Instant>,
-    pub server_id: &'static str,
-    pub entry_id: Option<&'static str>,
-    pub recents: Vec<&'static str>,
-    pub me: Option<Me>,
-    pub protocol: Protocol,
-    pub auto_connect: bool,
-    pub kill_switch: bool,
-    pub autoroute: bool,
-    pub app_routes: Vec<(&'static str, AppRule)>,
-    pub sites: Vec<(&'static str, SiteRule)>,
-    pub suggestions: Vec<Suggestion>,
-    pub snoozed: Vec<&'static str>,
-    pub rules_big: bool,
-}
-
-/// The connection itself (mocked) and the state shared by all windows and the tray icon.
-pub struct Vpn {
-    pub s: Shared,
-    handshake: Option<Task<()>>,
-    ticker: Option<Task<()>>,
-}
-
-impl Vpn {
-    pub fn new(cx: &mut Context<Self>) -> Self {
-        let mut this = Self {
-            s: Shared {
-                conn: Conn::Off,
-                connected_at: None,
-                server_id: data::fastest().id,
-                entry_id: None,
-                recents: vec![],
-                me: None,
-                protocol: Protocol::Tls,
-                auto_connect: false,
-                kill_switch: true,
-                autoroute: true,
-                app_routes: data::initial_routes(),
-                sites: data::initial_sites(),
-                suggestions: data::initial_suggestions(),
-                snoozed: vec![],
-                rules_big: true,
-            },
-            handshake: None,
-            ticker: None,
-        };
-        this.load_me(cx);
-        this
-    }
-
-    fn load_me(&mut self, cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| {
-            let Some(ip) = cx.background_executor().spawn(async { net::my_ip() }).await else { return };
-            let ip2 = ip.clone();
-            this.update(cx, |this, cx| {
-                this.s.me = Some(Me { ip: ip.clone(), geo: None });
-                cx.notify();
-            })
-            .ok();
-            let geo = cx.background_executor().spawn(async move { net::locate(&ip2) }).await;
-            this.update(cx, |this, cx| {
-                this.s.me = Some(Me { ip, geo });
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    fn remember(&mut self) {
-        let id = self.s.server_id;
-        self.s.recents.retain(|r| *r != id);
-        self.s.recents.insert(0, id);
-        self.s.recents.truncate(3);
-    }
-
-    /// The tunnel is mocked; the handshake is a fixed 1.4s delay.
-    pub fn connect(&mut self, cx: &mut Context<Self>) {
-        self.remember();
-        self.s.conn = Conn::Connecting;
-        self.s.connected_at = None;
-        self.ticker = None;
-        self.handshake = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(Duration::from_millis(1400)).await;
-            this.update(cx, |this, cx| this.connected(cx)).ok();
-        }));
-        cx.notify();
-    }
-
-    /// Connected now, without the handshake (start-up states for screenshots).
-    pub fn connected(&mut self, cx: &mut Context<Self>) {
-        if self.s.conn == Conn::Off {
-            self.remember();
-        }
-        self.handshake = None;
-        self.s.conn = Conn::On;
-        self.s.connected_at = Some(Instant::now());
-        // Notify once a second for the session clock and mock traffic.
-        self.ticker = Some(cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(Duration::from_secs(1)).await;
-                if this.update(cx, |_, cx| cx.notify()).is_err() {
-                    break;
-                }
-            }
-        }));
-        cx.notify();
-    }
-
-    pub fn disconnect(&mut self, cx: &mut Context<Self>) {
-        self.handshake = None;
-        self.ticker = None;
-        self.s.conn = Conn::Off;
-        self.s.connected_at = None;
-        cx.notify();
-    }
-
-    pub fn toggle(&mut self, cx: &mut Context<Self>) {
-        if self.s.conn == Conn::Off { self.connect(cx) } else { self.disconnect(cx) }
-    }
-
-    /// Connect to a location (tray menu); picking the live one again does nothing.
-    pub fn go(&mut self, id: &'static str, cx: &mut Context<Self>) {
-        let was = (self.s.conn, self.s.server_id);
-        self.s.server_id = id;
-        if self.s.entry_id == Some(id) {
-            self.s.entry_id = None;
-        }
-        if was.0 == Conn::Off || was.1 != id { self.connect(cx) } else { cx.notify() }
-    }
-}
+pub use crate::vpn::{Shared, Vpn};
 
 pub struct Hitori {
     pub focus: FocusHandle,
@@ -287,6 +146,8 @@ pub struct Hitori {
     pub palette: Option<Mode>,
     pub palette_index: usize,
     pub search: Entity<TextInput>,
+    /// Subscription link field on the Account sheet.
+    pub link: Entity<TextInput>,
     pub menu: Option<Menu>,
     pub map: MapState,
     pub ring: std::cell::Cell<Option<Ring>>,
@@ -305,6 +166,7 @@ impl Hitori {
     pub fn new(variant: Variant, vpn: Entity<Vpn>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let t = theme(cx);
         let search = cx.new(|cx| TextInput::new("Search countries", t.muted_fg, t.foreground, cx));
+        let link = cx.new(|cx| TextInput::new("https://…/sub/…", t.muted_fg, t.foreground, cx));
         let changes = cx.observe(&search, |this, _, cx| {
             this.palette_index = 0;
             cx.notify();
@@ -316,10 +178,7 @@ impl Hitori {
         let vpn_changes = cx.observe(&vpn, |this, vpn, cx| {
             let model = vpn.read(cx).s.clone();
             if this.s != this.published {
-                this.s.conn = model.conn;
-                this.s.connected_at = model.connected_at;
-                this.s.me = model.me.clone();
-                this.s.recents = model.recents.clone();
+                this.s.adopt(&model);
                 this.published = model;
                 this.push(cx);
             } else {
@@ -341,6 +200,7 @@ impl Hitori {
             palette: None,
             palette_index: 0,
             search,
+            link,
             menu: None,
             map: MapState::new(),
             ring: Default::default(),
@@ -449,8 +309,28 @@ impl Hitori {
         self.with_vpn(cx, |v, cx| v.connect(cx));
     }
 
+    /// Power button: without an account it opens sign-in instead.
     pub fn toggle(&mut self, cx: &mut Context<Self>) {
+        if !self.s.signed_in {
+            self.open_panel(Panel::Account, cx);
+            return;
+        }
         self.with_vpn(cx, |v, cx| v.toggle(cx));
+    }
+
+    pub fn sign_in(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let link = self.link.read(cx).content.to_string();
+        if link.trim().is_empty() {
+            window.focus(&self.link.read(cx).focus_handle(cx));
+            return;
+        }
+        self.with_vpn(cx, |v, cx| v.sign_in(link, cx));
+    }
+
+    pub fn sign_out(&mut self, cx: &mut Context<Self>) {
+        self.menu = None;
+        self.link.update(cx, |input, _| input.reset());
+        self.with_vpn(cx, |v, cx| v.sign_out(cx));
     }
 
     /// Picking a location always connects there; picking the live one again does nothing.
@@ -526,6 +406,9 @@ impl Hitori {
     }
 
     pub fn dismiss(&mut self, id: &str, cx: &mut Context<Self>) {
+        if let Some(hit) = self.s.suggestions.iter().find(|s| s.id == id) {
+            self.s.dismissed.push(hit.target.to_owned());
+        }
         self.s.suggestions.retain(|s| s.id != id);
         cx.notify();
     }
@@ -568,11 +451,14 @@ impl Hitori {
 
     pub fn set_dark(&mut self, dark: bool, cx: &mut Context<Self>) {
         cx.set_global(if dark { Theme::dark() } else { Theme::light() });
+        self.s.dark = dark;
         let t = theme(cx);
-        self.search.update(cx, |input, _| {
-            input.placeholder_color = t.muted_fg;
-            input.caret = t.foreground;
-        });
+        for input in [&self.search, &self.link] {
+            input.update(cx, |input, _| {
+                input.placeholder_color = t.muted_fg;
+                input.caret = t.foreground;
+            });
+        }
         self.map.restyle();
         cx.notify();
     }

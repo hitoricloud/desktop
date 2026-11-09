@@ -157,9 +157,13 @@ pub fn config(plan: &Plan, ports: Ports) -> Result<Value, String> {
             if !custom {
                 return Some("proxy".into());
             }
-            let exit = r.exit.map(crate::data::server).unwrap_or(exit);
+            let find = |id: &str| plan.servers.iter().copied().find(|s| s.id == id);
+            let exit = match r.exit {
+                Some(id) => find(id)?,
+                None => exit,
+            };
             let via = match (r.via, r.exit) {
-                (Some(v), _) => Some(crate::data::server(v)),
+                (Some(v), _) => Some(find(v)?),
                 (None, None) => entry,
                 (None, Some(_)) => None,
             };
@@ -339,9 +343,11 @@ impl Core {
         let log = Log::default();
         if !plan.tun {
             let mut cmd = Command::new(&xray);
-            cmd.args(["run", "-c"]).arg(&path).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
+            cmd.args(["run", "-c"]).arg(&path).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
             die_with_parent(&mut cmd);
             let mut child = cmd.spawn().map_err(|e| format!("Cannot start the core: {e}"))?;
+            // The core logs to stdout; stderr carries Go panics.
+            log.follow(child.stdout.take().unwrap());
             log.follow(child.stderr.take().unwrap());
             let mut core = Core { child, helper: None, helper_out: None, ports, tun: false, log, path };
             core.wait_serving(Duration::from_secs(10))?;
@@ -453,24 +459,6 @@ impl Core {
         }
     }
 
-    /// Exit address through the tunnel itself.
-    pub fn exit_ip(&self) -> Option<String> {
-        let agent = ureq::AgentBuilder::new().proxy(ureq::Proxy::new(format!("http://127.0.0.1:{}", self.ports.probe)).ok()?).timeout(Duration::from_secs(15)).build();
-        let v: Value = agent.get("https://stat.ripe.net/data/whats-my-ip/data.json").call().ok()?.into_json().ok()?;
-        v["data"]["ip"].as_str().map(str::to_owned)
-    }
-
-    /// Through the tunnel: can `host:443` be reached? (Confirms a suggestion before showing it.)
-    pub fn reachable(&self, host: &str) -> bool {
-        let Ok(mut s) = TcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], self.ports.probe)), Duration::from_secs(2)) else { return false };
-        let _ = s.set_read_timeout(Some(Duration::from_secs(10)));
-        if write!(s, "CONNECT {host}:443 HTTP/1.1\r\nHost: {host}:443\r\n\r\n").is_err() {
-            return false;
-        }
-        let mut line = String::new();
-        BufReader::new(s).read_line(&mut line).is_ok() && line.split_whitespace().nth(1) == Some("200")
-    }
-
     pub fn stop(mut self) {
         self.shutdown();
     }
@@ -498,6 +486,30 @@ impl Drop for Core {
             self.shutdown();
         }
     }
+}
+
+/// Exit address through the tunnel itself (the `probe-in` listener always goes through `proxy`).
+pub fn exit_ip(probe: u16) -> Option<String> {
+    // Socket timeouts also bound the proxy's CONNECT handshake, which the overall timeout does not.
+    let agent = ureq::AgentBuilder::new()
+        .proxy(ureq::Proxy::new(format!("http://127.0.0.1:{probe}")).ok()?)
+        .timeout(Duration::from_secs(15))
+        .timeout_read(Duration::from_secs(10))
+        .timeout_write(Duration::from_secs(10))
+        .build();
+    let v: Value = agent.get("https://stat.ripe.net/data/whats-my-ip/data.json").call().ok()?.into_json().ok()?;
+    v["data"]["ip"].as_str().map(str::to_owned)
+}
+
+/// Through the tunnel: can `host:443` be reached? (Confirms a suggestion before showing it.)
+pub fn reachable(probe: u16, host: &str) -> bool {
+    let Ok(mut s) = TcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], probe)), Duration::from_secs(2)) else { return false };
+    let _ = s.set_read_timeout(Some(Duration::from_secs(10)));
+    if write!(s, "CONNECT {host}:443 HTTP/1.1\r\nHost: {host}:443\r\n\r\n").is_err() {
+        return false;
+    }
+    let mut line = String::new();
+    BufReader::new(s).read_line(&mut line).is_ok() && line.split_whitespace().nth(1) == Some("200")
 }
 
 /// Measure every server once with a throwaway core; `None` for servers that did not answer.
@@ -608,7 +620,7 @@ mod tests {
         assert_eq!(outs.iter().find(|o| o["tag"] == "entry").unwrap()["streamSettings"]["network"], "grpc");
         assert_eq!(rule_for(&c, "process", "steamwebhelper").unwrap()["outboundTag"], "direct");
         assert_eq!(rule_for(&c, "process", "qbittorrent").unwrap()["outboundTag"], "block");
-        assert_eq!(rule_for(&c, "process", "helium").unwrap()["outboundTag"], "p-bb-2-Grpc");
+        assert_eq!(rule_for(&c, "process", "helium").map(|r| r["outboundTag"].clone()), Some(json!("p-bb-2-Grpc")), "{:#}", c["routing"]["rules"]);
         assert_eq!(rule_for(&c, "domain", "domain:bank.example").unwrap()["outboundTag"], "direct");
         let (block, site, direct) = (position(&c, "process", "qbittorrent").unwrap(), position(&c, "domain", "domain:bank.example").unwrap(), position(&c, "process", "steam").unwrap());
         assert!(block < site && site < direct, "blocked apps, then sites, then other apps");
@@ -627,4 +639,74 @@ mod tests {
         assert!(c["inbounds"].as_array().unwrap().iter().any(|i| i["protocol"] == "tun" && i["settings"]["name"] == TUN_NAME));
         assert!(!c["inbounds"].as_array().unwrap().iter().any(|i| i["port"] == SOCKS_PORT));
     }
+
+    /// Against the real subscription and core: HITORI_TEST_SUB=<subscription JSON> cargo test live -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn live_subscription_through_the_real_core() {
+        let Ok(path) = std::env::var("HITORI_TEST_SUB") else { return };
+        let sub = crate::sub::parse(&std::fs::read(path).unwrap()).unwrap();
+        crate::data::set_servers(sub.servers);
+        let servers = crate::data::servers();
+        let xray = xray_path().expect("bin/xray");
+        let pings = probe(&servers, Protocol::Tls).unwrap();
+        eprintln!("probe: {pings:?}");
+        assert!(pings.iter().filter(|(_, p)| p.is_some()).count() >= servers.len() / 2);
+        let mut up: Vec<_> = pings.iter().filter_map(|(id, p)| Some((*p.as_ref()?, *id))).collect();
+        up.sort();
+        let pick = |i: usize| servers.iter().copied().find(|s| s.id == up[i].1).unwrap();
+        // Two answering servers in different countries.
+        let ee = pick(0);
+        let ch = (1..up.len()).map(pick).find(|s| s.code != ee.code).unwrap();
+        let (main_loc, other_loc) = (format!("loc={}", ee.code), format!("loc={}", ch.code));
+        eprintln!("exit {} other {}", ee.id, ch.id);
+        let mut plan = Plan {
+            exit: ee,
+            entry: None,
+            protocol: Protocol::Tls,
+            autoroute: false,
+            tun: false,
+            kill_switch: true,
+            apps: vec![("curl", AppRule { exit: Some(ch.id), ..AppRule::mode(RuleMode::Vpn) })],
+            sites: vec![("example.org", SiteRule::Direct)],
+            servers: servers.clone(),
+            tunnel_rules: Arc::new(sub.tunnel_rules),
+            base_rules: Arc::new(sub.base_rules),
+            dns: Arc::new(sub.dns),
+        };
+        // Every generated variant must pass the core's own validation.
+        for (tun, entry, auto, proto) in [(false, None, false, Protocol::Tls), (true, None, true, Protocol::Hy2), (false, Some(ch), true, Protocol::Grpc)] {
+            let mut p = plan.clone();
+            (p.tun, p.entry, p.autoroute, p.protocol) = (tun, entry, auto, proto);
+            let path = std::env::temp_dir().join(format!("hitori-test-{}.json", std::process::id()));
+            crate::store::write(&path, &serde_json::to_vec(&config(&p, Ports { probe: free_port(), metrics: free_port() }).unwrap()).unwrap(), true).unwrap();
+            let out = Command::new(&xray).args(["run", "-test", "-c"]).arg(&path).output().unwrap();
+            std::fs::remove_file(&path).unwrap();
+            assert!(out.status.success(), "tun={tun} entry={} auto={auto}: {}", entry.is_some(), String::from_utf8_lossy(&out.stdout));
+        }
+        plan.apps.clear();
+        let core = Core::start(&plan).unwrap();
+        let ip = exit_ip(core.ports.probe).expect("exit ip through the tunnel");
+        eprintln!("exit ip via {}: {ip}", ee.id);
+        let trace = |args: &[&str]| String::from_utf8(Command::new("curl").args(args).args(["-s", "-m", "15", "https://1.1.1.1/cdn-cgi/trace"]).output().unwrap().stdout).unwrap();
+        assert!(trace(&["--socks5-hostname", &format!("127.0.0.1:{SOCKS_PORT}")]).contains(&main_loc));
+        std::thread::sleep(Duration::from_secs(4));
+        let m = metrics(core.ports.metrics).unwrap();
+        eprintln!("metrics: down {} up {} proxy delay {:?}", m.down, m.up, m.delays.get("proxy"));
+        assert!(m.down > 0 && m.up > 0);
+        assert!(reachable(core.ports.probe, "www.gstatic.com"));
+        // Per-app exit: curl's traffic goes to Switzerland while the main exit stays Estonia.
+        let mut per_app = plan.clone();
+        per_app.apps = vec![("curl", AppRule { exit: Some(ch.id), ..AppRule::mode(RuleMode::Vpn) })];
+        let mut core = core;
+        core.reload(&per_app).unwrap();
+        assert!(trace(&["--socks5-hostname", &format!("127.0.0.1:{SOCKS_PORT}")]).contains(&other_loc));
+        // Cascade: Switzerland exit through Estonia.
+        let mut cascade = plan.clone();
+        (cascade.exit, cascade.entry) = (ch, Some(ee));
+        core.reload(&cascade).unwrap();
+        assert!(trace(&["--proxy", &format!("http://127.0.0.1:{HTTP_PORT}")]).contains(&other_loc));
+        core.stop();
+    }
 }
+

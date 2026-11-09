@@ -122,12 +122,6 @@ pub fn fastest() -> &'static Server {
     all.iter().filter_map(|s| ping(s.id).map(|p| (p, *s))).min_by_key(|(p, _)| *p).map(|(_, s)| s).or_else(|| all.first().copied()).unwrap_or(&NONE)
 }
 
-pub fn km(a: (f64, f64), b: (f64, f64)) -> f64 {
-    let r = std::f64::consts::PI / 180.;
-    let h = ((b.0 - a.0) * r / 2.).sin().powi(2) + (a.0 * r).cos() * (b.0 * r).cos() * ((b.1 - a.1) * r / 2.).sin().powi(2);
-    12742. * h.sqrt().asin()
-}
-
 /// English name and capital of the countries nodes are likely to be in, for the list and the map before an exit is seen.
 pub fn country(code: &str) -> Option<(&'static str, f64, f64)> {
     Some(match code {

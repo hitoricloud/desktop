@@ -10,7 +10,7 @@ use gpui::{
 };
 
 use crate::app::{Conn, Hitori, Ring};
-use crate::data::{SERVERS, Server, server};
+use crate::data::{self, Server, server};
 use crate::vtile::{self, VTile};
 use crate::theme::Theme;
 use crate::ui::{MD, Tw, flag};
@@ -163,12 +163,13 @@ impl Hitori {
     pub fn map_view(&mut self, size: (f32, f32), pad: Padding, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = self.theme(cx);
         let scale = window.scale_factor();
+        let frame = format!("{:?}:{}", stops(self), self.s.me.as_ref().is_some_and(|m| m.geo.is_some()));
         let m = &mut self.map;
         if m.size != size {
             m.size = size;
             m.framed.clear();
         }
-        let key = format!("{}:{:?}:{}", self.s.server_id, self.s.entry_id, self.s.me.as_ref().is_some_and(|m| m.geo.is_some()));
+        let key = frame;
         if key != m.framed {
             m.framed = key;
             let mut points = vec![];
@@ -376,7 +377,7 @@ impl Hitori {
     }
 
     fn markers(&self, t: &Theme, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let mut out: Vec<AnyElement> = SERVERS.iter().map(|s| self.server_marker(s, t, window, cx)).collect();
+        let mut out: Vec<AnyElement> = data::servers().into_iter().map(|s| self.server_marker(s, t, window, cx)).collect();
         if let Some(g) = self.s.me.as_ref().and_then(|m| m.geo.as_ref()) {
             let (x, y) = self.map.screen(unit(g.lat, g.lon));
             out.push(

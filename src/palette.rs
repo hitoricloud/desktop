@@ -2,7 +2,7 @@
 use gpui::{AnyElement, Context, Hsla, MouseButton, SharedString, Window, div, hsla, prelude::*, px};
 
 use crate::app::{Conn, Hitori, Mode};
-use crate::data::{AppRule, Protocol, RuleMode, SERVERS, Scope, Server, app, server};
+use crate::data::{self, AppRule, Protocol, RuleMode, Scope, Server, app, server};
 use crate::overlays::close_button;
 use crate::score::command_score;
 use crate::theme::shadow_lg;
@@ -77,7 +77,7 @@ impl Hitori {
         let groups = match mode {
             Mode::Exit | Mode::Entry => {
                 let act = |id| if mode == Mode::Entry { Act::Via(id) } else { Act::Go(id) };
-                let servers: Vec<&'static Server> = SERVERS.iter().filter(|s| !(mode == Mode::Entry && s.id == self.s.server_id)).collect();
+                let servers: Vec<&'static Server> = data::servers().into_iter().filter(|s| !(mode == Mode::Entry && s.id == self.s.server_id)).collect();
                 let mut g = vec![];
                 if mode == Mode::Exit && !self.s.recents.is_empty() {
                     let rows = self.s.recents.iter().map(|id| {
@@ -120,9 +120,9 @@ impl Hitori {
             })
             .collect();
         let mut exit = vec![choice("exit same as connection", "shield-check", "Same as connection", Some(main_exit.country.into()), rule.exit.is_none(), off, Act::Exit(None))];
-        exit.extend(SERVERS.iter().map(|s| country("exit ", s, Some(rule.exit == Some(s.id)), off, Act::Exit(Some(s.id)))));
+        exit.extend(data::servers().into_iter().map(|s| country("exit ", s, Some(rule.exit == Some(s.id)), off, Act::Exit(Some(s.id)))));
         let mut through = vec![choice("through straight to exit", "move-right", "Straight to exit", Some(server(exit_id).country.into()), rule.via.is_none(), off, Act::Through(None))];
-        through.extend(SERVERS.iter().filter(|s| s.id != exit_id).map(|s| country("through ", s, Some(rule.via == Some(s.id)), off, Act::Through(Some(s.id)))));
+        through.extend(data::servers().into_iter().filter(|s| s.id != exit_id).map(|s| country("through ", s, Some(rule.via == Some(s.id)), off, Act::Through(Some(s.id)))));
         let mut proto = vec![choice("protocol same as connection", "zap", "Same as connection", Some(self.s.protocol.label().into()), rule.protocol.is_none(), off, Act::Proto(None))];
         proto.extend(Protocol::ALL.iter().map(|p| choice(&format!("protocol {}", p.label()), "zap", p.label(), None, rule.protocol == Some(*p), off, Act::Proto(Some(*p)))));
         let options = vec![
@@ -323,7 +323,7 @@ impl Hitori {
             Look::Country { s, chosen } => {
                 let live = chosen.is_none() && self.s.server_id == s.id && self.s.conn != Conn::Off;
                 let entry = chosen.is_none() && self.s.entry_id == Some(s.id);
-                let ping = || div().xs().text_color(t.muted_fg).child(format!("{} ms", s.ping)).into_any_element();
+                let ping = || div().xs().text_color(t.muted_fg).child(data::ping(s.id).map_or("—".to_owned(), |ms| format!("{ms} ms"))).into_any_element();
                 let mut v = vec![
                     flag(s.code, true, window).into_any_element(),
                     div()

@@ -6,7 +6,7 @@ use ksni::blocking::TrayMethods;
 use ksni::menu::{MenuItem, RadioGroup, RadioItem, StandardItem, SubMenu};
 
 use crate::app::{Conn, Hitori, Shell, Variant, Vpn};
-use crate::data::{SERVERS, server};
+use crate::data::{self, server};
 
 pub const POPUP: (f32, f32) = (400., 720.);
 
@@ -84,9 +84,13 @@ impl ksni::Tray for TrayIcon {
                 label: "Location".into(),
                 submenu: vec![
                     RadioGroup {
-                        selected: SERVERS.iter().position(|s| s.id == self.server_id).unwrap_or(0),
-                        select: Box::new(|t: &mut Self, i| drop(t.tx.send_blocking(Msg::Go(SERVERS[i].id)))),
-                        options: SERVERS.iter().map(|s| RadioItem { label: format!("{} · {}", s.country, s.city), ..Default::default() }).collect(),
+                        selected: data::servers().iter().position(|s| s.id == self.server_id).unwrap_or(0),
+                        select: Box::new(|t: &mut Self, i| {
+                            if let Some(s) = data::servers().get(i) {
+                                drop(t.tx.send_blocking(Msg::Go(s.id)));
+                            }
+                        }),
+                        options: data::servers().iter().map(|s| RadioItem { label: format!("{} · {}", s.country, s.city), ..Default::default() }).collect(),
                     }
                     .into(),
                 ],
