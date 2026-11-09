@@ -1,4 +1,5 @@
 mod app;
+mod apps;
 mod data;
 mod store;
 mod sub;
@@ -10,6 +11,7 @@ mod net;
 mod overlays;
 mod palette;
 mod score;
+mod suggest;
 mod theme;
 mod tray;
 mod ui;
