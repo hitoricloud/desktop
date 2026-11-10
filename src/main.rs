@@ -11,6 +11,7 @@ mod map;
 mod net;
 mod overlays;
 mod palette;
+mod region;
 mod score;
 mod suggest;
 mod os;
