@@ -1,0 +1,10 @@
+country-flags.woff2 contains regional-indicator emoji flags from Noto Color Emoji.
+Copyright 2021 Google Inc. All Rights Reserved.
+License: SIL Open Font License 1.1 (see /licenses/NotoColorEmoji.txt).
+
+Source font:
+https://fonts.gstatic.com/s/notocoloremoji/v50/Yq6P-KqIXTD0t4D9z1ESnKM3-HpFab4.ttf
+
+This is a flags-only WOFF2 subset (U+1F1E6–U+1F1FF, with shaping closure).
+COLRv1 color glyphs are retained. The SVG table is omitted for Chromium compatibility.
+The characters in the interface remain Unicode emoji; no image substitution is used.

@@ -1,4 +1,4 @@
-//! shadcn/ui (new-york-v4) primitives, sized exactly as the web prototype after its 4px-grid pass.
+//! shadcn/ui (new-york-v4) primitives, on a 4px grid.
 use std::time::Duration;
 
 use gpui::{
@@ -61,7 +61,7 @@ pub fn features(tracking_milli_em: i32) -> FontFeatures {
 }
 impl<T: Styled> Tw for T {}
 
-/// Tailwind radii with the prototype's theme: sm 4, md 8, lg 12, xl 16.
+/// Radii: sm 4, md 8, lg 12, xl 16.
 pub const SM: f32 = 4.;
 pub const MD: f32 = 8.;
 pub const LG: f32 = 12.;

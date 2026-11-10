@@ -1,6 +1,6 @@
 use gpui::{App, BoxShadow, Global, Hsla, hsla, point, px, rgb};
 
-/// The web prototype's CSS variables (src/index.css), dark and light.
+/// Theme colours, dark and light.
 #[derive(Clone, Copy)]
 pub struct Theme {
     pub dark: bool,

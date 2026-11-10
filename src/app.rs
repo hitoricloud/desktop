@@ -1,4 +1,4 @@
-//! Application state and actions, mirroring the prototype's `state/vpn.ts`.
+//! Application state and actions.
 use std::time::Duration;
 
 use gpui::{

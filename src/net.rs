@@ -1,4 +1,4 @@
-//! Blocking HTTP, run on the background executor. Same sources and preference order as the web prototype.
+//! Blocking HTTP, run on the background executor.
 use std::io::Read;
 use std::time::Duration;
 

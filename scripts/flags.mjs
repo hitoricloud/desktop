@@ -1,4 +1,4 @@
-// Pre-render country flags from the prototype's COLRv1 flag font: node scripts/flags.mjs [outdir] [CODE...]
+// Pre-render country flags from the COLRv1 flag font in scripts/fonts: node scripts/flags.mjs [outdir] [CODE...]
 // Needs `source ~/.local/share/playwright/env.sh` and `env -u WAYLAND_DISPLAY`.
 import { mkdirSync, readFileSync } from "node:fs";
 import { chromium } from "/home/user/.local/lib/node_modules/playwright/index.mjs";
@@ -12,7 +12,7 @@ const SIZES = {
 
 const [, , out = new URL("../assets/flags", import.meta.url).pathname, ...args] = process.argv;
 const codes = args.length ? args : CODES;
-const font = readFileSync("/home/user/Projects/hitori/app/public/fonts/country-flags.woff2").toString("base64");
+const font = readFileSync(new URL("./fonts/country-flags.woff2", import.meta.url)).toString("base64");
 mkdirSync(out, { recursive: true });
 const browser = await chromium.launch({ args: ["--ozone-platform=headless"] });
 for (const scale of [1, 2]) {

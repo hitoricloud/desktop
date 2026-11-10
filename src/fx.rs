@@ -1,4 +1,4 @@
-//! Animations matching the prototype's CSS: Tailwind transitions (150ms, cubic-bezier(.4,0,.2,1)) and
+//! Animations in the style of Tailwind/CSS: Tailwind transitions (150ms, cubic-bezier(.4,0,.2,1)) and
 //! tw-animate-css enter/exit (150ms, `ease`).
 use std::time::{Duration, Instant};
 

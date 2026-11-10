@@ -1,4 +1,4 @@
-//! CARTO vector tiles drawn with the label-free part of the dark-matter / positron styles the web prototype uses.
+//! CARTO vector tiles drawn with the label-free part of the dark-matter / positron styles.
 use std::io::Read;
 
 use std::path::PathBuf;

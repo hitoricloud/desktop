@@ -1,4 +1,4 @@
-//! Main window (Cockpit) and tray, ported from the prototype's variants.tsx, vpn.tsx and routing.tsx.
+//! Main window (Cockpit) and tray.
 use std::time::Instant;
 
 use gpui::{AnyElement, Context, Corner, Div, Hsla, MouseButton, SharedString, Window, anchored, deferred, div, prelude::*, px};

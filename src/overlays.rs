@@ -1,4 +1,4 @@
-//! Sheet (Account, Settings, Routing rules) and the location palette, ported from vpn.tsx, pages/* and routing.tsx.
+//! Sheet (Account, Settings, Routing rules) and the location palette.
 use gpui::{AnyElement, Context, Div, Focusable, MouseButton, SharedString, Window, div, hsla, prelude::*, px};
 
 use crate::app::{Hitori, Panel, Place, Protocol};

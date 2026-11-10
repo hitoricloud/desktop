@@ -456,7 +456,7 @@ pub fn ago(min: u32) -> String {
     if min == 0 { "now".into() } else if min < 60 { format!("{min}m") } else { format!("{}h", min / 60) }
 }
 
-/// JS `String(number)` for the one-decimal values the prototype prints.
+/// JS-style `String(number)` for one-decimal values: `3` rather than `3.0`.
 pub fn fixed1(v: f64) -> String {
     format!("{v:.1}")
 }
