@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Hitori VPN
+Comment=Hitori VPN client
+Exec=hitori
+Icon=hitori
+Terminal=false
+Categories=Network;
+StartupWMClass=hitori

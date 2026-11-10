@@ -3,3 +3,4 @@ result
 /bin
 *.private.*
 .env*
+/dist

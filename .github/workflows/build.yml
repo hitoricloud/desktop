@@ -1,0 +1,145 @@
+# Tests on every push and pull request. Packages (Linux tar.gz, Windows zip, macOS DMG) on main, on tags and on
+# manual runs; tags vX.Y.Z also publish a GitHub release. Linux and macOS run on Namespace runners.
+# The Xray core comes from a release of github.com/hitoricloud/Xray-core (XRAY_TAG in scripts/fetch-xray.sh).
+# macOS: set the MACOS_SIGN_IDENTITY variable (certificate in the runner keychain) for a Developer ID signature.
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  # Debian 12 (glibc 2.36) keeps the Linux build runnable on older distributions.
+  LINUX_DEPS: pkg-config libfontconfig-dev libfreetype-dev libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev libvulkan-dev
+
+jobs:
+  test:
+    runs-on: namespace-profile-linux
+    container: rust:1-bookworm
+    steps:
+      - uses: actions/checkout@v7
+      - run: |
+          # shellcheck disable=SC2086 # one package per word
+          apt-get update -qq && apt-get install -y -qq --no-install-recommends $LINUX_DEPS >/dev/null
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked
+
+  xray:
+    if: github.event_name != 'pull_request'
+    runs-on: namespace-profile-linux
+    container: debian:bookworm-slim
+    steps:
+      - run: apt-get update -qq && apt-get install -y -qq --no-install-recommends ca-certificates curl unzip jq >/dev/null
+      - uses: actions/checkout@v7
+      - run: XRAY_TARGETS="linux-amd64 windows-amd64 darwin-arm64 darwin-amd64" scripts/fetch-xray.sh
+      - uses: actions/upload-artifact@v7
+        with:
+          name: xray
+          path: bin/
+          retention-days: 7
+
+  linux:
+    needs: xray
+    runs-on: namespace-profile-linux
+    container: rust:1-bookworm
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with: { name: xray, path: bin }
+      - run: |
+          # shellcheck disable=SC2086 # one package per word
+          apt-get update -qq && apt-get install -y -qq --no-install-recommends $LINUX_DEPS >/dev/null
+      - uses: Swatinem/rust-cache@v2
+      - name: Version
+        shell: bash
+        run: echo "VERSION=$(scripts/version.sh)" >> "$GITHUB_ENV"
+      - run: cargo build --release --locked
+      - run: scripts/package-linux.sh
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux
+          path: dist/
+
+  windows:
+    needs: xray
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with: { name: xray, path: bin }
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Version
+        shell: bash
+        run: echo "VERSION=$(scripts/version.sh)" >> "$GITHUB_ENV"
+      - name: Shader compiler
+        shell: pwsh
+        run: |
+          # GPUI compiles its HLSL shaders with the Windows SDK's fxc.exe in release builds.
+          $fxc = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\fxc.exe" | Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $fxc) { throw "fxc.exe not found: the Windows SDK is missing" }
+          "GPUI_FXC_PATH=$($fxc.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - run: cargo build --release --locked
+      - run: ./scripts/package-windows.ps1
+        shell: pwsh
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows
+          path: dist/
+
+  macos:
+    needs: xray
+    runs-on: namespace-profile-macos
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+      MACOS_SIGN_IDENTITY: ${{ vars.MACOS_SIGN_IDENTITY }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with: { name: xray, path: bin }
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Metal toolchain
+        # GPUI compiles its Metal shaders at build time; Xcode 26 ships the compiler as a separate download.
+        run: xcrun metal -v >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
+      - name: Version
+        run: echo "VERSION=$(scripts/version.sh)" >> "$GITHUB_ENV"
+      - run: cargo build --release --locked --target aarch64-apple-darwin
+      - run: cargo build --release --locked --target x86_64-apple-darwin
+      - run: scripts/package-macos.sh
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos
+          path: dist/
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, linux, windows, macos]
+    runs-on: namespace-profile-linux
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: "{linux,windows,macos}"
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v3
+        with:
+          name: Hitori ${{ github.ref_name }}
+          files: dist/*
+          generate_release_notes: true
