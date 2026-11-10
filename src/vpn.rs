@@ -9,6 +9,7 @@ use serde_json::Value;
 use crate::app::Conn;
 use crate::data::{self, Account, AppRule, Protocol, RuleMode, Scope, Suggestion};
 use crate::net::{self, Geo};
+use crate::region::{self, Location};
 use crate::store::{self, Login, Rule, Settings};
 use crate::sub;
 use crate::suggest::Tracker;
@@ -64,6 +65,8 @@ pub struct Shared {
     pub pending: Vec<&'static str>,
     /// When the last latency test finished.
     pub tested_at: Option<Instant>,
+    /// Detected country and its blocked lists, from launch on (also before signing in).
+    pub region: region::Summary,
 }
 
 impl Shared {
@@ -82,6 +85,7 @@ impl Shared {
         self.testing = model.testing;
         self.pending = model.pending.clone();
         self.tested_at = model.tested_at;
+        self.region = model.region.clone();
         if !data::has_server(self.server_id) {
             self.server_id = model.server_id;
         }
@@ -159,6 +163,13 @@ pub struct Vpn {
     autoconnect_done: bool,
     tracker: Tracker,
     _scanner: Task<()>,
+    location: Option<Location>,
+    /// The region's lists as tunnel rules, merged after the subscription's.
+    region_rules: Arc<Vec<Value>>,
+    checking: Option<Task<()>>,
+    last_check: Option<Instant>,
+    net_addr: Option<std::net::IpAddr>,
+    _region_watch: Task<()>,
 }
 
 impl Vpn {
@@ -166,6 +177,7 @@ impl Vpn {
         let saved: Settings = store::load(&Settings::path()).unwrap_or_default();
         let login = store::load::<Login>(&Login::path()).map(|l| l.url).or_else(|| std::env::var("HITORI_SUB").ok());
         let exits: HashMap<String, Exit> = store::load(&exits_path()).unwrap_or_default();
+        let location: Option<Location> = store::load(&Location::path());
         let i = data::intern;
         let s = Shared {
             conn: Conn::Off,
@@ -173,7 +185,7 @@ impl Vpn {
             server_id: saved.server.as_deref().map(i).unwrap_or("none"),
             entry_id: saved.entry.as_deref().map(i),
             recents: saved.recents.iter().map(|r| i(r)).collect(),
-            me: None,
+            me: location.as_ref().map(|l| Me { ip: l.ip.clone(), geo: Some(l.geo()) }),
             protocol: saved.protocol.into(),
             auto_connect: saved.auto_connect,
             kill_switch: saved.kill_switch,
@@ -195,6 +207,11 @@ impl Vpn {
             testing: false,
             pending: vec![],
             tested_at: None,
+            region: region::Summary {
+                country: location.as_ref().map(|l| l.country.clone()),
+                name: location.as_ref().and_then(|l| l.name.clone()),
+                ..Default::default()
+            },
         };
         let mut this = Self {
             s,
@@ -215,6 +232,12 @@ impl Vpn {
             autoconnect_done: false,
             tracker: Tracker::new(),
             _scanner: Self::scanner(cx),
+            location,
+            region_rules: Arc::default(),
+            checking: None,
+            last_check: None,
+            net_addr: region::local_addr(),
+            _region_watch: Self::region_watch(cx),
         };
         if this.login.is_some()
             && let Ok(body) = std::fs::read(subscription_path())
@@ -222,7 +245,7 @@ impl Vpn {
             let _ = this.load_subscription(&body, cx);
         }
         this.refresh(None, cx);
-        this.load_me(cx);
+        this.check_region(false, cx);
         cx.observe_self(|this, cx| this.changed(cx)).detach();
         cx.on_app_quit(|this, _| {
             let core = this.core.take();
@@ -302,23 +325,94 @@ impl Vpn {
         .detach();
     }
 
-    fn load_me(&mut self, cx: &mut Context<Self>) {
+    // ---------- region ----------
+
+    /// The app's own requests skip the tunnel: while disconnected, and in proxy mode (the app itself is not proxied).
+    fn direct(&self) -> bool {
+        self.s.conn == Conn::Off || !(self.core.as_ref().map_or(self.s.system_wide, |c| c.tun) && crate::os::TUN)
+    }
+
+    /// Detect the country again and download its lists now (Settings, the onboarding screen).
+    pub fn recheck_region(&mut self, cx: &mut Context<Self>) {
+        self.check_region(true, cx);
+    }
+
+    /// Public IP → country → lists. Through the tunnel only the lists of the known country are refreshed.
+    fn check_region(&mut self, force: bool, cx: &mut Context<Self>) {
+        if self.checking.is_some() {
+            return;
+        }
+        let lookup = self.direct();
+        let cached = self.location.clone();
+        // Before the network answers: the cached lists, so routing has them from the start.
+        let offline = cached.as_ref().filter(|_| self.region_rules.is_empty()).map(|l| l.country.clone());
+        let exits: Vec<String> =
+            self.exits.values().map(|e| e.ip.clone()).chain(data::servers().iter().map(|s| s.ip.to_owned())).filter(|ip| !ip.is_empty()).collect();
+        let attempt = self.attempt;
+        self.last_check = Some(Instant::now());
+        self.s.region.status = region::Status::Computing;
+        cx.notify();
+        self.checking = Some(cx.spawn(async move |this, cx| {
+            if let Some(country) = offline {
+                let (lists, _) = cx.background_executor().spawn(async move { region::load(&country, region::Fetch::Never) }).await;
+                this.update(cx, |this, cx| this.set_region_lists(&lists, cx)).ok();
+            }
+            let got = cx.background_executor().spawn(async move { region::check(cached, lookup, force, &exits) }).await;
+            this.update(cx, |this, cx| this.region_checked(lookup && attempt != this.attempt, got, cx)).ok();
+        }));
+    }
+
+    fn region_checked(&mut self, raced: bool, got: Result<Option<region::Found>, String>, cx: &mut Context<Self>) {
+        self.checking = None;
+        // A connection started meanwhile: in system-wide mode the lookup may have gone through it.
+        let raced = raced && self.s.system_wide && crate::os::TUN;
+        self.s.region.status = match got {
+            Ok(Some(found)) if !raced => {
+                let l = found.location;
+                (self.s.region.country, self.s.region.name) = (Some(l.country.clone()), l.name.clone());
+                self.s.me = Some(Me { ip: l.ip.clone(), geo: Some(l.geo()) });
+                store::save(&Location::path(), &l, false);
+                self.location = Some(l);
+                self.set_region_lists(&found.lists, cx);
+                if found.missing { region::Status::Failed(format!("Cannot download the lists for {}", self.s.region.place())) } else { region::Status::Ready }
+            }
+            Ok(_) => region::Status::Ready,
+            Err(e) => region::Status::Failed(e),
+        };
+        cx.notify();
+    }
+
+    fn set_region_lists(&mut self, lists: &region::Lists, cx: &mut Context<Self>) {
+        (self.s.region.domains, self.s.region.subnets) = (lists.domains.len(), lists.subnets.len());
+        let rules = lists.rules();
+        if *self.region_rules != rules {
+            self.region_rules = Arc::new(rules);
+            // A running core picks the new lists up like a rules edit.
+            if self.s.conn == Conn::On {
+                self.applied = None;
+            }
+        }
+        cx.notify();
+    }
+
+    /// Every 30 s: a new local network, or an old check, means another look at the public IP.
+    fn region_watch(cx: &mut Context<Self>) -> Task<()> {
         cx.spawn(async move |this, cx| {
-            let Some(ip) = cx.background_executor().spawn(async { net::my_ip() }).await else { return };
-            let ip2 = ip.clone();
-            this.update(cx, |this, cx| {
-                this.s.me = Some(Me { ip: ip.clone(), geo: None });
-                cx.notify();
-            })
-            .ok();
-            let geo = cx.background_executor().spawn(async move { net::locate(&ip2) }).await;
-            this.update(cx, |this, cx| {
-                this.s.me = Some(Me { ip, geo });
-                cx.notify();
-            })
-            .ok();
+            loop {
+                cx.background_executor().timer(Duration::from_secs(30)).await;
+                let addr = cx.background_executor().spawn(async { region::local_addr() }).await;
+                let alive = this.update(cx, |this, cx| {
+                    let changed = std::mem::replace(&mut this.net_addr, addr) != addr;
+                    let backoff = this.last_check.is_some_and(|t| t.elapsed() < Duration::from_secs(120));
+                    if this.direct() && (changed || !backoff) && region::due(this.location.as_ref(), region::now(), changed) {
+                        this.check_region(false, cx);
+                    }
+                });
+                if alive.is_err() {
+                    break;
+                }
+            }
         })
-        .detach();
     }
 
     // ---------- account ----------
@@ -331,13 +425,6 @@ impl Vpn {
             data::learn_exit(id, &e.ip, e.city.as_deref(), e.lat, e.lon);
         }
         self.lists = Lists { tunnel: Arc::new(parsed.tunnel_rules), base: Arc::new(parsed.base_rules), dns: Arc::new(parsed.dns) };
-        if self.lists.tunnel.is_empty() {
-            cx.spawn(async move |this, cx| {
-                let list = cx.background_executor().spawn(async { sub::community_list() }).await;
-                this.update(cx, |this, _| this.lists.tunnel = Arc::new(list)).ok();
-            })
-            .detach();
-        }
         if !data::has_server(self.s.server_id) {
             self.s.server_id = data::fastest().id;
         }
@@ -438,7 +525,11 @@ impl Vpn {
             apps: self.s.app_routes.clone(),
             sites: self.s.sites.clone(),
             servers: data::servers(),
-            tunnel_rules: self.lists.tunnel.clone(),
+            tunnel_rules: if self.region_rules.is_empty() {
+                self.lists.tunnel.clone()
+            } else {
+                Arc::new(self.lists.tunnel.iter().chain(self.region_rules.iter()).cloned().collect())
+            },
             base_rules: self.lists.base.clone(),
             dns: self.lists.dns.clone(),
         }
@@ -625,9 +716,15 @@ impl Vpn {
         self.ticker = None;
         self.reload = None;
         self.failures = 0;
-        if let Some(core) = self.core.take() {
-            cx.background_executor().spawn(async move { core.stop() }).detach();
-        }
+        let stopped = self.core.take().map(|core| cx.background_executor().spawn(async move { core.stop() }));
+        // Off the tunnel now: has the network changed meanwhile? (Once the core is down, so the lookup is direct.)
+        cx.spawn(async move |this, cx| {
+            if let Some(stopped) = stopped {
+                stopped.await;
+            }
+            this.update(cx, |this, cx| this.check_region(false, cx)).ok();
+        })
+        .detach();
         self.s.conn = Conn::Off;
         self.s.connected_at = None;
         self.s.stats = Stats::default();
