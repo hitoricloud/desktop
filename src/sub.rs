@@ -254,27 +254,6 @@ pub fn parse(body: &[u8]) -> Result<Subscription, String> {
     Ok(Subscription { servers, tunnel_rules, base_rules: base_rules.unwrap_or_default(), dns: dns.unwrap_or_else(|| json!({"servers": ["1.1.1.1", "1.0.0.1"]})) })
 }
 
-/// Fallback for subscriptions without an Auto profile: the community list of sites blocked in Russia.
-pub fn community_list() -> Vec<Value> {
-    let path = crate::store::cache_dir().join("russia-inside.lst");
-    let fresh = std::fs::metadata(&path).and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().unwrap_or_default() < Duration::from_secs(86400));
-    let text = if fresh {
-        std::fs::read_to_string(&path).ok()
-    } else {
-        let got = ureq::get("https://raw.githubusercontent.com/itdoginfo/allow-domains/main/Russia/inside-raw.lst")
-            .timeout(Duration::from_secs(20))
-            .call()
-            .ok()
-            .and_then(|r| r.into_string().ok());
-        if let Some(t) = &got {
-            let _ = crate::store::write(&path, t.as_bytes(), false);
-        }
-        got.or_else(|| std::fs::read_to_string(&path).ok())
-    };
-    let domains: Vec<String> = text.unwrap_or_default().lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).map(|d| format!("domain:{d}")).collect();
-    if domains.is_empty() { vec![] } else { vec![json!({"type": "field", "domain": domains, "outboundTag": "proxy"})] }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
