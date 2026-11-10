@@ -259,7 +259,8 @@ impl Hitori {
             .flex()
             .flex_col()
             .child(div().flex_none().h(px(56.)).flex().flex_col().justify_center().px(px(16.)).py(px(8.)).child(self.brand(cx)))
-            .child(div().flex_1().min_h_0().flex().flex_col().child(self.routing_panel(true, window, cx)))
+            // The Rules page shows every rule itself.
+            .child(div().flex_1().min_h_0().flex().flex_col().when(self.page == Page::Map, |d| d.child(self.routing_panel(true, window, cx))))
             .child(div().flex_none().p(px(8.)).flex().flex_col().child(self.nav_user(window, cx)))
     }
 
@@ -377,7 +378,8 @@ impl Hitori {
 
     // ---------- routing ----------
 
-    /// Default route, Review for suggestions not on screen, every active rule, Manage rules.
+    /// Default route, Review for suggestions not on screen, every active rule; the tray also gets Manage rules,
+    /// since it has no Rules page.
     pub fn routing_panel(&self, toasts: bool, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme(cx);
         let wide = f32::from(window.viewport_size().width) >= 1024.;
@@ -453,7 +455,7 @@ impl Hitori {
                     .pb(px(8.))
                     .child(self.active_rules(big, true, Place::Side, window, cx)),
             )
-            .child(
+            .when(!toasts, |d| d.child(
                 div().flex_none().p(px(8.)).child(
                     fx("manage", gpui::transparent_black(), Some(hover_bg))
                         .fg(muted, fg)
@@ -470,7 +472,7 @@ impl Hitori {
                         .child("Manage rules")
                         .child(icon("chevron-right", 16., muted)),
                 ),
-            )
+            ))
     }
 
     /// Map or every rule beside the sidebar.
