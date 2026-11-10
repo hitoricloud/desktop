@@ -57,6 +57,12 @@ impl Server {
         pick(want).or_else(|| Protocol::ALL.iter().find_map(|p| pick(*p)))
     }
 
+    /// `EE-0007`: the country and the node's number in the subscription, unique per server.
+    pub fn tag(&self) -> String {
+        let n = self.id.rsplit_once('-').and_then(|(_, n)| n.parse::<u32>().ok()).unwrap_or(0);
+        format!("{}-{n:04}", self.code)
+    }
+
     /// Transports that can carry another hop (no UDP-only ones).
     pub fn chainable(&self, want: Protocol) -> Option<(Protocol, &serde_json::Value)> {
         match self.variant(want) {
@@ -539,6 +545,8 @@ mod tests {
         assert_eq!((ping("t-dead"), ping("t-fast")), (None, Some(40)));
         set_pings([("t-dead", Some(90))]);
         assert!(!timed_out("t-dead"), "a later answer replaces the timeout");
+        let tag = |id: &'static str, code: &'static str| Server { id, country: "", code, city: "", ip: "", lat: 0., lon: 0., variants: vec![] }.tag();
+        assert_eq!((tag("ee-7", "EE"), tag("ch-12", "CH"), tag("lv", "LV")), ("EE-0007".into(), "CH-0012".into(), "LV-0000".into()));
     }
 
     #[test]
