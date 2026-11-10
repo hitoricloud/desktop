@@ -2,7 +2,7 @@
 use std::time::Duration;
 
 use gpui::{
-    App, AppContext, Context, Entity, FocusHandle, Focusable, KeyBinding, Render, Subscription, Window, actions, div, prelude::*,
+    App, AppContext, Context, Element, Entity, FocusHandle, Focusable, KeyBinding, Refineable, Render, Subscription, Window, actions, div, prelude::*,
 };
 
 use crate::data::{self, AppRule, RuleMode};
@@ -96,9 +96,7 @@ pub struct Shell {
 }
 
 impl Render for Shell {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let t = theme(cx);
-        let ring = self.hitori.read(cx).ring.get();
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         if let Some((x, y)) = self.card {
             let (w, h) = crate::tray::POPUP;
             // Clicks outside the card close the popover (the overlay covers everything but the bar).
@@ -121,21 +119,85 @@ impl Render for Shell {
             .size_full()
             .relative()
             .child(gpui::AnyView::from(self.hitori.clone()).cached(gpui::StyleRefinement::default().size_full()))
-            .children(ring.map(|r| {
-                let (x, y, w, h) = r.clip;
-                div().absolute().left(gpui::px(x)).top(gpui::px(y)).w(gpui::px(w)).h(gpui::px(h)).overflow_hidden().child(
-                    div()
-                        .absolute()
-                        .left(gpui::px(r.at.0 - x - 12.))
-                        .top(gpui::px(r.at.1 - y - 12.))
-                        .size(gpui::px(24.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(crate::map::ping_ring(r.on, &t))
-                        .child(crate::map::selected_dot(r.on, &t)),
-                )
-            }))
+            .child(RingLayer(self.hitori.clone()))
+    }
+}
+
+/// The isolated ping ring, built in prepaint after the cached app view has placed it, so it never trails the map by a frame.
+struct RingLayer(Entity<Hitori>);
+
+impl IntoElement for RingLayer {
+    type Element = Self;
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for RingLayer {
+    type RequestLayoutState = ();
+    type PrepaintState = Option<gpui::AnyElement>;
+
+    fn id(&self) -> Option<gpui::ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(&mut self, _: Option<&gpui::GlobalElementId>, _: Option<&gpui::InspectorElementId>, window: &mut Window, cx: &mut App) -> (gpui::LayoutId, ()) {
+        let mut style = gpui::Style::default();
+        style.refine(&gpui::StyleRefinement::default().absolute().inset_0());
+        (window.request_layout(style, None, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        bounds: gpui::Bounds<gpui::Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<gpui::AnyElement> {
+        let r = self.0.read(cx).ring.get()?;
+        let t = theme(cx);
+        let (x, y, w, h) = r.clip;
+        let mut ring = div()
+            .w(gpui::px(w))
+            .h(gpui::px(h))
+            .overflow_hidden()
+            .child(
+                div()
+                    .absolute()
+                    .left(gpui::px(r.at.0 - x - 12.))
+                    .top(gpui::px(r.at.1 - y - 12.))
+                    .size(gpui::px(24.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(crate::map::ping_ring(r.on, &t))
+                    .child(crate::map::selected_dot(r.on, &t)),
+            )
+            .into_any_element();
+        ring.layout_as_root(bounds.size.into(), window, cx);
+        ring.prepaint_at(bounds.origin + gpui::point(gpui::px(x), gpui::px(y)), window, cx);
+        Some(ring)
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        _: gpui::Bounds<gpui::Pixels>,
+        _: &mut (),
+        ring: &mut Option<gpui::AnyElement>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        if let Some(ring) = ring {
+            ring.paint(window, cx);
+        }
     }
 }
 
@@ -271,6 +333,7 @@ impl Hitori {
                 "page" => self.page = if value == "rules" { Page::Rules } else { Page::Map },
                 "siterule" => self.open_palette(Mode::Site(data::intern(value)), window, cx),
                 "collapsed" => self.sidebar_open = false,
+                "zoom" | "pan" => self.map.script(key, value),
                 "snooze" => self.s.snoozed.push(leak(value)),
                 "panel" => {
                     self.panel = Some(match value {
