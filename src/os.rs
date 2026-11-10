@@ -38,6 +38,30 @@ pub fn spawn_core(cmd: &mut Command) -> std::io::Result<Child> {
     }
 }
 
+/// Open a web page in the default browser (from any thread).
+pub fn open_url(url: &str) {
+    #[cfg(windows)]
+    {
+        use windows::Win32::UI::Shell::ShellExecuteW;
+        use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+        use windows::core::{HSTRING, PCWSTR, w};
+        // SAFETY: the strings outlive the call.
+        unsafe {
+            let _ = ShellExecuteW(None, w!("open"), &HSTRING::from(url), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        use std::process::Stdio;
+        let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+        match Command::new(opener).arg(url).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
+            // Some openers run the browser in the foreground: reap it whenever it ends.
+            Ok(mut child) => drop(std::thread::spawn(move || child.wait())),
+            Err(e) => eprintln!("hitori: cannot open the browser ({opener}): {e}"),
+        }
+    }
+}
+
 /// The child is gone; forget it.
 pub fn reaped(_child: &Child) {
     #[cfg(target_os = "macos")]

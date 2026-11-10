@@ -56,7 +56,7 @@ impl Hitori {
         let w = if f32::from(vp.width) >= 640. { 448. } else { f32::from(vp.width) };
         let (title, desc) = match panel {
             Panel::Account => match &self.s.account {
-                Some(a) if self.s.signed_in => ("Account", format!("Signed in as {}", a.name)),
+                Some(_) if self.s.signed_in => ("Account", format!("Signed in as {}", self.account_name())),
                 _ if self.s.signed_in => ("Account", "Loading your subscription…".into()),
                 _ => ("Sign in", "Paste the subscription link from the Hitori bot.".into()),
             },
@@ -238,7 +238,7 @@ impl Hitori {
         row("Detected location", Some(&hint), hint_room(w), button, &t, window)
     }
 
-    fn sign_in_body(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub fn sign_in_body(&self, cx: &mut Context<Self>) -> AnyElement {
         let t = self.theme(cx);
         let focus = self.link.read(cx).focus_handle(cx);
         let busy = self.s.busy;
@@ -286,6 +286,26 @@ impl Hitori {
         let fill = if a.limit > 0 { 1. - (a.used as f32 / a.limit as f32).min(1.) } else { a.days_left.map_or(0., |d| (d as f32 / 30.).min(1.)) };
         let traffic = if a.limit > 0 { format!("{} of {} used", data::bytes(a.used), data::bytes(a.limit)) } else { format!("{} used · no traffic limit", data::bytes(a.used)) };
         let support = a.support.clone();
+        let profile = self.s.user.as_ref().map(|u| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(16.))
+                .p(px(16.))
+                .rounded(px(XL))
+                .bg(t.muted.opacity(0.5))
+                .child(crate::ui::avatar(&self.initial(), self.s.avatar.clone(), 48., &t))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(div().base().semibold().truncate().child(u.name.clone()))
+                        .child(div().sm().text_color(t.muted_fg).truncate().child(u.username.as_ref().map_or("Telegram account".into(), |n| format!("@{n}")))),
+                )
+                .child(badge_secondary("Telegram", &t))
+        });
         let card = div()
             .flex()
             .flex_col()
@@ -324,6 +344,7 @@ impl Hitori {
             .flex()
             .flex_col()
             .gap(px(24.))
+            .children(profile)
             .child(card)
             .child(section("Devices".into(), &t, vec![device]))
             .child(section(
@@ -331,7 +352,11 @@ impl Hitori {
                 &t,
                 vec![row(
                     "Sign out",
-                    Some("Forgets the subscription link on this computer; the tunnel stops."),
+                    Some(if self.s.user.is_some() {
+                        "Signs this computer out of your Telegram account; the tunnel stops."
+                    } else {
+                        "Forgets the subscription link on this computer; the tunnel stops."
+                    }),
                     hint_room(2. + 24. + 16. + 8. + crate::ui::text_width("Sign out", 14., gpui::FontWeight::MEDIUM, window)),
                     button("signout", Variant::Outline, Size::Sm, true, &t)
                         .child(icon("log-out", 16., t.foreground))

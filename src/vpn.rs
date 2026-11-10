@@ -1,12 +1,14 @@
 //! The VPN model every window and the tray mirror: account, servers, the running core and its numbers.
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use gpui::{Context, Task};
+use gpui::{Context, RenderImage, Task};
 use serde_json::Value;
 
 use crate::app::Conn;
+use crate::auth;
 use crate::data::{self, Account, AppRule, Protocol, RuleMode, Scope, Suggestion};
 use crate::net::{self, Geo};
 use crate::region::{self, Location};
@@ -31,6 +33,16 @@ pub struct Stats {
     pub latency: Option<u32>,
 }
 
+/// Telegram sign-in progress.
+#[derive(Clone, PartialEq)]
+pub enum Telegram {
+    Idle,
+    /// Asking the backend for the Telegram page.
+    Starting,
+    /// The browser is at this page; waiting for it to come back.
+    Browser(String),
+}
+
 /// VPN state every window shows: the main window and the tray popup mirror one `Vpn` model.
 #[derive(Clone, PartialEq)]
 pub struct Shared {
@@ -53,6 +65,12 @@ pub struct Shared {
     pub rules_big: bool,
     pub dark: bool,
     pub signed_in: bool,
+    /// Signed in with Telegram: name and avatar.
+    pub user: Option<auth::User>,
+    pub avatar: Option<Arc<RenderImage>>,
+    pub telegram: Telegram,
+    /// Signed in with Telegram, but the account has no subscription.
+    pub no_subscription: bool,
     pub account: Option<Account>,
     /// Signing in or refreshing the subscription.
     pub busy: bool,
@@ -77,6 +95,10 @@ impl Shared {
         self.me = model.me.clone();
         self.recents = model.recents.clone();
         self.signed_in = model.signed_in;
+        self.user = model.user.clone();
+        self.avatar = model.avatar.clone();
+        self.telegram = model.telegram.clone();
+        self.no_subscription = model.no_subscription;
         self.account = model.account.clone();
         self.busy = model.busy;
         self.error = model.error.clone();
@@ -153,6 +175,9 @@ pub struct Vpn {
     pinger: Option<Task<()>>,
     tester: Option<Task<()>>,
     login: Option<String>,
+    auth: Arc<auth::Client>,
+    /// Set to stop the Telegram sign-in in progress.
+    cancel: Option<Arc<AtomicBool>>,
     lists: Lists,
     saved: Settings,
     /// Routing the running core was started with.
@@ -178,6 +203,8 @@ impl Vpn {
         let login = store::load::<Login>(&Login::path()).map(|l| l.url).or_else(|| std::env::var("HITORI_SUB").ok());
         let exits: HashMap<String, Exit> = store::load(&exits_path()).unwrap_or_default();
         let location: Option<Location> = store::load(&Location::path());
+        let auth = Arc::new(auth::Client::new(auth::api(), auth::session_path()));
+        let session = auth.session();
         let i = data::intern;
         let s = Shared {
             conn: Conn::Off,
@@ -198,7 +225,11 @@ impl Vpn {
             dismissed: saved.dismissed.clone(),
             rules_big: saved.rules_big,
             dark: saved.dark,
-            signed_in: login.is_some(),
+            signed_in: login.is_some() || session.is_some(),
+            user: session.as_ref().map(|s| s.user.clone()),
+            avatar: None,
+            telegram: Telegram::Idle,
+            no_subscription: false,
             account: None,
             busy: false,
             error: None,
@@ -223,6 +254,8 @@ impl Vpn {
             pinger: None,
             tester: None,
             login,
+            auth,
+            cancel: None,
             lists: Lists::default(),
             saved,
             applied: None,
@@ -239,12 +272,17 @@ impl Vpn {
             net_addr: region::local_addr(),
             _region_watch: Self::region_watch(cx),
         };
-        if this.login.is_some()
+        if this.s.signed_in
             && let Ok(body) = std::fs::read(subscription_path())
         {
             let _ = this.load_subscription(&body, cx);
         }
-        this.refresh(None, cx);
+        if session.is_some() {
+            this.cached_avatar(cx);
+            this.sync(cx);
+        } else {
+            this.refresh(None, cx);
+        }
         this.check_region(false, cx);
         cx.observe_self(|this, cx| this.changed(cx)).detach();
         cx.on_app_quit(|this, _| {
@@ -489,17 +527,213 @@ impl Vpn {
     }
 
     pub fn sign_in(&mut self, link: String, cx: &mut Context<Self>) {
+        self.cancel_sign_in(cx);
         self.s.error = None;
         self.refresh(Some(link), cx);
     }
 
+    /// Telegram sign-in: the browser opens at the backend's Telegram page and comes back to a loopback port.
+    pub fn telegram_sign_in(&mut self, cx: &mut Context<Self>) {
+        if self.s.telegram != Telegram::Idle {
+            return;
+        }
+        let flag = Arc::new(AtomicBool::new(false));
+        self.cancel = Some(flag.clone());
+        self.s.telegram = Telegram::Starting;
+        self.s.error = None;
+        cx.notify();
+        let api = self.auth.api.clone();
+        cx.spawn(async move |this, cx| {
+            let begun = cx.background_executor().spawn({
+                let api = api.clone();
+                async move { auth::begin(&api) }
+            });
+            let pending = match begun.await {
+                Ok(p) => p,
+                Err(e) => {
+                    this.update(cx, |this, cx| this.signed_in_with(&flag, Err(e), cx)).ok();
+                    return;
+                }
+            };
+            let url = pending.auth_url.clone();
+            let live = this.update(cx, |this, cx| {
+                let live = this.current(&flag);
+                if live {
+                    this.s.telegram = Telegram::Browser(url.clone());
+                    cx.notify();
+                }
+                live
+            });
+            if !live.unwrap_or(false) {
+                return;
+            }
+            let stop = flag.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    crate::os::open_url(&url);
+                    pending.finish(&api, &stop)
+                })
+                .await;
+            this.update(cx, |this, cx| this.signed_in_with(&flag, result, cx)).ok();
+        })
+        .detach();
+    }
+
+    /// The sign-in `flag` belongs to is still the one on screen.
+    fn current(&self, flag: &Arc<AtomicBool>) -> bool {
+        self.cancel.as_ref().is_some_and(|c| Arc::ptr_eq(c, flag)) && !flag.load(Ordering::Relaxed)
+    }
+
+    fn signed_in_with(&mut self, flag: &Arc<AtomicBool>, result: Result<auth::Session, auth::Error>, cx: &mut Context<Self>) {
+        if !self.current(flag) {
+            return;
+        }
+        self.cancel = None;
+        self.s.telegram = Telegram::Idle;
+        match result {
+            Ok(session) => {
+                // The Telegram account replaces a pasted link.
+                let _ = std::fs::remove_file(Login::path());
+                self.login = None;
+                self.s.user = Some(session.user.clone());
+                self.s.signed_in = true;
+                self.auth.set(Some(session));
+                self.sync(cx);
+            }
+            Err(auth::Error::Cancelled) => {}
+            Err(e) => self.s.error = Some(e.to_string()),
+        }
+        cx.notify();
+    }
+
+    pub fn cancel_sign_in(&mut self, cx: &mut Context<Self>) {
+        if let Some(flag) = self.cancel.take() {
+            flag.store(true, Ordering::Relaxed);
+        }
+        if self.s.telegram != Telegram::Idle {
+            self.s.telegram = Telegram::Idle;
+            cx.notify();
+        }
+    }
+
+    /// Profile and subscription from the backend; the subscription link then loads servers like a pasted one.
+    pub fn sync(&mut self, cx: &mut Context<Self>) {
+        let client = self.auth.clone();
+        self.s.busy = true;
+        self.s.error = None;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let me = cx.background_executor().spawn(async move { client.me() }).await;
+            this.update(cx, |this, cx| {
+                this.s.busy = false;
+                if this.auth.session().is_none() {
+                    return;
+                }
+                match me {
+                    Ok(me) => this.adopt_me(me, cx),
+                    Err(auth::Error::Unauthorized) => {
+                        this.sign_out(cx);
+                        this.s.error = Some(auth::Error::Unauthorized.to_string());
+                    }
+                    // Keep working from the saved subscription.
+                    Err(e) => this.s.error = Some(e.to_string()),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn adopt_me(&mut self, me: auth::Me, cx: &mut Context<Self>) {
+        let had_avatar = self.s.user.as_ref().is_some_and(|u| u.has_avatar);
+        self.s.no_subscription = me.plan.is_none();
+        if me.user.has_avatar {
+            self.fetch_avatar(cx);
+        } else if had_avatar || self.s.avatar.is_some() {
+            self.s.avatar = None;
+            let _ = std::fs::remove_file(auth::avatar_path());
+        }
+        self.s.user = Some(me.user);
+        match me.plan {
+            Some(plan) => {
+                self.s.account = Some(plan.account);
+                self.login = Some(plan.url);
+                self.refresh(None, cx);
+            }
+            // The saved subscription stays: the backend also answers null when it cannot reach the panel.
+            None => {
+                self.disconnect(cx);
+                self.login = None;
+                self.s.account = None;
+                data::set_servers(vec![]);
+                self.s.servers_gen += 1;
+                self.pinger = None;
+            }
+        }
+    }
+
+    /// The avatar saved last time, until the backend's arrives.
+    fn cached_avatar(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let pic = cx.background_executor().spawn(async { std::fs::read(auth::avatar_path()).ok().and_then(|b| auth::picture(&b)) }).await;
+            this.update(cx, |this, cx| {
+                if this.s.avatar.is_none() && this.s.user.is_some() {
+                    this.s.avatar = pic;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn fetch_avatar(&mut self, cx: &mut Context<Self>) {
+        let client = self.auth.clone();
+        cx.spawn(async move |this, cx| {
+            let got = cx
+                .background_executor()
+                .spawn(async move {
+                    let bytes = client.avatar().ok()?;
+                    let Some(bytes) = bytes else { return Some(None) };
+                    let pic = auth::picture(&bytes)?;
+                    let _ = store::write(&auth::avatar_path(), &bytes, true);
+                    Some(Some(pic))
+                })
+                .await;
+            // A failed download keeps the cached picture.
+            let Some(pic) = got else { return };
+            this.update(cx, |this, cx| {
+                if this.s.user.is_some() {
+                    if pic.is_none() {
+                        let _ = std::fs::remove_file(auth::avatar_path());
+                    }
+                    this.s.avatar = pic;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     pub fn sign_out(&mut self, cx: &mut Context<Self>) {
+        self.cancel_sign_in(cx);
         self.disconnect(cx);
+        if let Some(session) = self.auth.take() {
+            cx.background_executor().spawn(async move { auth::revoke(&session) }).detach();
+        }
+        let _ = std::fs::remove_file(auth::avatar_path());
         let _ = std::fs::remove_file(Login::path());
         let _ = std::fs::remove_file(subscription_path());
         self.login = None;
         data::set_servers(vec![]);
         self.s.signed_in = false;
+        self.s.user = None;
+        self.s.avatar = None;
+        self.s.no_subscription = false;
+        self.s.error = None;
         self.s.account = None;
         self.s.server_id = "none";
         self.s.entry_id = None;

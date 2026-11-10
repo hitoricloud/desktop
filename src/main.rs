@@ -1,6 +1,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 mod app;
 mod apps;
+mod auth;
 mod data;
 mod store;
 mod sub;
@@ -9,6 +10,7 @@ mod fx;
 mod input;
 mod map;
 mod net;
+mod onboarding;
 mod overlays;
 mod palette;
 mod region;
