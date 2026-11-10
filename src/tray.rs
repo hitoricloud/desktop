@@ -8,6 +8,7 @@ use gpui::{
 
 use crate::app::{Conn, Hitori, Shell, Variant, Vpn};
 use crate::data::server;
+use crate::views::MIN_SIZE;
 
 #[cfg(target_os = "linux")]
 pub use linux::start;
@@ -82,8 +83,33 @@ impl Global for Windows {}
 /// when the app may place it (Windows, macOS).
 pub struct Popover {
     size: (f32, f32),
-    card: (f32, f32),
+    card: Card,
     origin: Option<(f32, f32)>,
+}
+
+/// The card in a popover window: `x` from the left, `gap` from the top edge, or from the bottom one against a bottom bar.
+#[derive(Clone, Copy)]
+pub struct Card {
+    x: f32,
+    gap: f32,
+    bottom: bool,
+}
+
+impl Card {
+    /// The card's bounds (x, y, w, h) in a window of this size: the popup's size, shrunk and moved to stay inside.
+    pub fn place(self, (vw, vh): (f32, f32)) -> (f32, f32, f32, f32) {
+        let (w, h) = (POPUP.0.min(vw - 2. * self.gap).max(0.), POPUP.1.min(vh - 2. * self.gap).max(0.));
+        let y = if self.bottom { vh - h - self.gap } else { self.gap };
+        (self.x.min(vw - w - self.gap).max(0.), y, w, h)
+    }
+}
+
+/// The display's logical size. Wayland has no primary display: there the smallest output, so the window fits on any.
+fn screen(cx: &App) -> Option<(f32, f32)> {
+    let size = |b: Bounds<gpui::Pixels>| (f32::from(b.size.width), f32::from(b.size.height));
+    cx.primary_display()
+        .map(|d| size(d.bounds()))
+        .or_else(|| cx.displays().iter().map(|d| size(d.bounds())).min_by(|a, b| (a.0 * a.1).total_cmp(&(b.0 * b.1))))
 }
 
 /// Windows and macOS: a borderless card at the tray. The taskbar or menu bar side is guessed from where the click was.
@@ -91,12 +117,14 @@ pub struct Popover {
 fn native_popup(click: (i32, i32), cx: &App) -> Option<Popover> {
     let display = cx.primary_display()?.bounds();
     let (dw, dh) = (f32::from(display.size.width), f32::from(display.size.height));
-    let (w, h) = POPUP;
+    // Short screens get a shorter card (its rule list scrolls) between the menu bar or taskbar and the other edge.
+    let (w, h) = (POPUP.0, POPUP.1.min(dh - 72.));
     // The click is in physical pixels; without the display's scale only which half of the screen it was in is used.
     let low = click.1 as f32 > dh / 2. || cfg!(windows);
     let x = (dw - w - 12.).max(0.);
     let y = if low { (dh - h - 60.).max(0.) } else { 32. };
-    Some(Popover { size: (w, h), card: (0., 0.), origin: Some((f32::from(display.origin.x) + x, f32::from(display.origin.y) + y)) })
+    let card = Card { x: 0., gap: 0., bottom: false };
+    Some(Popover { size: (w, h), card, origin: Some((f32::from(display.origin.x) + x, f32::from(display.origin.y) + y)) })
 }
 
 pub fn open_window(variant: Variant, popover: Option<Popover>, cx: &mut App) -> Option<WindowHandle<Shell>> {
@@ -106,14 +134,17 @@ pub fn open_window(variant: Variant, popover: Option<Popover>, cx: &mut App) -> 
         Some((w.parse::<f32>().ok()?, h.parse::<f32>().ok()?))
     });
     let tray = variant == Variant::Tray;
+    let screen = screen(cx);
+    // The main window's minimum, unless the screen itself is smaller.
+    let min = screen.map_or(MIN_SIZE, |(sw, sh)| (MIN_SIZE.0.min(sw), MIN_SIZE.1.min(sh)));
     let (w, h) = popover.as_ref().map(|p| p.size).or(forced).unwrap_or_else(|| {
+        // Small screens: windows fit inside 90% of the display (the cockpit narrows below 1024 px, the tray's list scrolls).
         let (w, h) = if tray { POPUP } else { (1440., 900.) };
-        // Small screens: the main window fits inside 90% of the display (the layout narrows below 1024 px).
-        match cx.primary_display().map(|d| d.bounds().size) {
-            Some(d) if !tray => (w.min(f32::from(d.width) * 0.9).floor(), h.min(f32::from(d.height) * 0.9).floor()),
-            _ => (w, h),
-        }
+        let (w, h) = screen.map_or((w, h), |(sw, sh)| (w.min(sw * 0.9).floor(), h.min(sh * 0.9).floor()));
+        if tray { (w, h) } else { (w.max(min.0), h.max(min.1)) }
     });
+    // HITORI_SIZE may ask for less (screenshots).
+    let min = (min.0.min(w), min.1.min(h));
     let origin = popover.as_ref().and_then(|p| p.origin);
     let card = popover.map(|p| p.card);
     let bounds = match origin {
@@ -126,7 +157,9 @@ pub fn open_window(variant: Variant, popover: Option<Popover>, cx: &mut App) -> 
             // A placed popup is just the card: no title bar, above other windows.
             titlebar: if origin.is_some() { None } else { Some(TitlebarOptions { title: Some("Hitori VPN".into()), ..Default::default() }) },
             kind: if origin.is_some() { WindowKind::PopUp } else { WindowKind::Normal },
-            is_resizable: origin.is_none(),
+            // Tray windows keep their size: the popup is a fixed card, the popover overlay covers the work area.
+            is_resizable: !tray,
+            window_min_size: (!tray).then(|| size(px(min.0), px(min.1))),
             app_id: Some(if tray { "hitori-tray" } else { "hitori" }.into()),
             window_background: if card.is_some() { WindowBackgroundAppearance::Transparent } else { WindowBackgroundAppearance::Opaque },
             ..Default::default()
@@ -178,17 +211,18 @@ fn place_popup(click: (i32, i32)) -> Option<Popover> {
     let (mx, my, mw, mh) = (f("x"), f("y"), f("width") / scale, f("height") / scale);
     let reserved: Vec<f32> = m["reserved"].as_array().map(|r| r.iter().map(|v| v.as_f64().unwrap_or(0.) as f32).collect()).unwrap_or_default();
     let (rt, rb) = (reserved.get(1).copied().unwrap_or(0.), reserved.get(3).copied().unwrap_or(0.));
-    let (w, h) = POPUP;
-    let (aw, ah) = (mw, mh - rt - rb);
+    let w = POPUP.0;
+    // Whole logical pixels: the window rule and the fixed size (min == max) must agree.
+    let (aw, ah) = (mw.floor(), (mh - rt - rb).floor());
     let x = (cx - mx - w / 2.).clamp(8., (mw - w - 8.).max(8.));
-    let y = if cy - my < mh / 2. { 8. } else { ah - h - 8. };
+    let bottom = cy - my >= mh / 2.;
     let rule = format!(
         "if _G.hitori_tray then _G.hitori_tray:set_enabled(false) end; _G.hitori_tray = hl.window_rule({{ name = \"hitori-tray\", match = {{ class = \"^hitori-tray$\" }}, float = true, pin = true, no_anim = true, no_shadow = true, no_blur = true, border_size = 0, rounding = 0, size = \"{aw} {ah}\", move = \"{} {}\" }})",
         mx.round(),
         (my + rt).round()
     );
     run(&["eval", &rule])?;
-    Some(Popover { size: (aw, ah), card: (x.round(), y.round()), origin: None })
+    Some(Popover { size: (aw, ah), card: Card { x: x.round(), gap: 8., bottom }, origin: None })
 }
 
 fn handle(msg: Msg, cx: &mut App) {

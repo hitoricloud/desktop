@@ -91,16 +91,19 @@ pub struct Ring {
 /// Window root: the cached app view plus the ping-ring layer, whose 100 Hz frames redraw only the ring.
 pub struct Shell {
     pub hitori: Entity<Hitori>,
-    /// Tray popover: the window is a transparent overlay of the work area and the card sits at this point.
-    pub card: Option<(f32, f32)>,
+    /// Tray popover: the window is a transparent overlay (of the work area, or just the card) and the card sits in it.
+    pub card: Option<crate::tray::Card>,
 }
 
 impl Render for Shell {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let ring = self.hitori.read(cx).ring.get();
-        if let Some((x, y)) = self.card {
-            let (w, h) = crate::tray::POPUP;
+        if let Some(card) = self.card {
+            // Placed in the window the compositor actually gave us, which can differ from the one asked for.
+            let vp = window.viewport_size();
+            let (x, y, w, h) = card.place((f32::from(vp.width), f32::from(vp.height)));
+            self.hitori.read(cx).frame.set(Some(gpui::size(gpui::px(w), gpui::px(h))));
             // Clicks outside the card close the popover (the overlay covers everything but the bar).
             return div()
                 .size_full()
@@ -146,6 +149,8 @@ pub struct Hitori {
     pub variant: Variant,
     /// Shown as the tray icon's popover card (no backdrop, transparent corners).
     pub popover: bool,
+    /// The popover card's size: what the layout fills instead of the window.
+    pub frame: std::cell::Cell<Option<gpui::Size<gpui::Pixels>>>,
     /// This window's copy of the shared state; edits are pushed to `vpn` after each render.
     pub s: Shared,
     published: Shared,
@@ -207,6 +212,7 @@ impl Hitori {
             focus,
             variant,
             popover: false,
+            frame: Default::default(),
             s: shared.clone(),
             published: shared,
             vpn,
@@ -300,6 +306,11 @@ impl Hitori {
 
     pub fn theme(&self, cx: &App) -> Theme {
         theme(cx)
+    }
+
+    /// The area this view lays out in: the popover card, else the window.
+    pub fn viewport(&self, window: &Window) -> gpui::Size<gpui::Pixels> {
+        self.frame.get().unwrap_or_else(|| window.viewport_size())
     }
 
     /// Send local edits to the model, which tells the other windows and the tray.
@@ -531,6 +542,10 @@ impl Hitori {
     }
 
     fn on_variant(&mut self, variant: Variant, cx: &mut Context<Self>) {
+        // The cockpit is laid out for a whole window, not the popover's card.
+        if self.popover {
+            return;
+        }
         self.variant = variant;
         self.menu = None;
         self.map.refit();

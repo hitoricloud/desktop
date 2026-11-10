@@ -52,7 +52,7 @@ impl Hitori {
 
     pub fn sheet(&self, panel: Panel, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = self.theme(cx);
-        let vp = window.viewport_size();
+        let vp = self.viewport(window);
         let w = if f32::from(vp.width) >= 640. { 448. } else { f32::from(vp.width) };
         let (title, desc) = match panel {
             Panel::Account => match &self.s.account {

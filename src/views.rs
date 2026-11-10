@@ -15,6 +15,9 @@ use crate::ui::{
 
 pub const SIDEBAR: f32 = 288.;
 pub const INSPECTOR: f32 = 320.;
+/// Smallest main window: the narrow layout (the tray card's width over the map) and the tallest dialog with its 16 px
+/// margins. Wider breakpoints only add the sidebar and inspector beside the map.
+pub const MIN_SIZE: (f32, f32) = (crate::tray::POPUP.0, crate::palette::PALETTE_MAX_H + 32.);
 
 /// State colour: blue protected, red unprotected, muted while connecting.
 pub fn tone(conn: Conn, t: &Theme) -> Hsla {
@@ -181,8 +184,10 @@ impl Hitori {
 
     pub fn tray(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme(cx);
-        let vp = window.viewport_size();
-        let md = self.popover || f32::from(vp.width) >= 768.;
+        let vp = self.viewport(window);
+        let (w, h) = crate::tray::POPUP;
+        // A floating card on a backdrop when the window has room for all of it (main window, key 2); else it fills the window.
+        let float = !self.popover && f32::from(vp.width) >= 768. && f32::from(vp.height) >= h + 64.;
         let band = match self.s.conn {
             Conn::On => t.primary.opacity(0.1),
             Conn::Off => t.destructive.opacity(0.1),
@@ -193,8 +198,9 @@ impl Hitori {
             .flex_col()
             .overflow_hidden()
             .bg(t.card)
-            .when(md, |d| d.w(px(400.)).h(px(720.)).max_h_full().rounded(px(XL)).shadow(t.panel_shadow()))
-            .when(!md, |d| d.size_full())
+            .when(self.popover || float, |d| d.rounded(px(XL)).shadow(t.panel_shadow()))
+            .when(float, |d| d.w(px(w)).h(px(h)).max_h_full())
+            .when(!float, |d| d.size_full())
             .child(
                 div()
                     .h(px(56.))
@@ -221,7 +227,7 @@ impl Hitori {
             return card.into_any_element();
         }
         div().size_full().flex().items_center().justify_center().bg(t.background).child(
-            div().size_full().flex().items_center().justify_center().bg(t.muted.opacity(0.4)).when(md, |d| d.p(px(32.))).child(card),
+            div().size_full().flex().items_center().justify_center().bg(t.muted.opacity(0.4)).when(float, |d| d.p(px(32.))).child(card),
         )
         .into_any_element()
     }
