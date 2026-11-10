@@ -172,7 +172,7 @@ impl Hitori {
         }
     }
 
-    pub fn patch_rule(&mut self, app_id: &'static str, change: impl FnOnce(&mut AppRule), cx: &mut Context<Self>) {
+    fn patch_rule(&mut self, app_id: &'static str, change: impl FnOnce(&mut AppRule), cx: &mut Context<Self>) {
         let mut rule = self.app_route(app_id).cloned().unwrap_or(AppRule::mode(self.s.default_route));
         change(&mut rule);
         if rule.is_default(self.s.default_route) {

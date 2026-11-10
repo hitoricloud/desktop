@@ -12,7 +12,6 @@ use crate::net::{self, Geo};
 use crate::store::{self, Login, Rule, Settings};
 use crate::sub;
 use crate::suggest::Tracker;
-use crate::workspace::Layout;
 use crate::xray::{self, Core, Plan};
 
 #[derive(Clone, PartialEq)]
@@ -46,7 +45,8 @@ pub struct Shared {
     pub auto_connect: bool,
     pub kill_switch: bool,
     pub default_route: RuleMode,
-    pub layout: Layout,
+    /// The map draws every route in use, not only the main connection.
+    pub all_routes: bool,
     pub system_wide: bool,
     pub app_routes: Vec<(&'static str, AppRule)>,
     pub sites: Vec<(&'static str, SiteRule)>,
@@ -92,7 +92,7 @@ impl Shared {
             auto_connect: self.auto_connect,
             kill_switch: self.kill_switch,
             route: self.default_route.key().into(),
-            layout: self.layout.key().into(),
+            all_routes: self.all_routes,
             system_wide: self.system_wide,
             dark: self.dark,
             rules_big: self.rules_big,
@@ -176,7 +176,7 @@ impl Vpn {
             auto_connect: saved.auto_connect,
             kill_switch: saved.kill_switch,
             default_route: RuleMode::parse(&saved.route),
-            layout: Layout::parse(&saved.layout),
+            all_routes: saved.all_routes,
             system_wide: saved.system_wide,
             app_routes: saved.apps.iter().map(Rule::to_app).collect(),
             sites: saved.sites(),

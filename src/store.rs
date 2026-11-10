@@ -119,8 +119,8 @@ pub struct Settings {
     pub kill_switch: bool,
     /// Where traffic without a rule goes: auto, vpn, direct or block.
     pub route: String,
-    /// Main window: map, list or board.
-    pub layout: String,
+    /// The map shows every route in use.
+    pub all_routes: bool,
     /// Route the whole system through a TUN device (needs the administrator once per connection).
     pub system_wide: bool,
     pub dark: bool,
@@ -141,7 +141,7 @@ impl Default for Settings {
             auto_connect: false,
             kill_switch: true,
             route: "auto".into(),
-            layout: "map".into(),
+            all_routes: true,
             system_wide: true,
             dark: true,
             rules_big: true,

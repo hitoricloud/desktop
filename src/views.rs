@@ -117,11 +117,6 @@ impl Hitori {
         let vp = window.viewport_size();
         let (w, h) = (f32::from(vp.width), f32::from(vp.height));
         let wide = w >= 1024.;
-        if self.s.layout != crate::workspace::Layout::Map {
-            self.ring.set(None);
-            let inspector = wide.then(|| self.inspector(window, cx).into_any_element());
-            return div().flex().size_full().bg(t.background).child(self.workspace(wide, window, cx)).children(inspector).into_any_element();
-        }
         // Sidebar collapse: `transition-[left,right,width] duration-200 ease-linear`.
         let side_w = if w >= 768. { crate::fx::tween("sidebar-w", if self.sidebar_open { SIDEBAR } else { 0. }, 200., crate::fx::linear, window, cx) } else { 0. };
         let side = side_w > 0.;
@@ -130,7 +125,7 @@ impl Hitori {
         {
             let mut keep = self.keepout.borrow_mut();
             keep.clear();
-            keep.push([16., 16., 32. + 8. + 100., 32.]);
+            keep.push([16., 16., 72., 32.]);
             if wide {
                 keep.push([(map_w - 360.) / 2. - 8., h - 24. - 340., 376., 348.]);
             } else {
@@ -183,7 +178,7 @@ impl Hitori {
             .size_full()
             .bg(t.background)
             .children(sidebar)
-            .child(div().relative().flex_1().min_w_0().h_full().child(map).child(trigger.child(self.layout_switch(cx))).children(toasts).children(narrow))
+            .child(div().relative().flex_1().min_w_0().h_full().child(map).child(trigger.child(self.routes_toggle(cx))).children(toasts).children(narrow))
             .children(inspector)
             .into_any_element()
     }
@@ -350,7 +345,7 @@ impl Hitori {
     }
 
     /// Tray header: avatar button with Account, Settings and Sign out.
-    pub fn account_menu(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn account_menu(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme(cx);
         let open = self.menu == Some(Menu::TrayAccount);
         let trigger = button("tray-account", Variant::Ghost, Size::IconLg, true, &t)
@@ -387,7 +382,8 @@ impl Hitori {
         let t = self.theme(cx);
         let wide = f32::from(window.viewport_size().width) >= 1024.;
         let review = if toasts && wide { self.s.suggestions.iter().filter(|s| self.s.snoozed.contains(&s.id)).count() } else { self.s.suggestions.len() };
-        let count = self.s.app_routes.len() + self.s.sites.len();
+        let idle = self.s.app_routes.iter().filter(|(a, _)| !data::active(a)).count();
+        let count = self.s.app_routes.len() - idle + self.s.sites.len();
         let big = self.s.rules_big;
         let primary = t.primary;
         let fg = t.foreground;
@@ -436,7 +432,15 @@ impl Hitori {
                     .items_center()
                     .justify_between()
                     .px(px(8.))
-                    .child(div().xs().medium().text_color(t.muted_fg).child(format!("Active rules · {count}")))
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(6.))
+                            .xs()
+                            .text_color(t.muted_fg)
+                            .child(div().medium().child(format!("Active rules · {count}")))
+                            .when(idle > 0, |d| d.child(format!("{idle} idle"))),
+                    )
                     .child(view_btn),
             )
             .child(
@@ -467,6 +471,21 @@ impl Hitori {
                         .child(icon("chevron-right", 16., muted)),
                 ),
             )
+    }
+
+    /// Map toggle: every route in use, or only the main connection.
+    fn routes_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = self.theme(cx);
+        let on = self.s.all_routes;
+        button("all-routes", Variant::Ghost, Size::IconSm, true, &t)
+            .rest(if on { t.accent } else { t.card })
+            .shadow(t.panel_shadow())
+            .tooltip(tip(if on { "All routes" } else { "Main route only" }, &t))
+            .child(icon("route", 16., if on { t.foreground } else { t.muted_fg }))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.s.all_routes = !this.s.all_routes;
+                cx.notify();
+            }))
     }
 
     /// Where traffic without a rule goes: a segmented control with the chosen mode explained under it.
@@ -518,8 +537,10 @@ impl Hitori {
     }
 
     /// Every app and site with a rule, apps by traffic; anything else follows the default route and is not listed.
+    /// The sidebar leaves out apps that are not using the network; their rules stay and apply when they run again.
     pub fn active_rules(&self, big: bool, sites: bool, place: Place, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut apps: Vec<&'static AppInfo> = self.s.app_routes.iter().map(|(a, _)| app(a)).collect();
+        let mut apps: Vec<&'static AppInfo> =
+            self.s.app_routes.iter().filter(|(a, _)| place == Place::Sheet || data::active(a)).map(|(a, _)| app(a)).collect();
         // Recently active first; apps not seen this session last.
         apps.sort_by_key(|a| (data::seen_min(a.id).unwrap_or(u32::MAX), a.name));
         let mut col = div().flex().flex_col().when(big, |d| d.gap(px(8.)));

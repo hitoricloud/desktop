@@ -262,6 +262,14 @@ pub fn saw(exes: &[String]) {
     }
 }
 
+/// How long an app counts as in use after the last scan that saw a connection, so a quiet moment does not hide it.
+const ACTIVE_FOR: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The app had a connection open within the last minute.
+pub fn active(id: &str) -> bool {
+    SEEN.read().unwrap().iter().any(|(exe, t)| t.elapsed() < ACTIVE_FOR && app_id(exe) == id)
+}
+
 /// Minutes since any of the app's executables had a connection open; `None` if not seen this session.
 pub fn seen_min(id: &str) -> Option<u32> {
     let seen = SEEN.read().unwrap();

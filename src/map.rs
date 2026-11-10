@@ -10,10 +10,11 @@ use gpui::{
 };
 
 use crate::app::{Conn, Hitori, Ring};
-use crate::data::{self, Server, server};
-use crate::vtile::{self, VTile};
+use crate::data::{self, RuleMode, Server, SiteRule, server};
 use crate::theme::Theme;
-use crate::ui::{MD, Tw, flag};
+use crate::ui::{MD, Tw, flag, tip};
+use crate::views::{app_badge, site_badge};
+use crate::vtile::{self, VTile};
 
 const FIT_MS: f64 = 900.;
 const MAX_ZOOM: f64 = 5.;
@@ -145,25 +146,109 @@ impl MapState {
     }
 }
 
-fn stops(this: &Hitori) -> Vec<(f64, f64)> {
-    let mut v = vec![];
-    if let Some(g) = this.s.me.as_ref().and_then(|m| m.geo.as_ref()) {
-        v.push((g.lat, g.lon));
+/// What travels a route: shown as badges on its exit's label.
+#[derive(Clone, Copy, PartialEq)]
+enum Rider {
+    App(&'static str),
+    Site(&'static str),
+}
+
+/// One path on the map: servers ending at the exit, and what uses it.
+struct Path {
+    hops: Vec<&'static str>,
+    main: bool,
+    riders: Vec<Rider>,
+}
+
+/// Everything in use: the main connection, per-app exits and cascades, and what stays local or is blocked.
+struct Routes {
+    paths: Vec<Path>,
+    direct: Vec<Rider>,
+    blocked: Vec<Rider>,
+}
+
+impl Routes {
+    fn of(this: &Hitori) -> Routes {
+        let s = &this.s;
+        let entry = s.entry_id.filter(|e| *e != s.server_id);
+        let main: Vec<&'static str> = entry.into_iter().chain([s.server_id]).collect();
+        let mut r = Routes { paths: vec![Path { hops: main.clone(), main: true, riders: vec![] }], direct: vec![], blocked: vec![] };
+        if !s.all_routes {
+            return r;
+        }
+        let put = |r: &mut Routes, hops: Vec<&'static str>, who: Rider| match r.paths.iter_mut().find(|p| p.hops == hops) {
+            Some(p) => p.riders.push(who),
+            None => r.paths.push(Path { hops, main: false, riders: vec![who] }),
+        };
+        for (a, rule) in &s.app_routes {
+            if !data::active(a) {
+                continue;
+            }
+            match rule.mode {
+                RuleMode::Block => r.blocked.push(Rider::App(a)),
+                RuleMode::Direct => r.direct.push(Rider::App(a)),
+                RuleMode::Vpn | RuleMode::Auto => {
+                    let exit = rule.exit.filter(|e| data::has_server(e)).unwrap_or(s.server_id);
+                    let via = rule.via.or(if rule.exit.is_some() { None } else { entry }).filter(|v| *v != exit && data::has_server(v));
+                    put(&mut r, via.into_iter().chain([exit]).collect(), Rider::App(a));
+                }
+            }
+        }
+        for (site, rule) in &s.sites {
+            match rule {
+                SiteRule::Vpn => put(&mut r, main.clone(), Rider::Site(site)),
+                SiteRule::Direct => r.direct.push(Rider::Site(site)),
+            }
+        }
+        r
     }
-    if let Some(e) = this.s.entry_id {
-        let s = server(e);
-        v.push((s.lat, s.lon));
+
+    /// Each path as places from you through its hops, and whether it is the main connection.
+    fn lines(&self, me: Option<(f64, f64)>) -> Vec<(Vec<(f64, f64)>, bool)> {
+        self.paths
+            .iter()
+            .map(|p| (me.into_iter().chain(p.hops.iter().map(|h| (server(h).lat, server(h).lon))).collect(), p.main))
+            .collect()
     }
-    let s = server(this.s.server_id);
-    v.push((s.lat, s.lon));
-    v
+
+    /// Who leaves the tunnel at this server.
+    fn riders_at(&self, id: &str) -> Vec<Rider> {
+        self.paths.iter().filter(|p| p.hops.last() == Some(&id)).flat_map(|p| p.riders.iter().copied()).collect()
+    }
+}
+
+fn me(this: &Hitori) -> Option<(f64, f64)> {
+    this.s.me.as_ref().and_then(|m| m.geo.as_ref()).map(|g| (g.lat, g.lon))
+}
+
+/// Up to six badges, then a count; each names its app or site on hover.
+fn badges(riders: &[Rider], key: &str, t: &Theme) -> gpui::Div {
+    let mut row = div().flex().items_center().gap(px(2.));
+    for (i, r) in riders.iter().take(6).enumerate() {
+        let (badge, name) = match r {
+            Rider::App(a) => (app_badge(data::app(a)), data::app(a).name.to_owned()),
+            Rider::Site(s) => (site_badge(t), (*s).to_owned()),
+        };
+        row = row.child(div().id(gpui::SharedString::from(format!("rb-{key}-{i}"))).tooltip(tip(name, t)).child(badge));
+    }
+    if riders.len() > 6 {
+        row = row.child(div().pl(px(2.)).xs().text_color(t.muted_fg).child(format!("+{}", riders.len() - 6)));
+    }
+    row
 }
 
 impl Hitori {
-    pub fn map_view(&mut self, size: (f32, f32), pad: Padding, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub fn map_view(&mut self, size: (f32, f32), mut pad: Padding, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = self.theme(cx);
         let scale = window.scale_factor();
-        let frame = format!("{:?}:{}", stops(self), self.s.me.as_ref().is_some_and(|m| m.geo.is_some()));
+        let routes = Routes::of(self);
+        // Your label is centred on you and grows with what stays local; keep it inside the map.
+        let local = routes.direct.len().min(6) + routes.blocked.len().min(6);
+        let half = (40. + 22. * local as f32 + 56. * (!routes.direct.is_empty() as u8 + !routes.blocked.is_empty() as u8) as f32) / 2.;
+        pad.left = pad.left.max(half + 16.);
+        pad.right = pad.right.max(half + 16.);
+        let lines = routes.lines(me(self));
+        let frame = format!("{lines:?}");
         let m = &mut self.map;
         if m.size != size {
             m.size = size;
@@ -172,15 +257,7 @@ impl Hitori {
         let key = frame;
         if key != m.framed {
             m.framed = key;
-            let mut points = vec![];
-            let s = server(self.s.server_id);
-            points.push((s.lat, s.lon));
-            if let Some(g) = self.s.me.as_ref().and_then(|m| m.geo.as_ref()) {
-                points.push((g.lat, g.lon));
-            }
-            if let Some(e) = self.s.entry_id {
-                points.push((server(e).lat, server(e).lon));
-            }
+            let points: Vec<(f64, f64)> = lines.iter().flat_map(|(l, _)| l.iter().copied()).collect();
             let to = m.fit(&points, &pad);
             m.ease = Some(Ease { from: (m.center, m.zoom), to, start: Instant::now() });
         }
@@ -233,7 +310,7 @@ impl Hitori {
 
     /// Vector tiles at floor(zoom) (512px each), labels and the route, as one image (see `Raster`).
     fn basemap(&mut self, t: &Theme, scale: f32, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let stops = stops(self);
+        let paths = Routes::of(self).lines(me(self));
         let on = self.s.conn == Conn::On;
         let route_color = if on { t.primary } else { t.muted_fg };
         let dark = t.dark;
@@ -314,10 +391,10 @@ impl Hitori {
         }
 
         let (w, h) = ((full.0 * scale).round().max(1.) as u32, (full.1 * scale).round().max(1.) as u32);
-        let key = format!("{:.6}/{:.9}/{:.9}/{w}x{h}/{dark}/{}/{on}/{stops:?}", m.zoom, m.center.0, m.center.1, m.tiles_gen);
+        let key = format!("{:.6}/{:.9}/{:.9}/{w}x{h}/{dark}/{}/{on}/{paths:?}", m.zoom, m.center.0, m.center.1, m.tiles_gen);
         if m.job.is_none() && m.raster.as_ref().map(|r| &r.key) != Some(&key) {
             let (center, zoom) = (m.center, m.zoom);
-            let legs = route_legs(&stops, center, world, full);
+            let legs: Vec<_> = paths.iter().map(|(stops, main)| (route_legs(stops, center, world, full), *main)).collect();
             m.job = Some(cx.spawn(async move |this, cx| {
                 let image = cx
                     .background_executor()
@@ -327,8 +404,13 @@ impl Hitori {
                             placed.iter().map(|(d, x, y, sz, fb)| vtile::Placed { tile: d, x: x * scale, y: y * scale, size: sz * scale, fallback: *fb }).collect();
                         vtile::rasterize(&mut pix, zoom, scale, if dark { &vtile::DARK } else { &vtile::LIGHT }, &tiles);
                         // MapLibre: line-width 2, line-cap round, dasharray [2, 2] (in line widths) while off.
-                        let lines: Vec<Vec<(f32, f32)>> = legs.iter().map(|l| l.iter().map(|p| (p.0 * scale, p.1 * scale)).collect()).collect();
-                        vtile::stroke_lines(&mut pix, &lines, 2. * scale, (!on).then(|| vec![4. * scale, 4. * scale]), true, route_color);
+                        // Other routes first and fainter, the main connection on top.
+                        for main in [false, true] {
+                            let lines: Vec<Vec<(f32, f32)>> =
+                                legs.iter().filter(|l| l.1 == main).flat_map(|l| l.0.iter()).map(|l| l.iter().map(|p| (p.0 * scale, p.1 * scale)).collect()).collect();
+                            let color = if main { route_color } else { route_color.opacity(0.5) };
+                            vtile::stroke_lines(&mut pix, &lines, 2. * scale, (!on).then(|| vec![4. * scale, 4. * scale]), true, color);
+                        }
                         let mut rgba = pix.take();
                         for px in rgba.chunks_exact_mut(4) {
                             px.swap(0, 2);
@@ -377,15 +459,21 @@ impl Hitori {
     }
 
     fn markers(&self, t: &Theme, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let mut out: Vec<AnyElement> = data::servers().into_iter().map(|s| self.server_marker(s, t, window, cx)).collect();
+        let routes = Routes::of(self);
+        let mut out: Vec<AnyElement> = data::servers().into_iter().map(|s| self.server_marker(s, &routes.riders_at(s.id), t, window, cx)).collect();
         if let Some(g) = self.s.me.as_ref().and_then(|m| m.geo.as_ref()) {
             let (x, y) = self.map.screen(unit(g.lat, g.lon));
+            let local = |label: &str, color: Hsla, riders: &[Rider]| {
+                (!riders.is_empty()).then(|| {
+                    div().flex().items_center().gap(px(4.)).pl(px(4.)).border_l_1().border_color(t.border).child(div().text_color(color).child(label.to_owned())).child(badges(riders, label, t))
+                })
+            };
             out.push(
                 div()
                     .absolute()
-                    .left(px(x - 100.))
+                    .left(px(x - 200.))
                     .top(px(y - 12.))
-                    .w(px(200.))
+                    .w(px(400.))
                     .flex()
                     .justify_center()
                     .child(
@@ -400,7 +488,10 @@ impl Hitori {
                             .text_color(t.muted_fg)
                             .xs()
                             .whitespace_nowrap()
-                            .child("You"),
+                            .gap(px(4.))
+                            .child("You")
+                            .children(local("direct", t.muted_fg, &routes.direct))
+                            .children(local("blocked", t.destructive, &routes.blocked)),
                     )
                     .into_any_element(),
             );
@@ -408,9 +499,11 @@ impl Hitori {
         out
     }
 
-    fn server_marker(&self, s: &'static Server, t: &Theme, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    fn server_marker(&self, s: &'static Server, riders: &[Rider], t: &Theme, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let selected = s.id == self.s.server_id;
         let entry = self.s.entry_id == Some(s.id);
+        // Exit of another route: an app or site leaves the tunnel here.
+        let exit = !selected && !riders.is_empty();
         let (x, y) = self.map.screen(unit(s.lat, s.lon));
         let t = *t;
         let mut dot = div().relative().size(px(24.)).flex_none().flex().items_center().justify_center();
@@ -428,19 +521,19 @@ impl Hitori {
         }
         let (outer, inner, ring, fill) = if selected {
             (20., 16., t.background, if self.s.conn == Conn::On { t.primary } else { t.foreground })
-        } else if entry {
+        } else if entry || exit {
             (16., 12., t.foreground, t.background)
         } else {
             (16., 12., t.background, t.muted_fg)
         };
         let hover = t.foreground;
-        let plain = !selected && !entry;
+        let plain = !selected && !entry && !exit;
         dot = dot.child(
             div().size(px(outer)).rounded_full().bg(ring).flex().items_center().justify_center().child(
                 div().size(px(inner)).rounded_full().bg(fill).when(plain, |d| d.group_hover("marker", move |s| s.bg(hover))),
             ),
         );
-        let chip = (selected || entry).then(|| {
+        let chip = (selected || entry || exit).then(|| {
             div()
                 .flex()
                 .items_center()
@@ -456,23 +549,29 @@ impl Hitori {
                 .when(selected, |d| d.medium())
                 .child(flag(s.code, false, window))
                 .child(if entry { format!("via {}", s.city) } else { s.city.to_owned() })
+                .when(!riders.is_empty(), |d| d.child(badges(riders, s.id, &t).ml(px(2.))))
         });
         let id = s.id;
         let anchored_left = chip.is_some();
+        // Labels in the right part of the map open to the left of their dot, so they stay on screen.
+        let flip = anchored_left && x > self.map.size.0 * 0.6;
         div()
             .absolute()
-            .left(px(x))
             .top(px(y))
+            .when(flip, |d| d.right(px(self.map.size.0 - x)))
+            .when(!flip, |d| d.left(px(x)))
             .child(
                 div()
                     .id(id)
                     .group("marker")
                     .relative()
                     .flex()
+                    .when(flip, |d| d.flex_row_reverse())
                     .items_center()
                     .gap(px(8.))
                     .cursor_pointer()
-                    .when(anchored_left, |d| d.left(px(-12.)).top(px(-14.)))
+                    .when(flip, |d| d.left(px(12.)).top(px(-14.)))
+                    .when(anchored_left && !flip, |d| d.left(px(-12.)).top(px(-14.)))
                     .when(!anchored_left, |d| d.left(px(-12.)).top(px(-12.)))
                     .on_click(cx.listener(move |this, _, window, cx| this.go(id, window, cx)))
                     .child(dot)

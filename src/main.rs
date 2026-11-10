@@ -19,7 +19,6 @@ mod ui;
 mod views;
 mod vpn;
 mod vtile;
-mod workspace;
 
 use std::borrow::Cow;
 
