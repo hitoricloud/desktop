@@ -332,6 +332,20 @@ pub struct Me {
     pub plan: Option<Plan>,
 }
 
+/// Unix seconds → `4 Feb 2029` (days to civil date, proleptic Gregorian).
+fn unix_date(secs: i64) -> String {
+    const MONTHS: [&str; 12] = ["Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec", "Jan", "Feb"];
+    let z = secs.div_euclid(86400) + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let year = yoe + era * 400 + i64::from(mp >= 10);
+    format!("{day} {} {year}", MONTHS[mp as usize])
+}
+
 fn me_from(v: Value) -> Result<Me, Error> {
     let user: User = serde_json::from_value(v["user"].clone()).map_err(|_| unexpected())?;
     let s = &v["subscription"];
@@ -345,7 +359,7 @@ fn me_from(v: Value) -> Result<Me, Error> {
                 active: status.eq_ignore_ascii_case("active"),
                 status,
                 days_left: s["days_left"].as_f64().map(|d| d.max(0.) as u32),
-                expires: s["expires_at"].as_str().and_then(data::date),
+                expires: s["expires_at"].as_str().and_then(data::date).or_else(|| s["expires_at"].as_i64().map(unix_date)),
                 used: num("traffic_used") as u64,
                 limit: num("traffic_limit") as u64,
                 support: None,
@@ -561,6 +575,16 @@ mod tests {
         assert_eq!(Client::new("https://api.example".into(), path.clone()).take(), Some(s));
         assert!(!path.exists());
         assert_eq!(Client::new("https://api.example".into(), path).session(), None);
+    }
+
+    #[test]
+    fn expiry_as_unix_seconds() {
+        assert_eq!(unix_date(1864906214), "4 Feb 2029");
+        assert_eq!(unix_date(0), "1 Jan 1970");
+        assert_eq!(unix_date(951782400), "29 Feb 2000");
+        let me = me_from(json!({"user": {"name": "A"}, "subscription": {"url": "https://s/x", "status": "active", "expires_at": 1864906214}})).unwrap();
+        assert_eq!(me.plan.unwrap().account.expires.as_deref(), Some("4 Feb 2029"));
+        assert!(me_from(json!({"user": {"name": "A"}, "subscription": null})).unwrap().plan.is_none());
     }
 
     #[test]

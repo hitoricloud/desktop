@@ -568,9 +568,9 @@ impl Vpn {
                 self.login = Some(plan.url);
                 self.refresh(None, cx);
             }
+            // The saved subscription stays: the backend also answers null when it cannot reach the panel.
             None => {
                 self.disconnect(cx);
-                let _ = std::fs::remove_file(subscription_path());
                 self.login = None;
                 self.s.account = None;
                 data::set_servers(vec![]);
