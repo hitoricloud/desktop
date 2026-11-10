@@ -1,16 +1,24 @@
-//! System tray icon (StatusNotifierItem over D-Bus) and the popup window it opens.
-use std::time::{Duration, Instant};
+//! System tray icon (StatusNotifierItem over D-Bus, Linux only) and the popup window it opens.
+#[cfg(target_os = "linux")]
+use std::time::Duration;
+use std::time::Instant;
 
 use gpui::{App, AppContext, Bounds, Entity, Global, TitlebarOptions, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowOptions, px, size};
+#[cfg(target_os = "linux")]
 use ksni::blocking::TrayMethods;
+#[cfg(target_os = "linux")]
 use ksni::menu::{MenuItem, RadioGroup, RadioItem, StandardItem, SubMenu};
 
-use crate::app::{Conn, Hitori, Shell, Variant, Vpn};
+#[cfg(target_os = "linux")]
+use crate::app::Conn;
+use crate::app::{Hitori, Shell, Variant, Vpn};
+#[cfg(target_os = "linux")]
 use crate::data::{self, server};
 
 pub const POPUP: (f32, f32) = (400., 720.);
 
 /// Tray events, sent from ksni's D-Bus thread to the GPUI main thread.
+#[cfg(target_os = "linux")]
 pub enum Msg {
     /// Icon clicked; screen position of the click when the tray host reports one.
     TogglePopup(i32, i32),
@@ -20,6 +28,7 @@ pub enum Msg {
     Quit,
 }
 
+#[cfg(target_os = "linux")]
 pub struct TrayIcon {
     tx: async_channel::Sender<Msg>,
     conn: Conn,
@@ -28,6 +37,7 @@ pub struct TrayIcon {
 }
 
 /// Lucide shield (as in the app) rasterised into SNI ARGB32 pixmaps: blue protected, red unprotected, grey connecting.
+#[cfg(target_os = "linux")]
 fn icons() -> [Vec<ksni::Icon>; 3] {
     let shapes = [
         ("shield-check", "#51a2ff"),
@@ -54,6 +64,7 @@ fn icons() -> [Vec<ksni::Icon>; 3] {
     })
 }
 
+#[cfg(target_os = "linux")]
 impl ksni::Tray for TrayIcon {
     fn id(&self) -> String {
         "hitori".into()
@@ -104,6 +115,7 @@ impl ksni::Tray for TrayIcon {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl TrayIcon {
     fn status(&self) -> String {
         let s = server(self.server_id);
@@ -120,6 +132,7 @@ impl TrayIcon {
 pub struct Windows {
     pub vpn: Option<Entity<Vpn>>,
     pub main: Option<WindowHandle<Shell>>,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub popup: Option<WindowHandle<Shell>>,
     /// Clicking the tray icon first unfocuses (and closes) the popup; don't reopen it from that same click.
     pub popup_closed: Option<Instant>,
@@ -128,6 +141,7 @@ pub struct Windows {
 impl Global for Windows {}
 
 /// Where the tray popover goes: the overlay window's size and the card's position inside it.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub struct Popover {
     size: (f32, f32),
     card: (f32, f32),
@@ -178,6 +192,7 @@ pub fn open_window(variant: Variant, popover: Option<Popover>, cx: &mut App) -> 
 /// Hyprland has no way for a client to place its window, so ask the compositor: a borderless transparent window
 /// over the monitor's work area, with the card next to the click, against the bar. Covering the work area keeps
 /// focus-follows-mouse from moving focus away while the pointer travels. Other compositors get a normal window.
+#[cfg(target_os = "linux")]
 fn place_popup(click: (i32, i32)) -> Option<Popover> {
     std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE")?;
     let run = |args: &[&str]| std::process::Command::new("hyprctl").args(args).output().ok().map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
@@ -209,6 +224,7 @@ fn place_popup(click: (i32, i32)) -> Option<Popover> {
     Some(Popover { size: (aw, ah), card: (x.round(), y.round()) })
 }
 
+#[cfg(target_os = "linux")]
 fn handle(msg: Msg, cx: &mut App) {
     let vpn = cx.global::<Windows>().vpn.clone();
     match msg {
@@ -246,7 +262,14 @@ fn handle(msg: Msg, cx: &mut App) {
     }
 }
 
+/// No tray icon on macOS and Windows yet: the app quits with its last window.
+#[cfg(not(target_os = "linux"))]
+pub fn start(_: &Entity<Vpn>, _: &mut App) -> bool {
+    false
+}
+
 /// Start the tray icon; returns false when there is no StatusNotifier host (then the app quits with its last window).
+#[cfg(target_os = "linux")]
 pub fn start(vpn: &Entity<Vpn>, cx: &mut App) -> bool {
     let (tx, rx) = async_channel::unbounded();
     let s = vpn.read(cx).s.clone();

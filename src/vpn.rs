@@ -423,7 +423,7 @@ impl Vpn {
             entry: self.s.entry_id.map(data::server),
             protocol: self.s.protocol,
             default_route: self.s.default_route,
-            tun: self.s.system_wide,
+            tun: self.s.system_wide && xray::SYSTEM_WIDE,
             kill_switch: self.s.kill_switch,
             apps: self.s.app_routes.clone(),
             sites: self.s.sites.clone(),
@@ -638,6 +638,7 @@ impl Vpn {
     }
 
     /// Connect to a location (tray menu); picking the live one again does nothing.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn go(&mut self, id: &'static str, cx: &mut Context<Self>) {
         let was = (self.s.conn, self.s.server_id);
         self.s.server_id = id;

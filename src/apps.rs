@@ -1,11 +1,20 @@
 //! Executables of this user that have internet sockets open, named the way Xray's `process` rule sees them.
+//! Only Linux has a scanner so far; elsewhere the Add app menu starts empty.
+#![cfg_attr(not(target_os = "linux"), allow(unused_imports))]
 
 use std::collections::{BTreeSet, HashSet};
 use std::fs;
+#[cfg(target_os = "linux")]
 use std::os::unix::fs::MetadataExt;
+
+#[cfg(not(target_os = "linux"))]
+pub fn scan() -> Vec<String> {
+    Vec::new()
+}
 
 /// Basenames of `/proc/<pid>/exe` (as Xray's process matcher takes them) of the current user's
 /// processes holding at least one TCP/UDP socket; sorted, deduplicated.
+#[cfg(target_os = "linux")]
 pub fn scan() -> Vec<String> {
     let inodes = internet_inodes();
     let (Ok(me), Ok(procs)) = (fs::metadata("/proc/self"), fs::read_dir("/proc")) else { return Vec::new() };
@@ -28,6 +37,7 @@ pub fn scan() -> Vec<String> {
 }
 
 /// Socket inodes of every TCP/UDP socket in this network namespace.
+#[cfg(target_os = "linux")]
 fn internet_inodes() -> HashSet<u64> {
     let mut inodes = HashSet::new();
     for table in ["tcp", "tcp6", "udp", "udp6"] {
@@ -37,6 +47,7 @@ fn internet_inodes() -> HashSet<u64> {
     inodes
 }
 
+#[cfg(target_os = "linux")]
 fn has_socket(pid: &str, inodes: &HashSet<u64>) -> bool {
     let Ok(fds) = fs::read_dir(format!("/proc/{pid}/fd")) else { return false };
     fds.flatten().any(|fd| {
@@ -46,7 +57,7 @@ fn has_socket(pid: &str, inodes: &HashSet<u64>) -> bool {
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use std::net::{TcpListener, UdpSocket};

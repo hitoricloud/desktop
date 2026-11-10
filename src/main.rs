@@ -1,3 +1,4 @@
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 mod app;
 mod apps;
 mod data;
@@ -14,6 +15,7 @@ mod score;
 mod suggest;
 mod theme;
 mod tray;
+#[cfg(target_os = "linux")]
 mod tun;
 mod ui;
 mod views;
@@ -41,6 +43,9 @@ impl AssetSource for Assets {
     }
 }
 
+#[cfg(target_os = "macos")]
+gpui::actions!(hitori, [Quit]);
+
 /// Text calibration: the same strings the web test page draws, white on black, 48px.
 struct TextTest;
 pub const TEST_LINES: [&str; 4] = ["Exit Estonia", "qbittorrent", "203.0.113.66", "Hitori VPN"];
@@ -61,6 +66,7 @@ impl gpui::Render for TextTest {
 /// `--tray` opens the 400×720 tray popup; `HITORI_SIZE=WxH` overrides the window size (screenshots).
 /// The Vulkan loader initialises every installed driver while enumerating GPUs; Mesa's software one (lavapipe) alone
 /// maps ~100 MB of LLVM. Skip it when a hardware GPU exists and nobody chose drivers explicitly.
+#[cfg(target_os = "linux")]
 fn skip_software_vulkan() {
     let chosen = ["VK_ICD_FILENAMES", "VK_DRIVER_FILES", "VK_LOADER_DRIVERS_SELECT", "VK_LOADER_DRIVERS_DISABLE"].iter().any(|v| std::env::var_os(v).is_some());
     let hardware = std::path::Path::new("/dev/nvidia0").exists()
@@ -74,10 +80,13 @@ fn skip_software_vulkan() {
 /// `--tray`: only the tray popup window (screenshots). `--background`: start with just the tray icon.
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    if args.get(1).map(String::as_str) == Some("--tun-helper") {
-        std::process::exit(tun::helper(&args[2..]));
+    #[cfg(target_os = "linux")]
+    {
+        if args.get(1).map(String::as_str) == Some("--tun-helper") {
+            std::process::exit(tun::helper(&args[2..]));
+        }
+        skip_software_vulkan();
     }
-    skip_software_vulkan();
     let tray_only = args.iter().any(|a| a == "--tray");
     let background = args.iter().any(|a| a == "--background");
     Application::new().with_assets(Assets).run(move |cx: &mut App| {
@@ -100,6 +109,19 @@ fn main() {
         let has_tray = !tray_only && tray::start(&vpn, cx);
         // With a tray icon, closing every window leaves the app (and the tunnel) running.
         gpui::KEEP_ALIVE_WITHOUT_WINDOWS.store(has_tray, std::sync::atomic::Ordering::Relaxed);
+        // macOS apps outlive their windows by default; without a tray icon there is no way back in.
+        #[cfg(target_os = "macos")]
+        {
+            cx.on_window_closed(|cx| {
+                if cx.windows().is_empty() {
+                    cx.quit();
+                }
+            })
+            .detach();
+            cx.on_action(|_: &Quit, cx| cx.quit());
+            cx.bind_keys([gpui::KeyBinding::new("cmd-q", Quit, None)]);
+            cx.set_menus(vec![gpui::Menu { name: "Hitori VPN".into(), items: vec![gpui::MenuItem::action("Quit Hitori VPN", Quit)] }]);
+        }
         if tray_only {
             tray::open_window(Variant::Tray, None, cx);
         } else if !(background && has_tray) {

@@ -1,5 +1,7 @@
 //! Files the app keeps: settings and the signed-in subscription in ~/.config/hitori (0600), learned exits in ~/.cache.
+//! macOS uses ~/Library/Application Support and ~/Library/Caches, Windows %APPDATA% and %LOCALAPPDATA%.
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::PathBuf;
 
@@ -7,40 +9,66 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::data::{AppRule, Protocol, RuleMode};
 
-fn home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/tmp"))
+fn env_dir(var: &str) -> Option<PathBuf> {
+    std::env::var_os(var).map(PathBuf::from).filter(|p| p.is_absolute())
 }
 
-fn xdg(var: &str, fallback: &str) -> PathBuf {
-    std::env::var_os(var).map(PathBuf::from).filter(|p| p.is_absolute()).unwrap_or_else(|| home().join(fallback)).join("hitori")
+#[cfg(unix)]
+fn home() -> PathBuf {
+    env_dir("HOME").unwrap_or_else(std::env::temp_dir)
+}
+
+#[cfg(target_os = "linux")]
+fn base(xdg: &str, fallback: &str) -> PathBuf {
+    env_dir(xdg).unwrap_or_else(|| home().join(fallback))
 }
 
 pub fn config_dir() -> PathBuf {
-    xdg("XDG_CONFIG_HOME", ".config")
+    #[cfg(target_os = "linux")]
+    let base = base("XDG_CONFIG_HOME", ".config");
+    #[cfg(target_os = "macos")]
+    let base = home().join("Library/Application Support");
+    #[cfg(windows)]
+    let base = env_dir("APPDATA").unwrap_or_else(std::env::temp_dir);
+    base.join("hitori")
 }
 
 pub fn cache_dir() -> PathBuf {
-    xdg("XDG_CACHE_HOME", ".cache")
+    #[cfg(target_os = "linux")]
+    let base = base("XDG_CACHE_HOME", ".cache");
+    #[cfg(target_os = "macos")]
+    let base = home().join("Library/Caches");
+    #[cfg(windows)]
+    let base = env_dir("LOCALAPPDATA").unwrap_or_else(std::env::temp_dir);
+    base.join("hitori")
 }
 
-/// Generated core configs (they hold credentials): private to the user and gone after a reboot.
+/// Generated core configs (they hold credentials): private to the user and, where there is a runtime dir, gone after a reboot.
 pub fn runtime_dir() -> PathBuf {
-    let dir = std::env::var_os("XDG_RUNTIME_DIR").map(|d| PathBuf::from(d).join("hitori")).unwrap_or_else(|| cache_dir().join("run"));
+    let dir = env_dir("XDG_RUNTIME_DIR").map(|d| d.join("hitori")).unwrap_or_else(|| cache_dir().join("run"));
     let _ = std::fs::create_dir_all(&dir);
+    #[cfg(unix)]
     let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
     dir
 }
 
 /// Write via a temporary file so a crash never leaves half a file; `private` files are 0600.
+#[cfg_attr(windows, allow(unused_variables))]
 pub fn write(path: &PathBuf, bytes: &[u8], private: bool) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
+        #[cfg(unix)]
         if private {
             std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
         }
     }
     let tmp = path.with_extension("tmp");
-    let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(if private { 0o600 } else { 0o644 }).open(&tmp)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    // Windows: %APPDATA% and %LOCALAPPDATA% are already private to the user.
+    #[cfg(unix)]
+    options.mode(if private { 0o600 } else { 0o644 });
+    let mut f = options.open(&tmp)?;
     f.write_all(bytes)?;
     f.sync_all()?;
     std::fs::rename(&tmp, path)
@@ -141,7 +169,7 @@ impl Default for Settings {
             auto_connect: false,
             kill_switch: true,
             route: "auto".into(),
-            system_wide: true,
+            system_wide: crate::xray::SYSTEM_WIDE,
             dark: true,
             rules_big: true,
             apps: vec![],

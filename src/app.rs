@@ -16,7 +16,7 @@ actions!(hitori, [TogglePalette, Dismiss, MainWindow, TrayWindow, SelectNext, Se
 
 pub fn bindings() -> Vec<KeyBinding> {
     vec![
-        KeyBinding::new("ctrl-k", TogglePalette, Some("Hitori")),
+        KeyBinding::new("secondary-k", TogglePalette, Some("Hitori")),
         KeyBinding::new("escape", Dismiss, Some("Hitori")),
         KeyBinding::new("1", MainWindow, Some("Hitori && !TextInput")),
         KeyBinding::new("2", TrayWindow, Some("Hitori && !TextInput")),

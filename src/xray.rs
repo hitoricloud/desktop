@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+#[cfg(target_os = "linux")]
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -18,17 +19,21 @@ pub const HTTP_PORT: u16 = 10809;
 pub const TUN_NAME: &str = "hitori0";
 /// Firewall mark on the core's own sockets, so they skip the TUN routing table.
 pub const MARK: u32 = 0x6869;
+/// System-wide (TUN) mode needs the Linux root helper; elsewhere only proxy mode exists so far.
+pub const SYSTEM_WIDE: bool = cfg!(target_os = "linux");
 const PROBE_URL: &str = "https://www.gstatic.com/generate_204";
 
-/// `HITORI_XRAY`, next to the executable, `../libexec/hitori/xray`, then the checkout's `bin/xray` (scripts/fetch-xray.sh).
+/// `HITORI_XRAY`, next to the executable (also inside a macOS bundle), `../libexec/hitori/xray`, then the checkout's
+/// `bin/xray` (scripts/fetch-xray.sh); `xray.exe` on Windows.
 pub fn xray_path() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok();
     let dir = exe.as_ref().and_then(|e| e.parent().map(PathBuf::from));
+    let name = format!("xray{}", std::env::consts::EXE_SUFFIX);
     let candidates = [
         std::env::var_os("HITORI_XRAY").map(PathBuf::from),
-        dir.as_ref().map(|d| d.join("xray")),
-        dir.as_ref().map(|d| d.join("../libexec/hitori/xray")),
-        Some(PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/bin/xray"))),
+        dir.as_ref().map(|d| d.join(&name)),
+        dir.as_ref().map(|d| d.join("../libexec/hitori").join(&name)),
+        Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("bin").join(&name)),
     ];
     candidates.into_iter().flatten().find(|p| p.is_file()).and_then(|p| p.canonicalize().ok())
 }
@@ -41,6 +46,7 @@ pub struct Plan {
     pub protocol: Protocol,
     pub default_route: RuleMode,
     pub tun: bool,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub kill_switch: bool,
     pub apps: Vec<(&'static str, AppRule)>,
     pub sites: Vec<(&'static str, AppRule)>,
@@ -295,15 +301,23 @@ fn write_config(path: &PathBuf, config: &Value) -> Result<(), String> {
     crate::store::write(path, &serde_json::to_vec(config).unwrap(), true).map_err(|e| format!("Cannot write the core config: {e}"))
 }
 
-/// Kill the core with the app, whatever way the app ends.
-fn die_with_parent(cmd: &mut Command) {
+/// Kill the core with the app, whatever way the app ends (Linux); no console window for it (Windows).
+fn as_child(cmd: &mut Command) {
     // SAFETY: prctl is async-signal-safe; this runs between fork and exec.
+    #[cfg(target_os = "linux")]
     unsafe {
         cmd.pre_exec(|| {
             libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
             Ok(())
         });
     }
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        std::os::windows::process::CommandExt::creation_flags(cmd, CREATE_NO_WINDOW);
+    }
+    #[cfg(target_os = "macos")]
+    let _ = cmd;
 }
 
 /// Latest core log lines, kept for error messages, and lines handed to whoever watches for failures.
@@ -371,7 +385,7 @@ impl Core {
         if !plan.tun {
             let mut cmd = Command::new(&xray);
             cmd.args(["run", "-c"]).arg(&path).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-            die_with_parent(&mut cmd);
+            as_child(&mut cmd);
             let mut child = cmd.spawn().map_err(|e| format!("Cannot start the core: {e}"))?;
             // The core logs to stdout; stderr carries Go panics.
             log.follow(child.stdout.take().unwrap());
@@ -380,6 +394,15 @@ impl Core {
             core.wait_serving(Duration::from_secs(10))?;
             return Ok(core);
         }
+        #[cfg(not(target_os = "linux"))]
+        return Err("System-wide mode is not available on this system yet".into());
+        #[cfg(target_os = "linux")]
+        Self::start_helper(&xray, path, ports, log, plan)
+    }
+
+    /// System-wide mode: the app itself as root (`--tun-helper`, through pkexec) runs the core behind a TUN device.
+    #[cfg(target_os = "linux")]
+    fn start_helper(xray: &PathBuf, path: PathBuf, ports: Ports, log: Log, plan: &Plan) -> Result<Core, String> {
         // Tests run the built app as the helper.
         let exe = if cfg!(test) { PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/debug/hitori") } else { std::env::current_exe().map_err(|e| e.to_string())? };
         // SAFETY: getuid/getgid/geteuid cannot fail.
@@ -392,7 +415,7 @@ impl Core {
             cmd
         };
         cmd.arg("--tun-helper")
-            .arg(&xray)
+            .arg(xray)
             .arg(&path)
             .args([uid.to_string(), gid.to_string(), (plan.kill_switch as u8).to_string()])
             // pkexec refuses to run when SHELL is not in /etc/shells (e.g. launched from a nix shell).
@@ -551,7 +574,7 @@ pub fn probe(servers: &[&'static Server], protocol: Protocol) -> Result<Vec<(&'s
     write_config(&path, &probe_config(servers, protocol, port))?;
     let mut cmd = Command::new(xray);
     cmd.args(["run", "-c"]).arg(&path).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-    die_with_parent(&mut cmd);
+    as_child(&mut cmd);
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
     let start = Instant::now();
     let mut result = HashMap::new();

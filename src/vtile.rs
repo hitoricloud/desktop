@@ -77,9 +77,8 @@ fn lines(g: &Geometry<f32>, extent: f32) -> Vec<Line> {
 }
 
 fn cache_path(z: u32, x: u32, y: u32) -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?;
     let version = URL.split('/').find(|p| p.starts_with("20")).unwrap_or("v");
-    Some(base.join("hitori/tiles").join(version).join(format!("{z}/{x}/{y}.mvt")))
+    Some(crate::store::cache_dir().join("tiles").join(version).join(format!("{z}/{x}/{y}.mvt")))
 }
 
 /// Download (or read from the disk cache), gunzip and decode one tile; only what the visible layers need is kept.

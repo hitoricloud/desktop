@@ -36,32 +36,93 @@ pub fn base(url: &str) -> Result<String, String> {
     }
 }
 
+/// The system as the panel (`x-device-os`) and the device card name it.
+pub const OS: &str = if cfg!(target_os = "macos") {
+    "macOS"
+} else if cfg!(windows) {
+    "Windows"
+} else {
+    "Linux"
+};
+
+/// Trimmed output of a system tool; no console window flashes up on Windows.
+#[cfg(not(target_os = "linux"))]
+fn tool(cmd: &str, args: &[&str]) -> Option<String> {
+    let mut c = std::process::Command::new(cmd);
+    c.args(args).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(&mut c, 0x0800_0000);
+    let out = c.output().ok().filter(|o| o.status.success())?;
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_owned()).filter(|s| !s.is_empty())
+}
+
+/// `reg query <key> /v <name>`: the value after the type column.
+#[cfg(windows)]
+fn registry(key: &str, name: &str) -> Option<String> {
+    let out = tool("reg", &["query", key, "/v", name])?;
+    out.lines().find(|l| l.trim_start().starts_with(name))?.split_whitespace().nth(2).map(str::to_owned)
+}
+
+fn machine_id() -> Option<String> {
+    #[cfg(target_os = "linux")]
+    let id = std::fs::read_to_string("/etc/machine-id").or_else(|_| std::fs::read_to_string("/var/lib/dbus/machine-id")).ok();
+    #[cfg(target_os = "macos")]
+    let id = tool("ioreg", &["-rd1", "-c", "IOPlatformExpertDevice"])
+        .and_then(|o| o.lines().find(|l| l.contains("\"IOPlatformUUID\""))?.rsplit('"').nth(1).map(str::to_owned));
+    #[cfg(windows)]
+    let id = registry(r"HKLM\SOFTWARE\Microsoft\Cryptography", "MachineGuid");
+    id.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty())
+}
+
 /// Stable per-machine id for the panel's device limit (Remnawave `x-hwid`).
 pub fn hwid() -> String {
     use std::hash::{Hash, Hasher};
-    let seed = std::fs::read_to_string("/etc/machine-id").or_else(|_| std::fs::read_to_string("/var/lib/dbus/machine-id")).unwrap_or_else(|_| hostname());
-    let half = |salt: &str| {
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        (salt, seed.trim()).hash(&mut h);
-        h.finish()
-    };
-    format!("{:016x}{:016x}", half("hitori-hwid-a"), half("hitori-hwid-b"))
+    static HWID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    HWID.get_or_init(|| {
+        let seed = machine_id().unwrap_or_else(hostname);
+        let half = |salt: &str| {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            (salt, seed.as_str()).hash(&mut h);
+            h.finish()
+        };
+        format!("{:016x}{:016x}", half("hitori-hwid-a"), half("hitori-hwid-b"))
+    })
+    .clone()
 }
 
 pub fn hostname() -> String {
-    std::fs::read_to_string("/proc/sys/kernel/hostname").map(|s| s.trim().to_owned()).unwrap_or_else(|_| "linux".into())
+    static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    NAME.get_or_init(|| {
+        #[cfg(target_os = "linux")]
+        let name = std::fs::read_to_string("/proc/sys/kernel/hostname").ok();
+        #[cfg(target_os = "macos")]
+        let name = tool("scutil", &["--get", "ComputerName"]);
+        #[cfg(windows)]
+        let name = std::env::var("COMPUTERNAME").ok();
+        name.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty()).unwrap_or_else(|| OS.to_lowercase())
+    })
+    .clone()
+}
+
+fn os_version() -> String {
+    #[cfg(target_os = "linux")]
+    let v = std::fs::read_to_string("/proc/sys/kernel/osrelease").ok();
+    #[cfg(target_os = "macos")]
+    let v = tool("sw_vers", &["-productVersion"]);
+    #[cfg(windows)]
+    let v = registry(r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion", "CurrentBuild");
+    v.map(|s| s.trim().to_owned()).unwrap_or_default()
 }
 
 fn request(url: &str) -> ureq::Request {
-    let release = std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default();
     ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(25))
         .build()
         .get(url)
-        .set("User-Agent", concat!("Hitori/", env!("CARGO_PKG_VERSION"), " (Linux)"))
+        .set("User-Agent", &format!("Hitori/{} ({OS})", env!("CARGO_PKG_VERSION")))
         .set("x-hwid", &hwid())
-        .set("x-device-os", "Linux")
-        .set("x-ver-os", release.trim())
+        .set("x-device-os", OS)
+        .set("x-ver-os", &os_version())
         .set("x-device-model", &hostname())
 }
 
