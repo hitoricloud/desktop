@@ -148,6 +148,7 @@ impl Hitori {
         }
         let dark = t.dark;
         let toggle_w = 8. + Protocol::ALL.iter().map(|p| crate::ui::text_width(p.label(), 14., gpui::FontWeight::MEDIUM, window) + 24.).sum::<f32>();
+        let mode = (crate::os::SYSTEM_PROXY && self.s.system_wide).then(|| self.mode_row(window, cx));
         div()
             .flex()
             .flex_col()
@@ -161,10 +162,10 @@ impl Hitori {
                         "System-wide",
                         Some(if !self.s.system_wide {
                             "Only apps set to use the proxy: SOCKS5 127.0.0.1:10808, HTTP 10809."
-                        } else if crate::os::TUN {
-                            "Every app goes through Hitori. Asks for your password to connect."
+                        } else if crate::os::SYSTEM_PROXY {
+                            "Browsers and most apps, or every app in TUN mode, go through Hitori."
                         } else {
-                            "Sets the system proxy: browsers and most apps go through Hitori."
+                            "Every app goes through Hitori. Asks for your password to connect."
                         }),
                         hint_room(32.),
                         switch("system-wide", self.s.system_wide, &t).on_click(cx.listener(|this, _, _, cx| {
@@ -174,7 +175,10 @@ impl Hitori {
                         &t,
                         window,
                     ),
-                    row(
+                ]
+                .into_iter()
+                .chain(mode)
+                .chain([row(
                         "Connect on startup",
                         None,
                         hint_room(32.),
@@ -187,12 +191,12 @@ impl Hitori {
                     ),
                     row(
                         "Kill switch",
-                        Some(if !crate::os::TUN {
-                            "Only on Linux for now."
-                        } else if self.s.system_wide {
-                            "Block all traffic while the tunnel is down."
-                        } else {
+                        Some(if !self.s.system_wide {
                             "Needs system-wide mode."
+                        } else if crate::os::SYSTEM_PROXY && !self.s.tun {
+                            "Needs TUN mode."
+                        } else {
+                            "Block all traffic while the tunnel is down."
                         }),
                         hint_room(32.),
                         switch("kill-switch", self.s.kill_switch, &t).on_click(cx.listener(|this, _, _, cx| {
@@ -202,7 +206,8 @@ impl Hitori {
                         &t,
                         window,
                     ),
-                ],
+                ])
+                .collect(),
             ))
             .child(section(
                 "Appearance".into(),
@@ -210,6 +215,43 @@ impl Hitori {
                 vec![row("Dark theme", None, hint_room(32.), switch("dark", dark, &t).on_click(cx.listener(move |this, _, _, cx| this.set_dark(!dark, cx))), &t, window)],
             ))
             .into_any_element()
+    }
+
+    /// Windows and macOS: how system-wide mode works, the system proxy or a TUN.
+    fn mode_row(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let t = self.theme(cx);
+        let modes = [(false, "System proxy"), (true, "TUN")];
+        let mut group = div().flex().bg(t.background).rounded(px(MD)).p(px(4.));
+        for (i, (tun, label)) in modes.into_iter().enumerate() {
+            let (muted, muted_fg) = (t.muted, t.muted_fg);
+            group = group.child(
+                div()
+                    .id(SharedString::from(format!("mode-{label}")))
+                    .h(px(32.))
+                    .px(px(12.))
+                    .flex()
+                    .items_center()
+                    .sm()
+                    .medium()
+                    .cursor_pointer()
+                    .when(i == 0, |d| d.rounded_l(px(MD)))
+                    .when(i == 1, |d| d.rounded_r(px(MD)))
+                    .when(self.s.tun == tun, |d| d.bg(t.accent))
+                    .when(self.s.tun != tun, |d| d.hover(move |s| s.bg(muted).text_color(muted_fg)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.s.tun = tun;
+                        cx.notify();
+                    }))
+                    .child(label),
+            );
+        }
+        let w = 8. + modes.iter().map(|(_, l)| crate::ui::text_width(l, 14., gpui::FontWeight::MEDIUM, window) + 24.).sum::<f32>();
+        let hint = match (self.s.tun, cfg!(windows)) {
+            (false, _) => "Browsers and most apps, no administrator rights.",
+            (true, true) => "Every app and DNS. Asks for administrator rights.",
+            (true, false) => "Every app and DNS. Asks for your password.",
+        };
+        row("Mode", Some(hint), hint_room(w), group, &t, window)
     }
 
     fn sign_in_body(&self, cx: &mut Context<Self>) -> AnyElement {

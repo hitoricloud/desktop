@@ -148,8 +148,10 @@ pub struct Settings {
     pub kill_switch: bool,
     /// Where traffic without a rule goes: auto, vpn, direct or block.
     pub route: String,
-    /// Route the whole system through a TUN device (needs the administrator once per connection).
+    /// Route the whole system through Hitori: a TUN on Linux, the system proxy or (with `tun`) a TUN elsewhere.
     pub system_wide: bool,
+    /// Windows and macOS: system-wide mode is a TUN (administrator rights once per connection), not the system proxy.
+    pub tun: bool,
     pub dark: bool,
     pub rules_big: bool,
     pub apps: Vec<Rule>,
@@ -170,6 +172,7 @@ impl Default for Settings {
             kill_switch: true,
             route: "auto".into(),
             system_wide: true,
+            tun: false,
             dark: true,
             rules_big: true,
             apps: vec![],
