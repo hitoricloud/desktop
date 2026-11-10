@@ -159,6 +159,7 @@ pub struct Hitori {
     pub panel: Option<Panel>,
     pub palette: Option<Mode>,
     pub palette_index: usize,
+    palette_query: gpui::SharedString,
     pub search: Entity<TextInput>,
     /// Subscription link field on the Account sheet.
     pub link: Entity<TextInput>,
@@ -187,9 +188,14 @@ impl Hitori {
         let link = cx.new(|cx| TextInput::new("https://…/sub/…", t.muted_fg, t.foreground, cx));
         let site_input = cx.new(|cx| TextInput::new("Add a website, e.g. youtube.com", t.muted_fg, t.foreground, cx));
         let site_changes = cx.observe(&site_input, |_, _, cx| cx.notify());
-        let changes = cx.observe(&search, |this, _, cx| {
-            this.palette_index = 0;
-            cx.notify();
+        // The caret blink notifies too; only an edit moves the selection back to the top.
+        let changes = cx.observe(&search, |this, search, cx| {
+            let query = search.read(cx).content.clone();
+            if query != this.palette_query {
+                this.palette_query = query;
+                this.palette_index = 0;
+                cx.notify();
+            }
         });
         let focus = cx.focus_handle();
         window.focus(&focus);
@@ -220,6 +226,7 @@ impl Hitori {
             panel: None,
             palette: None,
             palette_index: 0,
+            palette_query: Default::default(),
             search,
             link,
             site_input,
@@ -277,6 +284,14 @@ impl Hitori {
                 "page" => self.page = if value == "rules" { Page::Rules } else { Page::Map },
                 "siterule" => self.open_palette(Mode::Site(data::intern(value)), window, cx),
                 "collapsed" => self.sidebar_open = false,
+                // A synthetic pointer move, to capture hover states.
+                "mouse" => {
+                    let (x, y) = value.split_once('x').map_or((0., 0.), |(x, y)| (x.parse().unwrap_or(0.), y.parse().unwrap_or(0.)));
+                    let event = gpui::MouseMoveEvent { position: gpui::point(gpui::px(x), gpui::px(y)), ..Default::default() };
+                    window.defer(cx, move |window, cx| {
+                        window.dispatch_event(gpui::PlatformInput::MouseMove(event), cx);
+                    });
+                }
                 "snooze" => self.s.snoozed.push(leak(value)),
                 "panel" => {
                     self.panel = Some(match value {
@@ -467,6 +482,7 @@ impl Hitori {
         self.menu = None;
         self.palette = Some(mode);
         self.palette_index = 0;
+        self.palette_query = Default::default();
         let placeholder = match mode {
             Mode::Entry => "Route through…".to_owned(),
             Mode::Rule(a) => format!("Search {} settings", data::app(a).name),

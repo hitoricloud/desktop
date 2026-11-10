@@ -3,8 +3,8 @@
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, App, Div, ElementId, Hsla, InteractiveElement, Interactivity, IntoElement, ParentElement, RenderOnce, Rgba, SharedString,
-    Stateful, StatefulInteractiveElement, StyleRefinement, Styled, Window, div,
+    AnyElement, App, DispatchPhase, Div, ElementId, HitboxBehavior, HitboxId, Hsla, InteractiveElement, Interactivity, IntoElement, MouseMoveEvent,
+    ParentElement, RenderOnce, Rgba, SharedString, Stateful, StatefulInteractiveElement, StyleRefinement, Styled, Window, canvas, div,
 };
 
 fn bezier(x1: f32, y1: f32, x2: f32, y2: f32, t: f32) -> f32 {
@@ -142,19 +142,36 @@ impl StatefulInteractiveElement for Fx {}
 
 impl RenderOnce for Fx {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let hovered = window.use_keyed_state(ElementId::Name(format!("{}/hover", self.key).into()), cx, |_, _| false);
-        let on = *hovered.read(cx);
-        let bg = color(format!("{}/bg", self.key), if on { self.hover.unwrap_or(self.rest) } else { self.rest }, self.ms, window, cx);
-        let mut inner = self.inner.bg(bg).on_hover(move |h, _, cx| {
-            hovered.update(cx, |s, cx| {
-                if *s != *h {
-                    *s = *h;
-                    cx.notify();
+        let mut inner = self.inner;
+        let mut on = false;
+        if self.hover.is_some() || self.fg.is_some() {
+            // From the hit test like GPUI's `hover` styles, so it is right after a scroll or reorder too, not just on pointer moves.
+            let hitbox = window.use_keyed_state(ElementId::Name(format!("{}/hitbox", self.key).into()), cx, |_, _| None::<HitboxId>);
+            on = hitbox.read(cx).is_some_and(|id| id.is_hovered(window));
+            let prepaint = move |bounds, window: &mut Window, cx: &mut App| {
+                let id = window.insert_hitbox(bounds, HitboxBehavior::Normal).id;
+                hitbox.update(cx, |h, _| *h = Some(id));
+                id
+            };
+            let paint = move |_, id: HitboxId, window: &mut Window, _: &mut App| {
+                if id.is_hovered(window) != on {
+                    window.request_animation_frame();
                 }
-            })
-        });
+                let view = window.current_view();
+                window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, cx| {
+                    if phase == DispatchPhase::Capture && id.is_hovered(window) != on {
+                        cx.notify(view);
+                    }
+                });
+            };
+            inner = inner.child(canvas(prepaint, paint).absolute().inset_0());
+        }
+        // The highlight shows at once and eases out behind the pointer; state colours (`rest`) still transition.
+        let ms = if on { 0. } else { self.ms };
+        let bg = color(format!("{}/bg", self.key), if on { self.hover.unwrap_or(self.rest) } else { self.rest }, ms, window, cx);
+        inner = inner.bg(bg);
         if let Some((rest, hover)) = self.fg {
-            inner = inner.text_color(color(format!("{}/fg", self.key), if on { hover } else { rest }, self.ms, window, cx));
+            inner = inner.text_color(color(format!("{}/fg", self.key), if on { hover } else { rest }, ms, window, cx));
         }
         inner
     }

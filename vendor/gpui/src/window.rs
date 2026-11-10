@@ -1270,8 +1270,11 @@ impl Window {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct DispatchEventResult {
+/// What happened to a dispatched event.
+pub struct DispatchEventResult {
+    /// No handler stopped propagation.
     pub propagate: bool,
+    /// A handler called `prevent_default`.
     pub default_prevented: bool,
 }
 
