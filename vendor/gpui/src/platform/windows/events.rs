@@ -915,7 +915,13 @@ impl WindowsWindowInner {
             y: lparam.signed_hiword().into(),
         };
         unsafe { ScreenToClient(handle, &mut cursor_point).ok().log_err() };
-        if !self.state.borrow().is_maximized() && cursor_point.y >= 0 && cursor_point.y <= frame_y {
+        // Without WS_THICKFRAME (not resizable, pop-ups) the top edge is client area, not a resize handle.
+        let resizable = unsafe { get_window_long(handle, GWL_STYLE) } as u32 & WS_THICKFRAME.0 != 0;
+        if resizable
+            && !self.state.borrow().is_maximized()
+            && cursor_point.y >= 0
+            && cursor_point.y <= frame_y
+        {
             return Some(HTTOP as _);
         }
 

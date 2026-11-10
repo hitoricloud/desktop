@@ -61,6 +61,7 @@ use wayland_protocols::xdg::decoration::zv1::client::{
     zxdg_decoration_manager_v1, zxdg_toplevel_decoration_v1,
 };
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
+use wayland_protocols::xdg::xdg_output::zv1::client::{zxdg_output_manager_v1, zxdg_output_v1};
 use wayland_protocols_plasma::blur::client::{org_kde_kwin_blur, org_kde_kwin_blur_manager};
 use xkbcommon::xkb::ffi::XKB_KEYMAP_FORMAT_TEXT_V1;
 use xkbcommon::xkb::{self, KEYMAP_COMPILE_NO_FLAGS, Keycode};
@@ -117,6 +118,7 @@ pub struct Globals {
     pub decoration_manager: Option<zxdg_decoration_manager_v1::ZxdgDecorationManagerV1>,
     pub blur_manager: Option<org_kde_kwin_blur_manager::OrgKdeKwinBlurManager>,
     pub text_input_manager: Option<zwp_text_input_manager_v3::ZwpTextInputManagerV3>,
+    pub xdg_output_manager: Option<zxdg_output_manager_v1::ZxdgOutputManagerV1>,
     pub executor: ForegroundExecutor,
 }
 
@@ -154,6 +156,7 @@ impl Globals {
             decoration_manager: globals.bind(&qh, 1..=1, ()).ok(),
             blur_manager: globals.bind(&qh, 1..=1, ()).ok(),
             text_input_manager: globals.bind(&qh, 1..=1, ()).ok(),
+            xdg_output_manager: globals.bind(&qh, 1..=3, ()).ok(),
             executor,
             qh,
         }
@@ -183,6 +186,16 @@ impl InProgressOutput {
     }
 }
 
+/// An output's bounds in logical pixels: xdg-output's when the compositor has it, else the mode over the integer scale.
+fn output_bounds(state: &WaylandClientState, id: &ObjectId, output: &Output) -> Bounds<Pixels> {
+    state
+        .logical_outputs
+        .get(id)
+        .filter(|bounds| bounds.size.width > px(0.) && bounds.size.height > px(0.))
+        .cloned()
+        .unwrap_or_else(|| output.bounds.to_pixels(output.scale as f32))
+}
+
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub struct Output {
     pub name: Option<String>,
@@ -208,6 +221,8 @@ pub(crate) struct WaylandClientState {
     windows: HashMap<ObjectId, WaylandWindowStatePtr>,
     // Output to scale mapping
     outputs: HashMap<ObjectId, Output>,
+    /// xdg-output's logical bounds per wl_output: right under fractional scaling and rotation, unlike mode / scale.
+    logical_outputs: HashMap<ObjectId, Bounds<Pixels>>,
     in_progress_outputs: HashMap<ObjectId, InProgressOutput>,
     keyboard_layout: LinuxKeyboardLayout,
     keymap_state: Option<xkb::State>,
@@ -456,6 +471,7 @@ impl WaylandClient {
         let mut seat: Option<wl_seat::WlSeat> = None;
         #[allow(clippy::mutable_key_type)]
         let mut in_progress_outputs = HashMap::default();
+        let mut wl_outputs = Vec::new();
         globals.contents().with_list(|list| {
             for global in list {
                 match &global.interface[..] {
@@ -475,6 +491,7 @@ impl WaylandClient {
                             (),
                         );
                         in_progress_outputs.insert(output.id(), InProgressOutput::default());
+                        wl_outputs.push(output);
                     }
                     _ => {}
                 }
@@ -508,6 +525,11 @@ impl WaylandClient {
             qh.clone(),
             seat.clone(),
         );
+        if let Some(manager) = &globals.xdg_output_manager {
+            for output in &wl_outputs {
+                manager.get_xdg_output(output, &qh, output.id());
+            }
+        }
 
         let data_device = globals
             .data_device_manager
@@ -566,6 +588,7 @@ impl WaylandClient {
             ime_pre_edit: None,
             composing: false,
             outputs: HashMap::default(),
+            logical_outputs: HashMap::default(),
             in_progress_outputs,
             windows: HashMap::default(),
             common,
@@ -618,6 +641,11 @@ impl WaylandClient {
             event_loop: Some(event_loop),
         }));
 
+        // Receive the outputs before the first window opens, so that it can be sized for its display.
+        event_queue
+            .roundtrip(&mut WaylandClientStatePtr(Rc::downgrade(&state)))
+            .log_err();
+
         WaylandSource::new(conn, event_queue)
             .insert(handle)
             .unwrap();
@@ -632,34 +660,31 @@ impl LinuxClient for WaylandClient {
     }
 
     fn displays(&self) -> Vec<Rc<dyn PlatformDisplay>> {
-        self.0
-            .borrow()
+        let state = self.0.borrow();
+        state
             .outputs
             .iter()
             .map(|(id, output)| {
                 Rc::new(WaylandDisplay {
                     id: id.clone(),
                     name: output.name.clone(),
-                    bounds: output.bounds.to_pixels(output.scale as f32),
+                    bounds: output_bounds(&state, id, output),
                 }) as Rc<dyn PlatformDisplay>
             })
             .collect()
     }
 
     fn display(&self, id: DisplayId) -> Option<Rc<dyn PlatformDisplay>> {
-        self.0
-            .borrow()
-            .outputs
-            .iter()
-            .find_map(|(object_id, output)| {
-                (object_id.protocol_id() == id.0).then(|| {
-                    Rc::new(WaylandDisplay {
-                        id: object_id.clone(),
-                        name: output.name.clone(),
-                        bounds: output.bounds.to_pixels(output.scale as f32),
-                    }) as Rc<dyn PlatformDisplay>
-                })
+        let state = self.0.borrow();
+        state.outputs.iter().find_map(|(object_id, output)| {
+            (object_id.protocol_id() == id.0).then(|| {
+                Rc::new(WaylandDisplay {
+                    id: object_id.clone(),
+                    name: output.name.clone(),
+                    bounds: output_bounds(&state, object_id, output),
+                }) as Rc<dyn PlatformDisplay>
             })
+        })
     }
 
     fn primary_display(&self) -> Option<Rc<dyn PlatformDisplay>> {
@@ -923,6 +948,9 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for WaylandClientStat
                     state
                         .in_progress_outputs
                         .insert(output.id(), InProgressOutput::default());
+                    if let Some(manager) = &state.globals.xdg_output_manager {
+                        manager.get_xdg_output(&output, qh, output.id());
+                    }
                 }
                 _ => {}
             },
@@ -947,6 +975,31 @@ delegate_noop!(WaylandClientStatePtr: ignore wl_region::WlRegion);
 delegate_noop!(WaylandClientStatePtr: ignore wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1);
 delegate_noop!(WaylandClientStatePtr: ignore zxdg_decoration_manager_v1::ZxdgDecorationManagerV1);
 delegate_noop!(WaylandClientStatePtr: ignore org_kde_kwin_blur_manager::OrgKdeKwinBlurManager);
+delegate_noop!(WaylandClientStatePtr: ignore zxdg_output_manager_v1::ZxdgOutputManagerV1);
+
+impl Dispatch<zxdg_output_v1::ZxdgOutputV1, ObjectId> for WaylandClientStatePtr {
+    fn event(
+        this: &mut Self,
+        _: &zxdg_output_v1::ZxdgOutputV1,
+        event: zxdg_output_v1::Event,
+        output_id: &ObjectId,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        let client = this.get_client();
+        let mut state = client.borrow_mut();
+        let bounds = state.logical_outputs.entry(output_id.clone()).or_default();
+        match event {
+            zxdg_output_v1::Event::LogicalPosition { x, y } => {
+                bounds.origin = point(px(x as f32), px(y as f32));
+            }
+            zxdg_output_v1::Event::LogicalSize { width, height } => {
+                bounds.size = size(px(width as f32), px(height as f32));
+            }
+            _ => {}
+        }
+    }
+}
 delegate_noop!(WaylandClientStatePtr: ignore zwp_text_input_manager_v3::ZwpTextInputManagerV3);
 delegate_noop!(WaylandClientStatePtr: ignore org_kde_kwin_blur::OrgKdeKwinBlur);
 delegate_noop!(WaylandClientStatePtr: ignore wp_viewporter::WpViewporter);

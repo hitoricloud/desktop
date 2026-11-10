@@ -10,6 +10,8 @@ use crate::ui::{LG, SM, Tw, flag, icon, ring, switch};
 use crate::views::{app_badge, site_badge};
 
 const PALETTE_W: f32 = 512.;
+/// The search row plus the longest list (a rule's settings): the tallest dialog the window has to fit.
+pub const PALETTE_MAX_H: f32 = 48. + 400.;
 
 /// What picking a row does.
 #[derive(Clone, Copy, PartialEq)]
@@ -246,7 +248,7 @@ impl Hitori {
     pub fn palette_dialog(&mut self, mode: Mode, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         self.palette_fix_selection(cx);
         let t = self.theme(cx);
-        let vp = window.viewport_size();
+        let vp = self.viewport(window);
         let (w, h) = (f32::from(vp.width), f32::from(vp.height));
         let groups = self.palette_groups(mode, cx);
         let rule = matches!(mode, Mode::Rule(_) | Mode::Site(_));
@@ -272,7 +274,7 @@ impl Hitori {
             list_h = 68.;
             rows.push(div().py(px(24.)).flex().justify_center().sm().child(if rule { "No settings match." } else { "No countries match." }).into_any_element());
         }
-        let list_h = list_h.min(if rule { 400. } else { 300. });
+        let list_h = list_h.min(if rule { PALETTE_MAX_H - 48. } else { 300. });
         let dialog_h = 48. + list_h;
         let dw = PALETTE_W.min(w - 32.);
         let lead = match mode {
