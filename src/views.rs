@@ -277,7 +277,7 @@ impl Hitori {
             .hover(move |s| s.bg(accent))
             .when(open, |d| d.bg(accent))
             .on_click(cx.listener(|this, _, _, cx| this.toggle_menu(Menu::NavUser, cx)))
-            .child(avatar(&self.initial(), &t))
+            .child(avatar(&self.initial(), self.s.avatar.clone(), 32., &t))
             .child(
                 div()
                     .flex()
@@ -346,7 +346,7 @@ impl Hitori {
         let open = self.menu == Some(Menu::TrayAccount);
         let trigger = button("tray-account", Variant::Ghost, Size::IconLg, true, &t)
             .rest(if open { t.ghost_hover() } else { gpui::transparent_black() })
-            .child(avatar(&self.initial(), &t))
+            .child(avatar(&self.initial(), self.s.avatar.clone(), 32., &t))
             .on_click(cx.listener(|this, _, _, cx| this.toggle_menu(Menu::TrayAccount, cx)));
         let popup = self.menu_phase(Menu::TrayAccount).map(|ph| {
             popover(
@@ -1185,6 +1185,9 @@ impl Hitori {
 
 impl Hitori {
     pub fn account_name(&self) -> String {
+        if let Some(u) = self.s.user.as_ref().filter(|u| !u.name.is_empty()) {
+            return u.name.clone();
+        }
         match &self.s.account {
             Some(a) if !a.name.is_empty() => a.name.clone(),
             _ if self.s.signed_in => "Hitori".into(),

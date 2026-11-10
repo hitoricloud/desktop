@@ -10,6 +10,7 @@ mod fx;
 mod input;
 mod map;
 mod net;
+mod onboarding;
 mod overlays;
 mod palette;
 mod score;

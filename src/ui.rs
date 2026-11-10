@@ -203,8 +203,13 @@ impl gpui::RenderOnce for Switch {
     }
 }
 
-pub fn avatar(letter: &str, t: &Theme) -> Div {
-    div().flex_none().size(px(32.)).rounded_full().overflow_hidden().bg(t.muted).flex().items_center().justify_center().sm().text_color(t.muted_fg).child(letter.to_owned())
+/// Round profile picture, or the initial on a muted circle.
+pub fn avatar(letter: &str, picture: Option<std::sync::Arc<gpui::RenderImage>>, size: f32, t: &Theme) -> Div {
+    let d = div().flex_none().size(px(size)).rounded_full().overflow_hidden().bg(t.muted).flex().items_center().justify_center().text_px(size * 0.4375, size * 0.625).text_color(t.muted_fg);
+    match picture {
+        Some(p) => d.child(img(ImageSource::Render(p)).size(px(size)).rounded_full()),
+        None => d.child(letter.to_owned()),
+    }
 }
 
 pub fn skeleton(id: impl Into<ElementId>, w: f32, h: f32, t: &Theme) -> impl IntoElement {

@@ -157,6 +157,8 @@ pub struct Hitori {
     pub search: Entity<TextInput>,
     /// Subscription link field on the Account sheet.
     pub link: Entity<TextInput>,
+    /// The sign-in screen shows the subscription link field instead of only Telegram.
+    pub paste_link: bool,
     /// New website rule on the rules page and sheet.
     pub site_input: Entity<TextInput>,
     pub page: Page,
@@ -216,6 +218,7 @@ impl Hitori {
             palette_index: 0,
             search,
             link,
+            paste_link: false,
             site_input,
             page: Page::Map,
             menu: None,
@@ -272,6 +275,16 @@ impl Hitori {
                 "siterule" => self.open_palette(Mode::Site(data::intern(value)), window, cx),
                 "collapsed" => self.sidebar_open = false,
                 "snooze" => self.s.snoozed.push(leak(value)),
+                // Sign-in screen: `signin` (signed out), `waiting`, `paste`, `error:<text>`, `nosub:<name>`.
+                "signin" => self.s.signed_in = false,
+                "waiting" => self.s.telegram = crate::vpn::Telegram::Browser("https://oauth.telegram.org/auth".into()),
+                "paste" => self.paste_link = true,
+                "error" => self.s.error = Some(value.to_owned()),
+                "nosub" => {
+                    self.s.signed_in = true;
+                    self.s.no_subscription = true;
+                    self.s.user = Some(crate::auth::User { name: value.to_owned(), username: Some(value.to_lowercase()), has_avatar: false });
+                }
                 "panel" => {
                     self.panel = Some(match value {
                         "account" => Panel::Account,
@@ -315,7 +328,7 @@ impl Hitori {
     }
 
     /// Run a model operation on the current state and take its result back.
-    fn with_vpn(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Vpn, &mut Context<Vpn>)) {
+    pub fn with_vpn(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Vpn, &mut Context<Vpn>)) {
         self.push(cx);
         self.vpn.update(cx, f);
         self.s = self.vpn.read(cx).s.clone();
@@ -347,6 +360,9 @@ impl Hitori {
 
     pub fn sign_out(&mut self, cx: &mut Context<Self>) {
         self.menu = None;
+        self.panel = None;
+        self.palette = None;
+        self.paste_link = false;
         self.link.update(cx, |input, _| input.reset());
         self.with_vpn(cx, |v, cx| v.sign_out(cx));
     }
@@ -515,6 +531,9 @@ impl Hitori {
     }
 
     fn on_toggle_palette(&mut self, _: &TogglePalette, window: &mut Window, cx: &mut Context<Self>) {
+        if self.gated() {
+            return;
+        }
         if self.palette.is_some() { self.close_palette(window, cx) } else { self.open_palette(Mode::Exit, window, cx) }
     }
 
@@ -565,6 +584,22 @@ impl Render for Hitori {
             cx.defer_in(window, |this, _, cx| this.push(cx));
         }
         self.ring.set(None);
+        // Signed out (or without a subscription) every window shows only the sign-in screen.
+        if self.gated() {
+            (self.menu, self.panel, self.palette) = (None, None, None);
+            return div()
+                .key_context("Hitori")
+                .track_focus(&self.focus)
+                .on_action(cx.listener(Self::on_dismiss))
+                .size_full()
+                .font_family("Google Sans")
+                .tnum()
+                .text_size(gpui::px(16.))
+                .line_height(gpui::px(24.))
+                .text_color(t.foreground)
+                .child(self.onboarding(window, cx))
+                .into_any_element();
+        }
         let open = self.menu.is_some() || self.menu_fx.shown(150.).is_some() || self.panel_fx.shown(300.).is_some() || self.palette_fx.shown(200.).is_some();
         self.ring_isolated.set(!open);
         let body = match self.variant {
@@ -593,5 +628,6 @@ impl Render for Hitori {
             .children(self.menu.map(|_| self.menu_catcher(cx)))
             .children(self.panel_fx.shown(300.).map(|panel| self.sheet(panel, window, cx)))
             .children(self.palette_fx.shown(200.).map(|mode| self.palette_dialog(mode, window, cx)))
+            .into_any_element()
     }
 }
