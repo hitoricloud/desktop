@@ -65,8 +65,30 @@ impl Hitori {
     }
 
     /// Detected location and the resources blocked there, shown before sign-in (provided by the region-detection work).
-    fn location_summary(&self, _t: &Theme, _cx: &mut Context<Self>) -> Option<AnyElement> {
-        None
+    fn location_summary(&self, t: &Theme, _cx: &mut Context<Self>) -> Option<AnyElement> {
+        let r = &self.s.region;
+        let busy = r.status == crate::region::Status::Computing;
+        let mark = if busy { spinner("onboard-region", 16., t.muted_fg).into_any_element() } else { icon("globe", 16., t.muted_fg).into_any_element() };
+        Some(
+            div()
+                .flex()
+                .items_start()
+                .gap(px(12.))
+                .p(px(12.))
+                .rounded(px(LG))
+                .bg(t.muted.opacity(0.5))
+                .child(div().mt(px(2.)).flex_none().child(mark))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w_0()
+                        .child(div().sm().medium().child(if r.country.is_some() { r.place() } else { "Your location".into() }))
+                        .child(div().xs().text_color(t.muted_fg).child(r.line())),
+                )
+                .into_any_element(),
+        )
     }
 
     fn welcome(&self, t: &Theme, window: &mut Window, cx: &mut Context<Self>) -> Div {
