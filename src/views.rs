@@ -1,15 +1,15 @@
 //! Main window (Cockpit) and tray.
 use std::time::Instant;
 
-use gpui::{AnyElement, Context, Corner, Div, Hsla, MouseButton, SharedString, Window, anchored, deferred, div, prelude::*, px};
+use gpui::{AnyElement, Context, Corner, Div, Focusable, Hsla, MouseButton, SharedString, Window, anchored, deferred, div, prelude::*, px};
 
-use crate::app::{Conn, Hitori, Menu, Mode, Panel, Place};
-use crate::data::{self, AppInfo, AppRule, RuleMode, Scope, SiteRule, Suggestion, ago, app, fixed1, js_num, server};
+use crate::app::{Conn, Hitori, Menu, Mode, Page, Panel, Place};
+use crate::data::{self, AppInfo, AppRule, RuleMode, Scope, Suggestion, ago, app, fixed1, js_num, server};
 use crate::map::Padding;
 use crate::fx::{Fx, fx};
 use crate::theme::{Theme, color};
 use crate::ui::{
-    LG, MD, SM, Size, Tw, Variant, XL, avatar, features, button, button_icon, flag, icon, menu, menu_item, menu_label, menu_radio, menu_separator,
+    LG, MD, SM, Size, Tw, Variant, XL, avatar, features, button, button_icon, flag, icon, menu, menu_item, menu_label, menu_separator,
     pulse, skeleton, spinner, tip,
 };
 
@@ -36,13 +36,6 @@ pub fn route_label(r: &AppRule) -> String {
         (RuleMode::Direct, _) => "Direct".into(),
         (RuleMode::Block, _) => "Blocked".into(),
         (RuleMode::Auto, _) => "Auto".into(),
-    }
-}
-
-pub fn site_label(r: SiteRule) -> &'static str {
-    match r {
-        SiteRule::Vpn => "Always VPN",
-        SiteRule::Direct => "Direct",
     }
 }
 
@@ -82,7 +75,6 @@ pub fn site_badge(t: &Theme) -> Div {
 
 #[derive(Clone, Copy)]
 pub enum Placement {
-    BelowStart,
     BelowEnd,
     AboveStart,
 }
@@ -92,7 +84,6 @@ pub enum Placement {
 /// `fade-out-0` on close (150ms, ease). GPUI cannot scale a subtree, so `zoom-in-95` is left out.
 pub fn popover(placement: Placement, phase: (f32, bool), content: impl IntoElement) -> AnyElement {
     let (pos, corner, gap) = match placement {
-        Placement::BelowStart => (div().absolute().top_full().left_0(), Corner::TopLeft, (4., 0.)),
         Placement::BelowEnd => (div().absolute().top_full().right_0(), Corner::TopRight, (4., 0.)),
         Placement::AboveStart => (div().absolute().bottom_full().left_0(), Corner::BottomLeft, (0., 8.)),
     };
@@ -121,18 +112,6 @@ impl Hitori {
         let side_w = if w >= 768. { crate::fx::tween("sidebar-w", if self.sidebar_open { SIDEBAR } else { 0. }, 200., crate::fx::linear, window, cx) } else { 0. };
         let side = side_w > 0.;
         let map_w = w - side_w - if wide { INSPECTOR } else { 0. };
-        self.ring_clip.set((side_w, 0., map_w, h));
-        {
-            let mut keep = self.keepout.borrow_mut();
-            keep.clear();
-            keep.push([16., 16., 72., 32.]);
-            if wide {
-                keep.push([(map_w - 360.) / 2. - 8., h - 24. - 340., 376., 348.]);
-            } else {
-                keep.push([0., h - 280., map_w, 280.]);
-            }
-        }
-        let map = self.map_view((map_w, h), Padding { top: 64., bottom: if wide { 64. } else { 260. }, left: 64., right: 64. }, window, cx);
         let sidebar = side.then(|| {
             div()
                 .relative()
@@ -144,6 +123,33 @@ impl Hitori {
                 .into_any_element()
         });
         let inspector = wide.then(|| self.inspector(window, cx).into_any_element());
+        let trigger = div().flex().gap(px(8.)).items_center().child(
+            button("trigger", Variant::Ghost, Size::IconSm, true, &t)
+                .rest(t.card)
+                .shadow(t.panel_shadow())
+                .child(icon("panel-left", 16., t.foreground))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.sidebar_open = !this.sidebar_open;
+                    cx.notify();
+                })),
+        );
+        let trigger = trigger.child(self.page_switch(cx));
+        if self.page == Page::Rules {
+            let page = self.rules_page(trigger, wide, map_w - 48., window, cx);
+            return div().flex().size_full().bg(t.background).children(sidebar).child(page).children(inspector).into_any_element();
+        }
+        self.ring_clip.set((side_w, 0., map_w, h));
+        {
+            let mut keep = self.keepout.borrow_mut();
+            keep.clear();
+            keep.push([16., 16., 112., 32.]);
+            if wide {
+                keep.push([(map_w - 360.) / 2. - 8., h - 24. - 340., 376., 348.]);
+            } else {
+                keep.push([0., h - 280., map_w, 280.]);
+            }
+        }
+        let map = self.map_view((map_w, h), Padding { top: 64., bottom: if wide { 64. } else { 260. }, left: 64., right: 64. }, window, cx);
         let toasts = if wide { self.toasts(map_w, window, cx) } else { None };
         let narrow = (!wide).then(|| {
             div()
@@ -163,22 +169,12 @@ impl Hitori {
                 .child(self.power_button(cx))
                 .into_any_element()
         });
-        let trigger = div().absolute().top(px(16.)).left(px(16.)).flex().gap(px(8.)).items_center().child(
-            button("trigger", Variant::Ghost, Size::IconSm, true, &t)
-                .rest(t.card)
-                .shadow(t.panel_shadow())
-                .child(icon("panel-left", 16., t.foreground))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.sidebar_open = !this.sidebar_open;
-                    cx.notify();
-                })),
-        );
         div()
             .flex()
             .size_full()
             .bg(t.background)
             .children(sidebar)
-            .child(div().relative().flex_1().min_w_0().h_full().child(map).child(trigger.child(self.routes_toggle(cx))).children(toasts).children(narrow))
+            .child(div().relative().flex_1().min_w_0().h_full().child(map).child(trigger.absolute().top(px(16.)).left(px(16.))).children(toasts).children(narrow))
             .children(inspector)
             .into_any_element()
     }
@@ -402,7 +398,7 @@ impl Hitori {
                 .sm()
                 .medium()
                 .cursor_pointer()
-                .on_click(cx.listener(|this, _, _, cx| this.open_panel(Panel::Routes, cx)))
+                .on_click(cx.listener(|this, _, _, cx| this.open_rules(cx)))
                 .child(icon("message-circle-question", 16., primary))
                 .child(div().flex_1().child(format!("{review} need VPN")))
                 .child("Review")
@@ -466,26 +462,131 @@ impl Hitori {
                         .rounded(px(MD))
                         .sm()
                         .cursor_pointer()
-                        .on_click(cx.listener(|this, _, _, cx| this.open_panel(Panel::Routes, cx)))
+                        .on_click(cx.listener(|this, _, _, cx| this.open_rules(cx)))
                         .child("Manage rules")
                         .child(icon("chevron-right", 16., muted)),
                 ),
             )
     }
 
-    /// Map toggle: every route in use, or only the main connection.
-    fn routes_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Map or every rule beside the sidebar.
+    fn page_switch(&self, cx: &mut Context<Self>) -> Div {
         let t = self.theme(cx);
-        let on = self.s.all_routes;
-        button("all-routes", Variant::Ghost, Size::IconSm, true, &t)
-            .rest(if on { t.accent } else { t.card })
-            .shadow(t.panel_shadow())
-            .tooltip(tip(if on { "All routes" } else { "Main route only" }, &t))
-            .child(icon("route", 16., if on { t.foreground } else { t.muted_fg }))
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.s.all_routes = !this.s.all_routes;
-                cx.notify();
-            }))
+        let mut seg = div().flex().p(px(2.)).gap(px(2.)).rounded(px(MD)).bg(t.card).shadow(t.panel_shadow());
+        for (page, name, label) in [(Page::Map, "map", "Map"), (Page::Rules, "list", "Rules")] {
+            let on = self.page == page;
+            seg = seg.child(
+                fx(SharedString::from(format!("page-{name}")), if on { t.accent } else { gpui::transparent_black() }, Some(t.accent))
+                    .h(px(28.))
+                    .px(px(8.))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .rounded(px(6.))
+                    .xs()
+                    .medium()
+                    .text_color(if on { t.foreground } else { t.muted_fg })
+                    .cursor_pointer()
+                    .child(icon(name, 14., if on { t.foreground } else { t.muted_fg }))
+                    .child(label)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.page = page;
+                        cx.notify();
+                    })),
+            );
+        }
+        seg
+    }
+
+    /// Manage rules at full size: the default route, suggestions, and every app and website rule as cards.
+    fn rules_page(&self, trigger: Div, wide: bool, width: f32, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = self.theme(cx);
+        // As many columns of at least 240px as fit, filling the width.
+        let cols = ((width + 12.) / 252.).floor().max(1.);
+        let card_w = ((width - 12. * (cols - 1.)) / cols).floor();
+        let card = |el: AnyElement| div().w(px(card_w)).flex_none().child(el);
+        let heading = |text: String, extra: Option<AnyElement>| {
+            div().h(px(32.)).flex().items_center().gap(px(8.)).child(div().sm().semibold().child(text)).child(div().flex_1()).children(extra)
+        };
+        let mut apps: Vec<&'static AppInfo> = self.s.app_routes.iter().map(|(a, _)| app(a)).collect();
+        apps.sort_by_key(|a| (!data::active(a.id), a.name.to_lowercase()));
+        let idle = apps.iter().filter(|a| !data::active(a.id)).count();
+        let mut app_grid = div().flex().flex_wrap().gap(px(12.));
+        for a in &apps {
+            app_grid = app_grid.child(card(self.app_rule(a, true, Place::Page, window, cx).into_any_element()));
+        }
+        if apps.is_empty() {
+            app_grid = app_grid.child(div().sm().text_color(t.muted_fg).child("No app rules yet. Add a running app with +, or accept a suggestion."));
+        }
+        let mut site_grid = div().flex().flex_wrap().gap(px(12.));
+        for (target, rule) in self.s.sites.clone() {
+            site_grid = site_grid.child(card(self.site_rule_el(target, &rule, true, Place::Page, cx).into_any_element()));
+        }
+        let suggestions = self.s.suggestions.clone();
+        let narrow = (!wide).then(|| {
+            div().flex().flex_col().gap(px(12.)).p(px(16.)).rounded(px(XL)).bg(t.card).child(self.status(cx)).child(self.route_field(false, window, cx)).child(self.power_button(cx))
+        });
+        div()
+            .id("rules-page")
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .overflow_y_scroll()
+            .bg(t.background)
+            .text_color(t.foreground)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(28.))
+                    .p(px(16.))
+                    .pb(px(32.))
+                    .child(trigger)
+                    .children(narrow)
+                    .child(
+                        div()
+                            .px(px(8.))
+                            .flex()
+                            .flex_col()
+                            .gap(px(28.))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(4.))
+                                    .child(div().text_size(px(24.)).semibold().tight().child("Routing rules"))
+                                    .child(div().sm().text_color(t.muted_fg).child("Apps and websites without a rule follow the default route.")),
+                            )
+                            .child(div().rounded(px(XL)).bg(t.card).p(px(8.)).child(self.default_route(cx)))
+                            .when(!suggestions.is_empty(), |d| {
+                                d.child(
+                                    div().flex().flex_col().gap(px(8.)).child(heading(format!("Suggestions · {}", suggestions.len()), None)).child(
+                                        div().flex().flex_wrap().gap(px(12.)).children(suggestions.iter().map(|s| card(self.suggestion_card(s, false, cx).into_any_element()))),
+                                    ),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(8.))
+                                    .child(heading(
+                                        if idle > 0 { format!("Apps · {} · {idle} idle", apps.len()) } else { format!("Apps · {}", apps.len()) },
+                                        Some(self.add_app(cx).into_any_element()),
+                                    ))
+                                    .child(app_grid),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(8.))
+                                    .child(heading(format!("Websites · {}", self.s.sites.len()), None))
+                                    .child(self.site_field(cx))
+                                    .child(site_grid),
+                            ),
+                    ),
+            )
     }
 
     /// Where traffic without a rule goes: a segmented control with the chosen mode explained under it.
@@ -549,7 +650,7 @@ impl Hitori {
         }
         if sites {
             for (target, rule) in self.s.sites.clone() {
-                col = col.child(self.site_rule_el(target, rule, big, place, cx));
+                col = col.child(self.site_rule_el(target, &rule, big, place, cx));
             }
         }
         col
@@ -644,41 +745,66 @@ impl Hitori {
         div().relative().w_full().child(trigger)
     }
 
-    pub fn site_rule_el(&self, target: &'static str, rule: SiteRule, big: bool, place: Place, cx: &mut Context<Self>) -> impl IntoElement {
+    /// A website's rule; clicking it opens its route settings in the palette, like an app's.
+    pub fn site_rule_el(&self, target: &'static str, rule: &AppRule, big: bool, place: Place, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme(cx);
-        let which = Menu::SiteRule(target, place);
-        let open = self.menu == Some(which);
+        let open = self.palette == Some(Mode::Site(target));
         let id: SharedString = format!("site-{target}-{place:?}").into();
-        let kind = AppRule::mode(if rule == SiteRule::Vpn { RuleMode::Vpn } else { RuleMode::Direct });
         let trigger = if big {
-            self.rule_card(id, open, &t).children(self.card_body(site_badge(&t), target, None, &kind, div().child(format!("{} · website", site_label(rule))), &t))
+            let mut footer = div().child(div().child(route_label(rule)));
+            if let Some(p) = rule.protocol {
+                footer = footer.child(div().child("·")).child(div().child(p.label()));
+            }
+            footer = footer.child(div().child("·")).child(div().child("website"));
+            self.rule_card(id, open, &t).children(self.card_body(site_badge(&t), target, None, rule, footer, &t))
         } else {
             self.rule_line(id, open, &t)
                 .child(site_badge(&t))
                 .child(div().flex_1().min_w_0().truncate().child(target))
-                .child(div().xs().text_color(t.muted_fg).child(site_label(rule)))
+                .child(div().xs().text_color(if rule.mode == RuleMode::Block { t.destructive } else { t.muted_fg }).child(route_label(rule)))
         }
-        .on_click(cx.listener(move |this, _, _, cx| this.toggle_menu(which, cx)));
-        let popup = self.menu_phase(which).map(|ph| popover(Placement::BelowStart, ph, self.site_rule_menu(target, &t, cx)));
-        div().relative().w_full().child(trigger).children(popup)
+        .on_click(cx.listener(move |this, _, window, cx| this.open_palette(Mode::Site(target), window, cx)));
+        div().relative().w_full().child(trigger)
     }
 
-    fn site_rule_menu(&self, target: &'static str, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        let rule = self.site_rule(target);
-        let mut items = vec![
-            menu_label(t).flex().items_center().gap(px(8.)).child(site_badge(t)).child(target).into_any_element(),
-            menu_separator(t).into_any_element(),
-        ];
-        let default = format!("Default · {}", self.s.default_route.label());
-        for (value, label, r) in [("auto", default, None), ("vpn", "Always VPN".into(), Some(SiteRule::Vpn)), ("direct", "Always direct".into(), Some(SiteRule::Direct))] {
-            items.push(
-                menu_radio(SharedString::from(format!("s-{value}")), rule == r, t)
-                    .child(label)
-                    .on_click(cx.listener(move |this, _, _, cx| this.site(target, r, cx)))
-                    .into_any_element(),
-            );
-        }
-        menu(240., t, items)
+    /// Type or paste a website (any URL works), then Enter or Add: it gets a rule and its settings open.
+    pub fn site_field(&self, cx: &mut Context<Self>) -> Div {
+        let t = self.theme(cx);
+        let focus = self.site_input.read(cx).focus_handle(cx);
+        let valid = data::domain(&self.site_input.read(cx).content).is_some();
+        div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .child(
+                div()
+                    .id("site-field")
+                    .key_context("SiteField")
+                    .on_action(cx.listener(|this, _: &crate::app::Confirm, window, cx| this.add_site(window, cx)))
+                    .flex_1()
+                    .min_w_0()
+                    .h(px(36.))
+                    .px(px(12.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .rounded(px(MD))
+                    .border_1()
+                    .border_color(t.border)
+                    .bg(t.background)
+                    .sm()
+                    .cursor_text()
+                    .on_mouse_down(MouseButton::Left, move |_, window, _| window.focus(&focus))
+                    .child(icon("globe", 16., t.muted_fg))
+                    .child(div().flex_1().min_w_0().child(self.site_input.clone())),
+            )
+            .child(
+                button("add-site", Variant::Secondary, Size::Default, false, &t)
+                    .when(!valid, |b| b.opacity(0.5))
+                    .child(icon("plus", 16., t.foreground))
+                    .child("Add")
+                    .on_click(cx.listener(|this, _, window, cx| this.add_site(window, cx))),
+            )
     }
 
     pub fn add_app(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -782,7 +908,7 @@ impl Hitori {
             button("more", Variant::Secondary, Size::Default, false, &t)
                 .shadow(t.panel_shadow())
                 .child(format!("{} more · Review", live.len() - 2))
-                .on_click(cx.listener(|this, _, _, cx| this.open_panel(Panel::Routes, cx)))
+                .on_click(cx.listener(|this, _, _, cx| this.open_rules(cx)))
         });
         Some(
             div()

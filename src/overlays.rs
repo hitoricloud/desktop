@@ -312,7 +312,7 @@ impl Hitori {
         let heading = |s: String| div().xs().medium().text_color(t.muted_fg).child(s);
         let mut sites = div().flex().flex_col().rounded(px(LG)).p(px(4.)).bg(t.muted.opacity(0.5));
         for (target, rule) in self.s.sites.clone() {
-            sites = sites.child(self.site_rule_el(target, rule, false, Place::Sheet, cx));
+            sites = sites.child(self.site_rule_el(target, &rule, false, Place::Sheet, cx));
         }
         div()
             .flex()
@@ -336,7 +336,7 @@ impl Hitori {
                     .child(div().mr(px(-4.)).h(px(32.)).flex().items_center().justify_between().child(heading(format!("Apps · {}", self.s.app_routes.len()))).child(self.add_app(cx)))
                     .child(self.active_rules(true, false, Place::Sheet, window, cx)),
             )
-            .child(div().flex().flex_col().gap(px(8.)).child(heading(format!("Sites · {}", self.s.sites.len()))).child(sites))
+            .child(div().flex().flex_col().gap(px(8.)).child(heading(format!("Sites · {}", self.s.sites.len()))).child(self.site_field(cx)).when(!self.s.sites.is_empty(), |d| d.child(sites)))
             .child(div().xs().text_color(t.muted_fg).child(format!("Everything else: {} · {}.", self.s.default_route.label(), self.s.default_route.default_hint().to_lowercase())))
             .into_any_element()
     }

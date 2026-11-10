@@ -5,7 +5,7 @@ use gpui::{
     App, AppContext, Context, Entity, FocusHandle, Focusable, KeyBinding, Render, Subscription, Window, actions, div, prelude::*,
 };
 
-use crate::data::{self, AppRule, RuleMode, SiteRule};
+use crate::data::{self, AppRule, RuleMode};
 use crate::fx::Presence;
 use crate::input::TextInput;
 use crate::map::MapState;
@@ -23,6 +23,7 @@ pub fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("down", SelectNext, Some("Palette")),
         KeyBinding::new("up", SelectPrev, Some("Palette")),
         KeyBinding::new("enter", Confirm, Some("Palette")),
+        KeyBinding::new("enter", Confirm, Some("SiteField")),
     ]
 }
 
@@ -48,12 +49,20 @@ pub enum Panel {
 
 pub use crate::data::Protocol;
 
-/// What the palette is for: the main exit, the main entry hop, or one app's route settings.
+/// What the palette is for: the main exit, the main entry hop, or one app's or website's route settings.
 #[derive(Clone, Copy, PartialEq)]
 pub enum Mode {
     Exit,
     Entry,
     Rule(&'static str),
+    Site(&'static str),
+}
+
+/// What the main window shows beside the sidebar: the map, or every rule at full size.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Page {
+    Map,
+    Rules,
 }
 
 /// Where a menu trigger lives; the same rule can be on screen twice (sidebar and sheet).
@@ -61,13 +70,13 @@ pub enum Mode {
 pub enum Place {
     Side,
     Sheet,
+    Page,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Menu {
     NavUser,
     TrayAccount,
-    SiteRule(&'static str, Place),
     AddApp,
 }
 
@@ -148,6 +157,9 @@ pub struct Hitori {
     pub search: Entity<TextInput>,
     /// Subscription link field on the Account sheet.
     pub link: Entity<TextInput>,
+    /// New website rule on the rules page and sheet.
+    pub site_input: Entity<TextInput>,
+    pub page: Page,
     pub menu: Option<Menu>,
     pub map: MapState,
     pub ring: std::cell::Cell<Option<Ring>>,
@@ -159,6 +171,7 @@ pub struct Hitori {
     pub panel_fx: Presence<Panel>,
     pub palette_fx: Presence<Mode>,
     _search_changes: Subscription,
+    _site_changes: Subscription,
     _vpn_changes: Subscription,
 }
 
@@ -167,6 +180,8 @@ impl Hitori {
         let t = theme(cx);
         let search = cx.new(|cx| TextInput::new("Search countries", t.muted_fg, t.foreground, cx));
         let link = cx.new(|cx| TextInput::new("https://…/sub/…", t.muted_fg, t.foreground, cx));
+        let site_input = cx.new(|cx| TextInput::new("Add a website, e.g. youtube.com", t.muted_fg, t.foreground, cx));
+        let site_changes = cx.observe(&site_input, |_, _, cx| cx.notify());
         let changes = cx.observe(&search, |this, _, cx| {
             this.palette_index = 0;
             cx.notify();
@@ -201,6 +216,8 @@ impl Hitori {
             palette_index: 0,
             search,
             link,
+            site_input,
+            page: Page::Map,
             menu: None,
             map: MapState::new(),
             ring: Default::default(),
@@ -211,6 +228,7 @@ impl Hitori {
             panel_fx: Presence::new(),
             palette_fx: Presence::new(),
             _search_changes: changes,
+            _site_changes: site_changes,
             _vpn_changes: vpn_changes,
         };
         if let Ok(state) = std::env::var("HITORI_STATE") {
@@ -250,7 +268,8 @@ impl Hitori {
                 "light" => self.set_dark(false, cx),
                 "small" => self.s.rules_big = false,
                 "route" => self.s.default_route = RuleMode::parse(value),
-                "routes" => self.s.all_routes = value != "off",
+                "page" => self.page = if value == "rules" { Page::Rules } else { Page::Map },
+                "siterule" => self.open_palette(Mode::Site(data::intern(value)), window, cx),
                 "collapsed" => self.sidebar_open = false,
                 "snooze" => self.s.snoozed.push(leak(value)),
                 "panel" => {
@@ -267,10 +286,8 @@ impl Hitori {
                     cx.notify();
                 }),
                 "menu" => {
-                    let (kind, arg) = value.split_once(':').unwrap_or((value, ""));
-                    self.menu = Some(match kind {
+                    self.menu = Some(match value {
                         "tray" => Menu::TrayAccount,
-                        "site" => Menu::SiteRule(leak(arg), Place::Side),
                         "add" => Menu::AddApp,
                         _ => Menu::NavUser,
                     });
@@ -369,7 +386,7 @@ impl Hitori {
         cx.notify();
     }
 
-    pub fn site(&mut self, target: &'static str, rule: Option<SiteRule>, cx: &mut Context<Self>) {
+    pub fn site(&mut self, target: &'static str, rule: Option<AppRule>, cx: &mut Context<Self>) {
         match rule {
             Some(r) => match self.s.sites.iter_mut().find(|(t, _)| *t == target) {
                 Some(slot) => slot.1 = r,
@@ -385,8 +402,24 @@ impl Hitori {
         self.s.app_routes.iter().find(|(a, _)| *a == app).map(|(_, r)| r)
     }
 
-    pub fn site_rule(&self, target: &str) -> Option<SiteRule> {
-        self.s.sites.iter().find(|(t, _)| *t == target).map(|(_, r)| *r)
+    pub fn site_rule(&self, target: &str) -> Option<&AppRule> {
+        self.s.sites.iter().find(|(t, _)| *t == target).map(|(_, r)| r)
+    }
+
+    /// The typed website gets a rule (the opposite of the default, so it changes something) and its settings open.
+    pub fn add_site(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let typed = self.site_input.read(cx).content.to_string();
+        let Some(host) = data::domain(&typed) else {
+            window.focus(&self.site_input.read(cx).focus_handle(cx));
+            return;
+        };
+        let target = data::intern(&host);
+        if self.site_rule(target).is_none() {
+            let mode = if self.s.default_route == RuleMode::Vpn { RuleMode::Direct } else { RuleMode::Vpn };
+            self.site(target, Some(AppRule::mode(mode)), cx);
+        }
+        self.site_input.update(cx, |input, _| input.reset());
+        self.open_palette(Mode::Site(target), window, cx);
     }
 
     /// Accept a suggestion: the app, or just the site for browsers, always goes through the VPN.
@@ -395,8 +428,8 @@ impl Hitori {
         self.s.suggestions.retain(|s| s.id != id);
         match hit.scope {
             data::Scope::Site => match self.s.sites.iter_mut().find(|(t, _)| *t == hit.target) {
-                Some(slot) => slot.1 = SiteRule::Vpn,
-                None => self.s.sites.push((hit.target, SiteRule::Vpn)),
+                Some(slot) => slot.1.mode = RuleMode::Vpn,
+                None => self.s.sites.push((hit.target, AppRule::mode(RuleMode::Vpn))),
             },
             data::Scope::App => match self.s.app_routes.iter_mut().find(|(a, _)| *a == hit.app_id) {
                 Some(slot) => slot.1.mode = RuleMode::Vpn,
@@ -426,6 +459,7 @@ impl Hitori {
         let placeholder = match mode {
             Mode::Entry => "Route through…".to_owned(),
             Mode::Rule(a) => format!("Search {} settings", data::app(a).name),
+            Mode::Site(s) => format!("Search {s} settings"),
             Mode::Exit => "Search countries".to_owned(),
         };
         self.search.update(cx, |input, cx| {
@@ -442,6 +476,17 @@ impl Hitori {
             window.focus(&self.focus);
         }
         cx.notify();
+    }
+
+    /// Every rule: a page beside the sidebar in the main window, the sheet in the tray.
+    pub fn open_rules(&mut self, cx: &mut Context<Self>) {
+        if self.variant == Variant::Main {
+            self.menu = None;
+            self.page = Page::Rules;
+            cx.notify();
+        } else {
+            self.open_panel(Panel::Routes, cx);
+        }
     }
 
     pub fn open_panel(&mut self, panel: Panel, cx: &mut Context<Self>) {

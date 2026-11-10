@@ -7,7 +7,7 @@ use crate::overlays::close_button;
 use crate::score::command_score;
 use crate::theme::shadow_lg;
 use crate::ui::{LG, SM, Tw, flag, icon, ring, switch};
-use crate::views::app_badge;
+use crate::views::{app_badge, site_badge};
 
 const PALETTE_W: f32 = 512.;
 
@@ -89,26 +89,42 @@ impl Hitori {
                 g.push((format!("All countries ({})", servers.len()), servers.into_iter().map(|s| country("", s, None, false, act(s.id))).collect()));
                 g
             }
-            Mode::Rule(app_id) => self.rule_groups(app_id),
+            Mode::Rule(_) | Mode::Site(_) => self.rule_groups(mode),
         };
         arrange(groups, &q)
     }
 
-    /// Route settings for one app: route mode, exit, route through, protocol, options.
-    fn rule_groups(&self, app_id: &'static str) -> Vec<Group> {
-        let rule = self.app_route(app_id).cloned().unwrap_or(AppRule::mode(self.s.default_route));
+    /// The rule an app's or website's settings edit; without one, what it gets now.
+    pub fn target_rule(&self, target: Mode) -> AppRule {
+        match target {
+            Mode::Site(s) => self.site_rule(s).cloned().unwrap_or(AppRule::mode(RuleMode::Vpn)),
+            Mode::Rule(a) => self.app_route(a).cloned().unwrap_or(AppRule::mode(self.s.default_route)),
+            Mode::Exit | Mode::Entry => AppRule::AUTO,
+        }
+    }
+
+    /// Route settings for one app or website: route mode, exit, route through, protocol, options.
+    fn rule_groups(&self, target: Mode) -> Vec<Group> {
+        let rule = self.target_rule(target);
+        let site = matches!(target, Mode::Site(_));
         let main_exit = server(self.s.server_id);
         let off = matches!(rule.mode, RuleMode::Direct | RuleMode::Block);
         let exit_id = rule.exit.unwrap_or(main_exit.id);
-        let suggested = rule.mode != RuleMode::Vpn && self.s.suggestions.iter().any(|s| s.app_id == app_id && s.scope == Scope::App);
+        let suggested = rule.mode != RuleMode::Vpn
+            && self.s.suggestions.iter().any(|s| match target {
+                Mode::Site(d) => s.scope == Scope::Site && s.target == d,
+                Mode::Rule(a) => s.scope == Scope::App && s.app_id == a,
+                _ => false,
+            });
         let modes = [
             (RuleMode::Auto, "Auto", "Direct first, VPN when it fails", "wand-sparkles"),
             (RuleMode::Vpn, "Always VPN", "Never direct", "shield-check"),
             (RuleMode::Direct, "Direct", "Bypasses VPN", "globe"),
-            (RuleMode::Block, "Block", "No network", "ban"),
+            (RuleMode::Block, "Block", if site { "Never opens" } else { "No network" }, "ban"),
         ];
         let route = modes
             .iter()
+            .filter(|(m, ..)| !site || RuleMode::SITE.contains(m))
             .map(|(m, label, hint, icon)| {
                 let suggest = *m == RuleMode::Vpn && suggested;
                 Row {
@@ -125,10 +141,11 @@ impl Hitori {
         through.extend(data::servers().into_iter().filter(|s| s.id != exit_id).map(|s| country("through ", s, Some(rule.via == Some(s.id)), off, Act::Through(Some(s.id)))));
         let mut proto = vec![choice("protocol same as connection", "zap", "Same as connection", Some(self.s.protocol.label().into()), rule.protocol.is_none(), off, Act::Proto(None))];
         proto.extend(Protocol::ALL.iter().map(|p| choice(&format!("protocol {}", p.label()), "zap", p.label(), None, rule.protocol == Some(*p), off, Act::Proto(Some(*p)))));
-        let options = vec![
-            Row { text: "option kill switch".into(), look: Look::Toggle { label: "Kill switch", sub: format!("Block {} while the tunnel is down", app(app_id).name), on: rule.kill }, disabled: rule.mode == RuleMode::Block, act: Act::Kill },
-            Row { text: "option remove rule".into(), look: Look::Remove, disabled: false, act: Act::Remove },
-        ];
+        let mut options = vec![Row { text: "option remove rule".into(), look: Look::Remove, disabled: false, act: Act::Remove }];
+        if let Mode::Rule(a) = target {
+            let kill = Row { text: "option kill switch".into(), look: Look::Toggle { label: "Kill switch", sub: format!("Block {} while the tunnel is down", app(a).name), on: rule.kill }, disabled: rule.mode == RuleMode::Block, act: Act::Kill };
+            options.insert(0, kill);
+        }
         vec![("Route".into(), route), ("Exit".into(), exit), ("Route through".into(), through), ("Protocol".into(), proto), ("Options".into(), options)]
     }
 
@@ -172,9 +189,16 @@ impl Hitori {
         }
     }
 
-    fn patch_rule(&mut self, app_id: &'static str, change: impl FnOnce(&mut AppRule), cx: &mut Context<Self>) {
-        let mut rule = self.app_route(app_id).cloned().unwrap_or(AppRule::mode(self.s.default_route));
+    /// Change an app's or website's rule. An app whose rule ends up equal to the default route loses it; a website
+    /// keeps its rule until it is removed.
+    fn patch_rule(&mut self, target: Mode, change: impl FnOnce(&mut AppRule), cx: &mut Context<Self>) {
+        let mut rule = self.target_rule(target);
         change(&mut rule);
+        let app_id = match target {
+            Mode::Site(s) => return self.site(s, Some(rule), cx),
+            Mode::Rule(a) => a,
+            Mode::Exit | Mode::Entry => return,
+        };
         if rule.is_default(self.s.default_route) {
             self.s.app_routes.retain(|(a, _)| *a != app_id);
         } else if let Some(slot) = self.s.app_routes.iter_mut().find(|(a, _)| *a == app_id) {
@@ -187,13 +211,14 @@ impl Hitori {
 
     pub fn act(&mut self, act: Act, window: &mut Window, cx: &mut Context<Self>) {
         let main_exit = self.s.server_id;
-        let rule_app = match self.palette {
-            Some(Mode::Rule(a)) => Some(a),
-            _ => None,
-        };
+        let rule_app = self.palette.filter(|m| matches!(m, Mode::Rule(_) | Mode::Site(_)));
         match (act, rule_app) {
             (Act::Go(id), _) => self.go(id, window, cx),
             (Act::Via(id), _) => self.via(Some(id), window, cx),
+            (Act::Remove, Some(Mode::Site(s))) => {
+                self.site(s, None, cx);
+                self.close_palette(window, cx);
+            }
             (Act::Remove, Some(a)) => {
                 let default = self.s.default_route;
                 self.patch_rule(a, |r| *r = AppRule::mode(default), cx);
@@ -224,7 +249,7 @@ impl Hitori {
         let vp = window.viewport_size();
         let (w, h) = (f32::from(vp.width), f32::from(vp.height));
         let groups = self.palette_groups(mode, cx);
-        let rule = matches!(mode, Mode::Rule(_));
+        let rule = matches!(mode, Mode::Rule(_) | Mode::Site(_));
         // Dialog: overlay `fade-in-0` 150ms; content `fade-in-0 zoom-in-95 duration-200` (no subtree scaling in GPUI).
         let dim = self.palette_fx.phase(mode, 150., 150., crate::fx::ease).map_or(0., |p| p.0);
         let fade = self.palette_fx.phase(mode, 200., 200., crate::fx::ease).map_or(0., |p| p.0);
@@ -252,6 +277,7 @@ impl Hitori {
         let dw = PALETTE_W.min(w - 32.);
         let lead = match mode {
             Mode::Rule(a) => app_badge(app(a)).into_any_element(),
+            Mode::Site(_) => site_badge(&t).into_any_element(),
             _ => icon("search", 16., t.foreground.opacity(0.5)).into_any_element(),
         };
         div()

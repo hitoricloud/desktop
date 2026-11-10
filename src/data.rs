@@ -304,6 +304,8 @@ pub enum RuleMode {
 
 impl RuleMode {
     pub const ALL: [RuleMode; 4] = [RuleMode::Auto, RuleMode::Vpn, RuleMode::Direct, RuleMode::Block];
+    /// A website has no "direct first" of its own: it goes through the VPN, direct, or nowhere.
+    pub const SITE: [RuleMode; 3] = [RuleMode::Vpn, RuleMode::Direct, RuleMode::Block];
 
     pub fn key(self) -> &'static str {
         match self {
@@ -352,7 +354,7 @@ impl RuleMode {
     }
 }
 
-/// One app's route. `None` fields follow the main connection; an app without a rule follows the default route.
+/// One app's or website's route. `None` fields follow the main connection; without a rule the default route applies.
 #[derive(Clone, PartialEq, Debug)]
 pub struct AppRule {
     pub mode: RuleMode,
@@ -376,10 +378,16 @@ impl AppRule {
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
-pub enum SiteRule {
-    Vpn,
-    Direct,
+/// `https://www.Example.com/path` → `example.com`; `None` unless it looks like a domain.
+pub fn domain(input: &str) -> Option<String> {
+    let s = input.trim().to_lowercase();
+    let s = s.split_once("://").map_or(s.as_str(), |(_, r)| r);
+    let host = s.split(['/', '?', '#', ':']).next()?.trim_start_matches("www.").trim_end_matches('.');
+    let ok = host.contains('.')
+        && host.len() <= 253
+        && host.split('.').all(|l| !l.is_empty() && l.len() <= 63 && !l.starts_with('-') && !l.ends_with('-'))
+        && host.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
+    ok.then(|| host.to_owned())
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -477,6 +485,16 @@ pub fn js_num(v: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn domains_from_what_people_paste() {
+        assert_eq!(domain("https://www.YouTube.com/watch?v=1").as_deref(), Some("youtube.com"));
+        assert_eq!(domain("chatgpt.com").as_deref(), Some("chatgpt.com"));
+        assert_eq!(domain("sub.example.org:8443/x").as_deref(), Some("sub.example.org"));
+        for bad in ["", "localhost", "exa mple.com", "a..b", "-x.com", "x\".com", "домен.рф"] {
+            assert_eq!(domain(bad), None, "{bad}");
+        }
+    }
 
     #[test]
     fn app_ids_fold_wrappers_and_aliases() {

@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use crate::data::{AppRule, Protocol, RuleMode, Server, SiteRule, processes};
+use crate::data::{AppRule, Protocol, RuleMode, Server, processes};
 
 pub const SOCKS_PORT: u16 = 10808;
 pub const HTTP_PORT: u16 = 10809;
@@ -43,7 +43,7 @@ pub struct Plan {
     pub tun: bool,
     pub kill_switch: bool,
     pub apps: Vec<(&'static str, AppRule)>,
-    pub sites: Vec<(&'static str, SiteRule)>,
+    pub sites: Vec<(&'static str, AppRule)>,
     pub servers: Vec<&'static Server>,
     pub tunnel_rules: Arc<Vec<Value>>,
     pub base_rules: Arc<Vec<Value>>,
@@ -150,33 +150,43 @@ pub fn config(plan: &Plan, ports: Ports) -> Result<Value, String> {
     for (app, _) in plan.apps.iter().filter(|(_, r)| r.mode == RuleMode::Block) {
         rules.push(field(json!({"process": names(app)}), "block"));
     }
-    for (site, rule) in &plan.sites {
+    // Where a rule's tunnelled traffic goes: the main route, or the rule's own exit, cascade and protocol.
+    let tag = |out: &mut Outbounds, r: &AppRule| -> Option<String> {
+        if r.exit.is_none() && r.via.is_none() && r.protocol.is_none() {
+            return Some("proxy".into());
+        }
+        let find = |id: &str| plan.servers.iter().copied().find(|s| s.id == id);
+        let exit = match r.exit {
+            Some(id) => find(id)?,
+            None => exit,
+        };
+        let via = match (r.via, r.exit) {
+            (Some(v), _) => Some(find(v)?),
+            (None, None) => entry,
+            (None, Some(_)) => None,
+        };
+        out.route(exit, via, r.protocol.unwrap_or(plan.protocol))
+    };
+    for (site, r) in &plan.sites {
         let domain = json!({"domain": [format!("domain:{site}")]});
-        rules.push(field(domain, if *rule == SiteRule::Vpn { "proxy" } else { "direct" }));
+        match r.mode {
+            RuleMode::Block => rules.push(field(domain, "block")),
+            RuleMode::Direct => rules.push(field(domain, "direct")),
+            RuleMode::Vpn => {
+                if let Some(t) = tag(&mut out, r) {
+                    rules.push(field(domain, &t));
+                }
+            }
+            RuleMode::Auto => {}
+        }
     }
     for (app, r) in &plan.apps {
         let custom = r.exit.is_some() || r.via.is_some() || r.protocol.is_some();
-        let tag = |out: &mut Outbounds| -> Option<String> {
-            if !custom {
-                return Some("proxy".into());
-            }
-            let find = |id: &str| plan.servers.iter().copied().find(|s| s.id == id);
-            let exit = match r.exit {
-                Some(id) => find(id)?,
-                None => exit,
-            };
-            let via = match (r.via, r.exit) {
-                (Some(v), _) => Some(find(v)?),
-                (None, None) => entry,
-                (None, Some(_)) => None,
-            };
-            out.route(exit, via, r.protocol.unwrap_or(plan.protocol))
-        };
         match r.mode {
             RuleMode::Block => {}
             RuleMode::Direct => rules.push(field(json!({"process": names(app)}), "direct")),
             RuleMode::Vpn => {
-                if let Some(t) = tag(&mut out) {
+                if let Some(t) = tag(&mut out, r) {
                     rules.push(field(json!({"process": names(app)}), &t));
                 }
             }
@@ -184,7 +194,7 @@ pub fn config(plan: &Plan, ports: Ports) -> Result<Value, String> {
             RuleMode::Auto if !custom && plan.default_route == RuleMode::Auto => {}
             // What needs the tunnel goes to the app's exit, the rest of the app direct.
             RuleMode::Auto => {
-                if let Some(t) = tag(&mut out) {
+                if let Some(t) = tag(&mut out, r) {
                     for list in plan.tunnel_rules.iter() {
                         let mut rule = list.clone();
                         rule["process"] = json!(names(app));
@@ -654,7 +664,7 @@ mod tests {
         let mut p = plan();
         let b = p.servers[1];
         p.entry = Some(b);
-        p.sites = vec![("bank.example", SiteRule::Direct)];
+        p.sites = vec![("bank.example", AppRule::mode(RuleMode::Direct)), ("video.example", AppRule { exit: Some("bb-2"), ..AppRule::mode(RuleMode::Vpn) }), ("ads.example", AppRule::mode(RuleMode::Block))];
         p.apps = vec![
             ("steam", AppRule::mode(RuleMode::Direct)),
             ("qbittorrent", AppRule::mode(RuleMode::Block)),
@@ -669,6 +679,8 @@ mod tests {
         assert_eq!(rule_for(&c, "process", "qbittorrent").unwrap()["outboundTag"], "block");
         assert_eq!(rule_for(&c, "process", "helium").map(|r| r["outboundTag"].clone()), Some(json!("p-bb-2-Grpc")), "{:#}", c["routing"]["rules"]);
         assert_eq!(rule_for(&c, "domain", "domain:bank.example").unwrap()["outboundTag"], "direct");
+        assert_eq!(rule_for(&c, "domain", "domain:video.example").unwrap()["outboundTag"], "p-bb-2-Grpc", "a website's own exit");
+        assert_eq!(rule_for(&c, "domain", "domain:ads.example").unwrap()["outboundTag"], "block");
         let (block, site, direct) = (position(&c, "process", "qbittorrent").unwrap(), position(&c, "domain", "domain:bank.example").unwrap(), position(&c, "process", "steam").unwrap());
         assert!(block < site && site < direct, "blocked apps, then sites, then other apps");
     }
@@ -715,7 +727,7 @@ mod tests {
             tun: false,
             kill_switch: true,
             apps: vec![("curl", AppRule { exit: Some(ch.id), ..AppRule::mode(RuleMode::Vpn) })],
-            sites: vec![("example.org", SiteRule::Direct)],
+            sites: vec![("example.org", AppRule::mode(RuleMode::Direct))],
             servers: servers.clone(),
             tunnel_rules: Arc::new(sub.tunnel_rules),
             base_rules: Arc::new(sub.base_rules),

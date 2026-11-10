@@ -10,7 +10,7 @@ use gpui::{
 };
 
 use crate::app::{Conn, Hitori, Ring};
-use crate::data::{self, RuleMode, Server, SiteRule, server};
+use crate::data::{self, AppRule, RuleMode, Server, server};
 use crate::theme::Theme;
 use crate::ui::{MD, Tw, flag, tip};
 use crate::views::{app_badge, site_badge};
@@ -172,33 +172,25 @@ impl Routes {
         let s = &this.s;
         let entry = s.entry_id.filter(|e| *e != s.server_id);
         let main: Vec<&'static str> = entry.into_iter().chain([s.server_id]).collect();
-        let mut r = Routes { paths: vec![Path { hops: main.clone(), main: true, riders: vec![] }], direct: vec![], blocked: vec![] };
-        if !s.all_routes {
-            return r;
-        }
-        let put = |r: &mut Routes, hops: Vec<&'static str>, who: Rider| match r.paths.iter_mut().find(|p| p.hops == hops) {
-            Some(p) => p.riders.push(who),
-            None => r.paths.push(Path { hops, main: false, riders: vec![who] }),
-        };
-        for (a, rule) in &s.app_routes {
-            if !data::active(a) {
-                continue;
-            }
-            match rule.mode {
-                RuleMode::Block => r.blocked.push(Rider::App(a)),
-                RuleMode::Direct => r.direct.push(Rider::App(a)),
-                RuleMode::Vpn | RuleMode::Auto => {
-                    let exit = rule.exit.filter(|e| data::has_server(e)).unwrap_or(s.server_id);
-                    let via = rule.via.or(if rule.exit.is_some() { None } else { entry }).filter(|v| *v != exit && data::has_server(v));
-                    put(&mut r, via.into_iter().chain([exit]).collect(), Rider::App(a));
+        let mut r = Routes { paths: vec![Path { hops: main, main: true, riders: vec![] }], direct: vec![], blocked: vec![] };
+        let mut put = |who: Rider, rule: &AppRule| match rule.mode {
+            RuleMode::Block => r.blocked.push(who),
+            RuleMode::Direct => r.direct.push(who),
+            RuleMode::Vpn | RuleMode::Auto => {
+                let exit = rule.exit.filter(|e| data::has_server(e)).unwrap_or(s.server_id);
+                let via = rule.via.or(if rule.exit.is_some() { None } else { entry }).filter(|v| *v != exit && data::has_server(v));
+                let hops: Vec<&'static str> = via.into_iter().chain([exit]).collect();
+                match r.paths.iter_mut().find(|p| p.hops == hops) {
+                    Some(p) => p.riders.push(who),
+                    None => r.paths.push(Path { hops, main: false, riders: vec![who] }),
                 }
             }
+        };
+        for (a, rule) in s.app_routes.iter().filter(|(a, _)| data::active(a)) {
+            put(Rider::App(a), rule);
         }
         for (site, rule) in &s.sites {
-            match rule {
-                SiteRule::Vpn => put(&mut r, main.clone(), Rider::Site(site)),
-                SiteRule::Direct => r.direct.push(Rider::Site(site)),
-            }
+            put(Rider::Site(site), rule);
         }
         r
     }

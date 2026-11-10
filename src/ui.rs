@@ -298,25 +298,6 @@ pub fn menu_item(id: impl Into<ElementId>, t: &Theme, destructive: bool) -> Stat
         .hover(move |s| s.bg(hover))
 }
 
-/// `DropdownMenuRadioItem`: pl-8 with a filled dot at left-2 when checked.
-pub fn menu_radio(id: impl Into<ElementId>, checked: bool, t: &Theme) -> Stateful<Div> {
-    let accent = t.accent;
-    div()
-        .id(id)
-        .relative()
-        .flex()
-        .items_center()
-        .gap(px(8.))
-        .rounded(px(SM))
-        .py(px(8.))
-        .pr(px(8.))
-        .pl(px(32.))
-        .sm()
-        .cursor_pointer()
-        .hover(move |s| s.bg(accent))
-        .when(checked, |d| d.child(div().absolute().left(px(8.)).top(px(10.)).size(px(16.)).flex().items_center().justify_center().child(icon("circle-fill", 8., t.foreground))))
-}
-
 /// Width of a single line of text, laid out the way the vendored GPUI paints it.
 pub fn text_width(text: &str, size: f32, weight: FontWeight, window: &Window) -> f32 {
     let font = gpui::Font { family: "Google Sans".into(), features: features(0), fallbacks: None, weight, style: gpui::FontStyle::Normal };

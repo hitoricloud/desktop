@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use crate::data::{AppRule, Protocol, RuleMode, SiteRule};
+use crate::data::{AppRule, Protocol, RuleMode};
 
 fn home() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/tmp"))
@@ -85,6 +85,7 @@ impl From<Proto> for Protocol {
     }
 }
 
+/// A saved route for an app (`app` is its id) or a website (`app` is the domain).
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
 pub struct Rule {
     pub app: String,
@@ -119,14 +120,13 @@ pub struct Settings {
     pub kill_switch: bool,
     /// Where traffic without a rule goes: auto, vpn, direct or block.
     pub route: String,
-    /// The map shows every route in use.
-    pub all_routes: bool,
     /// Route the whole system through a TUN device (needs the administrator once per connection).
     pub system_wide: bool,
     pub dark: bool,
     pub rules_big: bool,
     pub apps: Vec<Rule>,
-    pub sites: Vec<(String, bool)>,
+    #[serde(deserialize_with = "sites")]
+    pub sites: Vec<Rule>,
     /// Suggestions answered with "Keep auto": not offered again.
     pub dismissed: Vec<String>,
 }
@@ -141,7 +141,6 @@ impl Default for Settings {
             auto_connect: false,
             kill_switch: true,
             route: "auto".into(),
-            all_routes: true,
             system_wide: true,
             dark: true,
             rules_big: true,
@@ -157,8 +156,38 @@ impl Settings {
         config_dir().join("settings.json")
     }
 
-    pub fn sites(&self) -> Vec<(&'static str, SiteRule)> {
-        self.sites.iter().map(|(t, vpn)| (crate::data::intern(t), if *vpn { SiteRule::Vpn } else { SiteRule::Direct })).collect()
+    pub fn sites(&self) -> Vec<(&'static str, AppRule)> {
+        self.sites.iter().map(Rule::to_app).collect()
+    }
+}
+
+/// Website rules, also from settings written when a site could only be `[domain, vpn]`.
+fn sites<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Rule>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Saved {
+        Rule(Rule),
+        Old(String, bool),
+    }
+    Ok(Vec::<Saved>::deserialize(d)?
+        .into_iter()
+        .map(|s| match s {
+            Saved::Rule(r) => r,
+            Saved::Old(domain, vpn) => Rule { app: domain, mode: if vpn { "vpn" } else { "direct" }.into(), exit: None, via: None, protocol: None, kill: false },
+        })
+        .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Settings;
+
+    #[test]
+    fn old_website_rules_still_load() {
+        let s: Settings = serde_json::from_str(r#"{"route":"vpn","sites":[["youtube.com",true],["bank.ru",false],{"app":"x.org","mode":"block","exit":null,"via":null,"protocol":null,"kill":false}]}"#).unwrap();
+        let modes: Vec<_> = s.sites().into_iter().map(|(d, r)| (d, r.mode.key())).collect();
+        assert_eq!(modes, [("youtube.com", "vpn"), ("bank.ru", "direct"), ("x.org", "block")]);
+        assert_eq!(s.route, "vpn");
     }
 }
 

@@ -7,7 +7,7 @@ use gpui::{Context, Task};
 use serde_json::Value;
 
 use crate::app::Conn;
-use crate::data::{self, Account, AppRule, Protocol, RuleMode, Scope, SiteRule, Suggestion};
+use crate::data::{self, Account, AppRule, Protocol, RuleMode, Scope, Suggestion};
 use crate::net::{self, Geo};
 use crate::store::{self, Login, Rule, Settings};
 use crate::sub;
@@ -45,11 +45,9 @@ pub struct Shared {
     pub auto_connect: bool,
     pub kill_switch: bool,
     pub default_route: RuleMode,
-    /// The map draws every route in use, not only the main connection.
-    pub all_routes: bool,
     pub system_wide: bool,
     pub app_routes: Vec<(&'static str, AppRule)>,
-    pub sites: Vec<(&'static str, SiteRule)>,
+    pub sites: Vec<(&'static str, AppRule)>,
     pub suggestions: Vec<Suggestion>,
     pub snoozed: Vec<&'static str>,
     pub dismissed: Vec<String>,
@@ -92,12 +90,11 @@ impl Shared {
             auto_connect: self.auto_connect,
             kill_switch: self.kill_switch,
             route: self.default_route.key().into(),
-            all_routes: self.all_routes,
             system_wide: self.system_wide,
             dark: self.dark,
             rules_big: self.rules_big,
             apps: self.app_routes.iter().map(|(a, r)| Rule::from_app(a, r)).collect(),
-            sites: self.sites.iter().map(|(t, r)| ((*t).to_owned(), *r == SiteRule::Vpn)).collect(),
+            sites: self.sites.iter().map(|(t, r)| Rule::from_app(t, r)).collect(),
             dismissed: self.dismissed.clone(),
         }
     }
@@ -109,7 +106,7 @@ impl Shared {
 }
 
 /// What a running core has to be restarted for: default route, app rules, site rules.
-type Routing = (RuleMode, Vec<(&'static str, AppRule)>, Vec<(&'static str, SiteRule)>);
+type Routing = (RuleMode, Vec<(&'static str, AppRule)>, Vec<(&'static str, AppRule)>);
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 struct Exit {
@@ -176,7 +173,6 @@ impl Vpn {
             auto_connect: saved.auto_connect,
             kill_switch: saved.kill_switch,
             default_route: RuleMode::parse(&saved.route),
-            all_routes: saved.all_routes,
             system_wide: saved.system_wide,
             app_routes: saved.apps.iter().map(Rule::to_app).collect(),
             sites: saved.sites(),
