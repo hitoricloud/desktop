@@ -106,7 +106,14 @@ pub fn open_window(variant: Variant, popover: Option<Popover>, cx: &mut App) -> 
         Some((w.parse::<f32>().ok()?, h.parse::<f32>().ok()?))
     });
     let tray = variant == Variant::Tray;
-    let (w, h) = popover.as_ref().map(|p| p.size).or(forced).unwrap_or(if tray { POPUP } else { (1440., 900.) });
+    let (w, h) = popover.as_ref().map(|p| p.size).or(forced).unwrap_or_else(|| {
+        let (w, h) = if tray { POPUP } else { (1440., 900.) };
+        // Small screens: the main window fits inside 90% of the display (the layout narrows below 1024 px).
+        match cx.primary_display().map(|d| d.bounds().size) {
+            Some(d) if !tray => (w.min(f32::from(d.width) * 0.9).floor(), h.min(f32::from(d.height) * 0.9).floor()),
+            _ => (w, h),
+        }
+    });
     let origin = popover.as_ref().and_then(|p| p.origin);
     let card = popover.map(|p| p.card);
     let bounds = match origin {
