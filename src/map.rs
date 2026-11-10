@@ -18,7 +18,15 @@ use crate::vtile::{self, VTile};
 
 const FIT_MS: f64 = 900.;
 const MAX_ZOOM: f64 = 5.;
-const MIN_ZOOM: f64 = 1.;
+const MAX_USER_ZOOM: f64 = 18.;
+/// Zoom levels per wheel line (a notch is 3 lines on Linux and Windows) and per touchpad pixel.
+const ZOOM_PER_LINE: f64 = 1. / 6.;
+const ZOOM_PER_PX: f64 = 1. / 300.;
+/// Time constants (s) of the exponential zoom easing: wheel notches glide, touchpad deltas follow closely.
+const WHEEL_TAU: f64 = 0.09;
+const TOUCH_TAU: f64 = 0.04;
+/// The whole world at this zoom, drawn under everything so no part of the view is ever blank.
+const BACKDROP_Z: u32 = 2;
 
 pub struct Padding {
     pub top: f32,
@@ -39,10 +47,21 @@ struct Ease {
     start: Instant,
 }
 
+/// A wheel or touchpad zoom in progress: the unit point `anchor` stays under the view point `at`.
+struct Zoom {
+    to: f64,
+    at: (f32, f32),
+    anchor: (f64, f64),
+    tau: f64,
+}
+
 pub struct MapState {
     center: (f64, f64),
     zoom: f64,
     ease: Option<Ease>,
+    zooming: Option<Zoom>,
+    /// The last camera step, for frame-rate independent easing.
+    tick: Instant,
     framed: String,
     size: (f32, f32),
     tiles: HashMap<(u32, u32, u32), Tile>,
@@ -51,7 +70,12 @@ pub struct MapState {
     /// The basemap, labels and route for one camera, rasterized off the main thread and drawn as one image.
     /// While the camera moves, the newest raster is scaled and shifted on the GPU until the next one is ready.
     raster: Option<Raster>,
+    /// The raster before `raster`, still drawn beneath it where the newer one does not reach.
+    under: Option<Raster>,
+    /// The whole world without labels (see `BACKDROP_Z`).
+    backdrop: Option<Raster>,
     job: Option<gpui::Task<()>>,
+    backdrop_job: Option<gpui::Task<()>>,
     /// Replaced rasters, freed a few frames later: the GPU may still be drawing them.
     retired: Vec<(Arc<RenderImage>, u8)>,
     inflight: usize,
@@ -69,11 +93,52 @@ struct Raster {
 }
 
 /// Extra map rasterized around the view, so panning shows map rather than an empty edge before the next raster.
-const OVERSCAN: f32 = 128.;
+const OVERSCAN: (f32, f32) = (256., 128.);
 
 fn unit(lat: f64, lon: f64) -> (f64, f64) {
     let s = (lat.clamp(-85.05, 85.05) * PI / 180.).sin();
     ((lon + 180.) / 360., 0.5 - ((1. + s) / (1. - s)).ln() / (4. * PI))
+}
+
+fn world_px(zoom: f64) -> f64 {
+    512. * 2f64.powf(zoom)
+}
+
+/// The shortest signed horizontal distance on the wrapped world.
+fn wrap(dx: f64) -> f64 {
+    dx - dx.round()
+}
+
+/// The smallest zoom at which the world covers the whole view.
+fn min_zoom(size: (f32, f32)) -> f64 {
+    (size.0.max(size.1) as f64 / 512.).log2().max(0.)
+}
+
+/// Keeps the poles at or beyond the view's edges and the centre's x in [0, 1).
+fn constrain(center: (f64, f64), zoom: f64, size: (f32, f32)) -> (f64, f64) {
+    let half = size.1 as f64 / 2. / world_px(zoom);
+    (center.0.rem_euclid(1.), if half >= 0.5 { 0.5 } else { center.1.clamp(half, 1. - half) })
+}
+
+/// The camera centre that puts unit point `u` at view point `at`.
+fn anchored(u: (f64, f64), at: (f32, f32), zoom: f64, size: (f32, f32)) -> (f64, f64) {
+    let world = world_px(zoom);
+    (u.0 - (at.0 - size.0 / 2.) as f64 / world, u.1 - (at.1 - size.1 / 2.) as f64 / world)
+}
+
+/// Whole-world shifts that bring the x range [a, b] into [c - half, c + half].
+fn copies(a: f64, b: f64, c: f64, half: f64) -> std::ops::RangeInclusive<i64> {
+    (c - half - b).ceil() as i64..=(c + half - a).floor() as i64
+}
+
+/// The shortest x range on the wrapped world holding every x; the end may pass 1.
+fn span(xs: &[f64]) -> (f64, f64) {
+    let mut xs: Vec<f64> = xs.iter().map(|x| x.rem_euclid(1.)).collect();
+    xs.sort_by(f64::total_cmp);
+    // Leave out the widest gap between neighbours, the one across the seam included.
+    let gap = |i: usize| if i + 1 < xs.len() { xs[i + 1] - xs[i] } else { xs[0] + 1. - xs[i] };
+    let i = (0..xs.len()).max_by(|a, b| gap(*a).total_cmp(&gap(*b))).unwrap_or(0);
+    if i + 1 == xs.len() { (xs[0], xs[i]) } else { (xs[i + 1], xs[i] + 1.) }
 }
 
 /// MapLibre's default easing, cubic-bezier(0.25, 0.1, 0.25, 1).
@@ -109,7 +174,39 @@ fn arc(a: (f64, f64), b: (f64, f64), steps: usize) -> Vec<(f64, f64)> {
 
 impl MapState {
     pub fn new() -> Self {
-        Self { center: unit(52., 30.), zoom: 3., ease: None, framed: String::new(), size: (0., 0.), tiles: HashMap::new(), tiles_gen: 0, raster: None, job: None, retired: vec![], inflight: 0, drag: None }
+        Self {
+            center: unit(52., 30.),
+            zoom: 3.,
+            ease: None,
+            zooming: None,
+            tick: Instant::now(),
+            framed: String::new(),
+            size: (0., 0.),
+            tiles: HashMap::new(),
+            tiles_gen: 0,
+            raster: None,
+            under: None,
+            backdrop: None,
+            job: None,
+            backdrop_job: None,
+            retired: vec![],
+            inflight: 0,
+            drag: None,
+        }
+    }
+
+    /// HITORI_STATE scripting: `zoom:<levels>@<x>;<y>` around a view point, `pan:<dx>;<dy>` as a drag.
+    pub fn script(&mut self, key: &str, value: &str) {
+        let num = |s: &str| s.trim().parse::<f32>().unwrap_or(0.);
+        let (a, at) = value.split_once('@').unwrap_or((value, ""));
+        let (x, y) = at.split_once(';').or(a.split_once(';')).map_or((self.size.0 / 2., self.size.1 / 2.), |(x, y)| (num(x), num(y)));
+        match key {
+            "zoom" => self.zoom_by(num(a) as f64, (x, y), WHEEL_TAU),
+            _ => {
+                self.ease = None;
+                self.pan((gpui::point(px(0.), px(0.)), self.center), gpui::point(px(x), px(y)));
+            }
+        }
     }
 
     /// Theme changed: tiles of the other style are no longer drawn.
@@ -120,29 +217,75 @@ impl MapState {
     }
 
     fn world(&self) -> f64 {
-        512. * 2f64.powf(self.zoom)
+        world_px(self.zoom)
     }
 
+    /// A unit point in view pixels, at the world copy nearest the view's centre.
     fn screen(&self, u: (f64, f64)) -> (f32, f32) {
         let world = self.world();
-        let mut dx = u.0 - self.center.0;
-        dx -= dx.round();
-        ((dx * world + self.size.0 as f64 / 2.) as f32, ((u.1 - self.center.1) * world + self.size.1 as f64 / 2.) as f32)
+        ((wrap(u.0 - self.center.0) * world + self.size.0 as f64 / 2.) as f32, ((u.1 - self.center.1) * world + self.size.1 as f64 / 2.) as f32)
     }
 
-    /// `fitBounds(bounds, { padding, maxZoom: 5 })`.
+    /// The unit point under a view point.
+    fn unproject(&self, at: (f32, f32)) -> (f64, f64) {
+        let world = self.world();
+        (self.center.0 + (at.0 - self.size.0 / 2.) as f64 / world, self.center.1 + (at.1 - self.size.1 / 2.) as f64 / world)
+    }
+
+    /// Eases the zoom by `dz` levels around the view point `at`; further deltas add to the target.
+    fn zoom_by(&mut self, dz: f64, at: (f32, f32), tau: f64) {
+        self.ease = None;
+        if self.zooming.is_none() {
+            self.tick = Instant::now();
+        }
+        let to = (self.zooming.as_ref().map_or(self.zoom, |z| z.to) + dz).clamp(min_zoom(self.size), MAX_USER_ZOOM);
+        self.zooming = Some(Zoom { to, at, anchor: self.unproject(at), tau });
+    }
+
+    /// Advances the fit and zoom animations to `now`; true while either still runs.
+    fn step(&mut self, now: Instant) -> bool {
+        let dt = now.saturating_duration_since(self.tick).as_secs_f64().min(0.05);
+        self.tick = now;
+        let mut moving = false;
+        if let Some(e) = &self.ease {
+            let p = (now.saturating_duration_since(e.start).as_secs_f64() * 1000. / FIT_MS).min(1.);
+            let k = ease(p);
+            self.center = (e.from.0.0 + (e.to.0.0 - e.from.0.0) * k, e.from.0.1 + (e.to.0.1 - e.from.0.1) * k);
+            self.zoom = e.from.1 + (e.to.1 - e.from.1) * k;
+            if p >= 1. { self.ease = None } else { moving = true }
+        }
+        if let Some(z) = &self.zooming {
+            self.zoom += (z.to - self.zoom) * (1. - (-dt / z.tau).exp());
+            if (z.to - self.zoom).abs() < 1e-3 {
+                self.zoom = z.to;
+            }
+            self.center = anchored(z.anchor, z.at, self.zoom, self.size);
+            if self.zoom == z.to { self.zooming = None } else { moving = true }
+        }
+        self.zoom = self.zoom.clamp(min_zoom(self.size), MAX_USER_ZOOM);
+        self.center = constrain(self.center, self.zoom, self.size);
+        moving
+    }
+
+    /// Drag from `start` (the view point and centre at mouse-down) to `at`.
+    fn pan(&mut self, start: (Point<Pixels>, (f64, f64)), at: Point<Pixels>) {
+        let (world, d) = (self.world(), at - start.0);
+        self.center = constrain((start.1.0 - f64::from(f32::from(d.x)) / world, start.1.1 - f64::from(f32::from(d.y)) / world), self.zoom, self.size);
+    }
+
+    /// `fitBounds(bounds, { padding, maxZoom: 5 })`, the short way round, at no less than `min_zoom`.
     fn fit(&self, points: &[(f64, f64)], pad: &Padding) -> ((f64, f64), f64) {
         let us: Vec<_> = points.iter().map(|p| unit(p.0, p.1)).collect();
-        let (x0, x1) = us.iter().fold((f64::MAX, f64::MIN), |(a, b), u| (a.min(u.0), b.max(u.0)));
+        let (x0, x1) = span(&us.iter().map(|u| u.0).collect::<Vec<_>>());
         let (y0, y1) = us.iter().fold((f64::MAX, f64::MIN), |(a, b), u| (a.min(u.1), b.max(u.1)));
         let (w, h) = (self.size.0 as f64, self.size.1 as f64);
         let sx = (w - (pad.left + pad.right) as f64) / ((x1 - x0) * 512.);
         let sy = (h - (pad.top + pad.bottom) as f64) / ((y1 - y0) * 512.);
-        let zoom = sx.min(sy).log2().clamp(MIN_ZOOM, MAX_ZOOM);
-        let world = 512. * 2f64.powf(zoom);
+        let zoom = sx.min(sy).log2().min(MAX_ZOOM).max(min_zoom(self.size));
+        let world = world_px(zoom);
         let cx = (x0 + x1) / 2. + ((pad.right - pad.left) as f64 / 2.) / world;
         let cy = (y0 + y1) / 2. + ((pad.bottom - pad.top) as f64 / 2.) / world;
-        ((cx, cy), zoom)
+        (constrain((cx, cy), zoom, self.size), zoom)
     }
 }
 
@@ -250,19 +393,14 @@ impl Hitori {
         if key != m.framed {
             m.framed = key;
             let points: Vec<(f64, f64)> = lines.iter().flat_map(|(l, _)| l.iter().copied()).collect();
-            let to = m.fit(&points, &pad);
+            let (c, z) = m.fit(&points, &pad);
+            // Towards the copy of the target nearest the current view, not across the whole world.
+            let to = ((m.center.0 + wrap(c.0 - m.center.0), c.1), z);
+            m.zooming = None;
             m.ease = Some(Ease { from: (m.center, m.zoom), to, start: Instant::now() });
         }
-        if let Some(e) = &m.ease {
-            let p = (e.start.elapsed().as_secs_f64() * 1000. / FIT_MS).min(1.);
-            let k = ease(p);
-            m.center = (e.from.0.0 + (e.to.0.0 - e.from.0.0) * k, e.from.0.1 + (e.to.0.1 - e.from.0.1) * k);
-            m.zoom = e.from.1 + (e.to.1 - e.from.1) * k;
-            if p >= 1. {
-                m.ease = None;
-            } else {
-                window.request_animation_frame();
-            }
+        if m.step(Instant::now()) {
+            window.request_animation_frame();
         }
 
         let basemap = self.basemap(&t, scale, window, cx);
@@ -274,25 +412,27 @@ impl Hitori {
             .overflow_hidden()
             .on_mouse_down(MouseButton::Left, cx.listener(|this, e: &gpui::MouseDownEvent, _, _| {
                 this.map.ease = None;
+                this.map.zooming = None;
                 this.map.drag = Some((e.position, this.map.center));
             }))
             .on_mouse_move(cx.listener(|this, e: &gpui::MouseMoveEvent, _, cx| {
-                if let (Some((start, c)), true) = (this.map.drag, e.dragging()) {
-                    let world = this.map.world();
-                    let d = e.position - start;
-                    this.map.center = (c.0 - f64::from(f32::from(d.x)) / world, (c.1 - f64::from(f32::from(d.y)) / world).clamp(0., 1.));
+                if let (Some(start), true) = (this.map.drag, e.dragging()) {
+                    this.map.pan(start, e.position);
                     cx.notify();
                 }
             }))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, _| this.map.drag = None))
+            // Wheel notches and touchpad scrolls zoom around the cursor (Windows reports touchpad pinches as ctrl+wheel).
             .on_scroll_wheel(cx.listener(|this, e: &gpui::ScrollWheelEvent, _, cx| {
-                let dy = match e.delta {
-                    ScrollDelta::Pixels(p) => f32::from(p.y) as f64 / 100.,
-                    ScrollDelta::Lines(l) => l.y as f64 / 2.,
+                let (dz, tau) = match e.delta {
+                    ScrollDelta::Pixels(p) => (f32::from(p.y) as f64 * ZOOM_PER_PX, TOUCH_TAU),
+                    ScrollDelta::Lines(l) => (l.y as f64 * ZOOM_PER_LINE, WHEEL_TAU),
                 };
-                this.map.ease = None;
-                this.map.zoom = (this.map.zoom + dy).clamp(MIN_ZOOM, 18.);
-                cx.notify();
+                if dz != 0. {
+                    let (ox, oy, _, _) = this.ring_clip.get();
+                    this.map.zoom_by(dz, (f32::from(e.position.x) - ox, f32::from(e.position.y) - oy), tau);
+                    cx.notify();
+                }
             }))
             .child(basemap)
             .children(markers)
@@ -300,21 +440,29 @@ impl Hitori {
             .into_any_element()
     }
 
-    /// Vector tiles at floor(zoom) (512px each), labels and the route, as one image (see `Raster`).
+    /// Vector tiles at floor(zoom) (512px each), labels and the route as one image (see `Raster`), over `under` and the backdrop.
     fn basemap(&mut self, t: &Theme, scale: f32, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let paths = Routes::of(self).lines(me(self));
         let on = self.s.conn == Conn::On;
         let route_color = if on { t.primary } else { t.muted_fg };
         let dark = t.dark;
+        let style = if dark { &vtile::DARK } else { &vtile::LIGHT };
         let m = &mut self.map;
         let tz = m.zoom.floor().clamp(0., 14.) as u32;
         let n = 1i64 << tz;
         let world = m.world();
-        let full = (m.size.0 + 2. * OVERSCAN, m.size.1 + 2. * OVERSCAN);
-        let left = m.center.0 - full.0 as f64 / 2. / world;
-        let top = m.center.1 - full.1 as f64 / 2. / world;
-        let (x0, x1) = ((left * n as f64).floor() as i64, ((left + full.0 as f64 / world) * n as f64).floor() as i64);
-        let (y0, y1) = (((top * n as f64).floor() as i64).max(0), (((top + full.1 as f64 / world) * n as f64).floor() as i64).min(n - 1));
+        let center = m.center;
+        let full = (m.size.0 + 2. * OVERSCAN.0, m.size.1 + 2. * OVERSCAN.1);
+        let left = center.0 - full.0 as f64 / 2. / world;
+        let top = center.1 - full.1 as f64 / 2. / world;
+        // Tile columns and rows at zoom z under the raster grown by `margin` px on each side.
+        let range = |z: u32, margin: (f32, f32)| {
+            let k = (1i64 << z) as f64;
+            let (l, t) = (left - margin.0 as f64 / world, top - margin.1 as f64 / world);
+            let (r, b) = (l + (full.0 + 2. * margin.0) as f64 / world, t + (full.1 + 2. * margin.1) as f64 / world);
+            ((l * k).floor() as i64, (r * k).floor() as i64, ((t * k).floor() as i64).max(0), ((b * k).floor() as i64).min(k as i64 - 1))
+        };
+        let (x0, x1, y0, y1) = range(tz, (0., 0.));
         // (tile, x, y, size) in logical px from the raster's top-left, and whether it stands in for a missing tile.
         let mut placed: Vec<(Arc<VTile>, f32, f32, f32, bool)> = vec![];
         let mut stand_ins = std::collections::HashSet::new();
@@ -332,8 +480,8 @@ impl Hitori {
                     continue;
                 }
                 wanted.push(key);
-                // Until it arrives: the nearest loaded ancestor, else whichever children are loaded.
-                let parent = (1..=tz.min(4)).find_map(|k| {
+                // Until it arrives: the nearest loaded ancestor (the backdrop's tiles always are), else loaded children.
+                let parent = (1..=tz).find_map(|k| {
                     let key = (tz - k, (x.rem_euclid(n) >> k) as u32, (y >> k) as u32);
                     match m.tiles.get(&key) {
                         Some(Tile::Ready(d)) => Some((k, d.clone())),
@@ -357,10 +505,21 @@ impl Hitori {
                 }
             }
         }
-        // Load what the view needs, nearest the centre first.
-        let mid = (((m.center.0 * n as f64).floor() as i64).rem_euclid(n), (m.center.1 * n as f64).floor() as i64);
+        let around = |z: u32, margin: (f32, f32)| {
+            let (a, b, c, d) = range(z, margin);
+            let k = 1i64 << z;
+            let mid = (((center.0 * k as f64).floor() as i64).rem_euclid(k), (center.1 * k as f64).floor() as i64);
+            let mut keys: Vec<(u32, u32, u32)> = (c..=d).flat_map(|y| (a..=b).map(move |x| (z, x.rem_euclid(k) as u32, y as u32))).collect();
+            keys.sort_by_key(|t| (t.1 as i64 - mid.0).abs().min(k - (t.1 as i64 - mid.0).abs()) + (t.2 as i64 - mid.1).abs());
+            keys
+        };
+        // The backdrop, the view (nearest the centre first), then what panning and zooming out will need next.
+        let bn = 1u32 << BACKDROP_Z;
+        let world_keys = (0..bn).flat_map(|y| (0..bn).map(move |x| (BACKDROP_Z, x, y)));
+        let next = around(tz, (m.size.0 / 2., m.size.1 / 2.)).into_iter().chain(if tz > 0 { around(tz - 1, (0., 0.)) } else { vec![] });
+        let mid = (((center.0 * n as f64).floor() as i64).rem_euclid(n), (center.1 * n as f64).floor() as i64);
         wanted.sort_by_key(|k| (k.1 as i64 - mid.0).abs().min(n - (k.1 as i64 - mid.0).abs()) + (k.2 as i64 - mid.1).abs());
-        for key in wanted {
+        for key in world_keys.chain(wanted).chain(next) {
             if m.inflight >= 8 {
                 break;
             }
@@ -383,9 +542,9 @@ impl Hitori {
         }
 
         let (w, h) = ((full.0 * scale).round().max(1.) as u32, (full.1 * scale).round().max(1.) as u32);
-        let key = format!("{:.6}/{:.9}/{:.9}/{w}x{h}/{dark}/{}/{on}/{paths:?}", m.zoom, m.center.0, m.center.1, m.tiles_gen);
+        let key = format!("{:.6}/{:.9}/{:.9}/{w}x{h}/{dark}/{}/{on}/{paths:?}", m.zoom, center.0, center.1, m.tiles_gen);
         if m.job.is_none() && m.raster.as_ref().map(|r| &r.key) != Some(&key) {
-            let (center, zoom) = (m.center, m.zoom);
+            let zoom = m.zoom;
             let legs: Vec<_> = paths.iter().map(|(stops, main)| (route_legs(stops, center, world, full), *main)).collect();
             m.job = Some(cx.spawn(async move |this, cx| {
                 let image = cx
@@ -394,7 +553,7 @@ impl Hitori {
                         let mut pix = tiny_skia::Pixmap::new(w, h).expect("map size");
                         let tiles: Vec<vtile::Placed> =
                             placed.iter().map(|(d, x, y, sz, fb)| vtile::Placed { tile: d, x: x * scale, y: y * scale, size: sz * scale, fallback: *fb }).collect();
-                        vtile::rasterize(&mut pix, zoom, scale, if dark { &vtile::DARK } else { &vtile::LIGHT }, &tiles);
+                        vtile::rasterize(&mut pix, zoom, scale, style, &tiles, true);
                         // MapLibre: line-width 2, line-cap round, dasharray [2, 2] (in line widths) while off.
                         // Other routes first and fainter, the main connection on top.
                         for main in [false, true] {
@@ -403,17 +562,48 @@ impl Hitori {
                             let color = if main { route_color } else { route_color.opacity(0.5) };
                             vtile::stroke_lines(&mut pix, &lines, 2. * scale, (!on).then(|| vec![4. * scale, 4. * scale]), true, color);
                         }
-                        let mut rgba = pix.take();
-                        for px in rgba.chunks_exact_mut(4) {
-                            px.swap(0, 2);
-                        }
-                        Arc::new(RenderImage::new(vec![image::Frame::new(image::RgbaImage::from_raw(w, h, rgba).expect("raster"))]))
+                        render_image(pix)
                     })
                     .await;
                 this.update(cx, |this, cx| {
                     let m = &mut this.map;
                     m.job = None;
-                    if let Some(old) = m.raster.replace(Raster { key, image, center, zoom, size: full }) {
+                    if let Some(old) = m.raster.replace(Raster { key, image, center, zoom, size: full })
+                        && let Some(older) = m.under.replace(old)
+                    {
+                        m.retired.push((older.image, 0));
+                    }
+                    cx.notify();
+                })
+                .ok();
+            }));
+        }
+        let world_tiles: Vec<(Arc<VTile>, u32, u32)> = (0..bn)
+            .flat_map(|y| (0..bn).map(move |x| (x, y)))
+            .filter_map(|(x, y)| match m.tiles.get(&(BACKDROP_Z, x, y)) {
+                Some(Tile::Ready(d)) => Some((d.clone(), x, y)),
+                _ => None,
+            })
+            .collect();
+        let backdrop_key = format!("{dark}/{}", world_tiles.len());
+        if m.backdrop_job.is_none() && !world_tiles.is_empty() && m.backdrop.as_ref().map(|r| &r.key) != Some(&backdrop_key) {
+            let side = 512 * bn;
+            m.backdrop_job = Some(cx.spawn(async move |this, cx| {
+                let image = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let mut pix = tiny_skia::Pixmap::new(side, side).expect("backdrop size");
+                        let tiles: Vec<vtile::Placed> =
+                            world_tiles.iter().map(|(d, x, y)| vtile::Placed { tile: d, x: (x * 512) as f32, y: (y * 512) as f32, size: 512., fallback: false }).collect();
+                        vtile::rasterize(&mut pix, BACKDROP_Z as f64, 1., style, &tiles, false);
+                        render_image(pix)
+                    })
+                    .await;
+                this.update(cx, |this, cx| {
+                    let m = &mut this.map;
+                    m.backdrop_job = None;
+                    let size = (side as f32, side as f32);
+                    if let Some(old) = m.backdrop.replace(Raster { key: backdrop_key, image, center: (0.5, 0.5), zoom: BACKDROP_Z as f64, size }) {
                         m.retired.push((old.image, 0));
                     }
                     cx.notify();
@@ -430,24 +620,39 @@ impl Hitori {
         if !m.retired.is_empty() {
             window.request_animation_frame();
         }
-        let bg = gpui::rgb(if dark { vtile::DARK.background } else { vtile::LIGHT.background });
-        let Some(r) = &m.raster else { return div().absolute().inset_0().bg(bg).into_any_element() };
-        // Where the raster's top-left corner and size land under the current camera.
-        let rw = 512. * 2f64.powf(r.zoom);
-        let k = world / rw;
-        let mut ux = r.center.0 - r.size.0 as f64 / 2. / rw;
-        ux -= (r.center.0 - m.center.0).round();
-        let uy = r.center.1 - r.size.1 as f64 / 2. / rw;
-        let (mut x, mut y) = (((ux - m.center.0) * world) as f32 + m.size.0 / 2., ((uy - m.center.1) * world) as f32 + m.size.1 / 2.);
-        if (k - 1.).abs() < 1e-9 {
-            (x, y) = ((x * scale).round() / scale, (y * scale).round() / scale);
+        // Where a raster's top-left corner and size land under the current camera, at the copy nearest the view.
+        let place = |r: &Raster| {
+            let rw = world_px(r.zoom);
+            let k = world / rw;
+            let ux = r.center.0 - r.size.0 as f64 / 2. / rw - (r.center.0 - center.0).round();
+            let uy = r.center.1 - r.size.1 as f64 / 2. / rw;
+            let (mut x, mut y) = (((ux - center.0) * world) as f32 + m.size.0 / 2., ((uy - center.1) * world) as f32 + m.size.1 / 2.);
+            if (k - 1.).abs() < 1e-9 {
+                (x, y) = ((x * scale).round() / scale, (y * scale).round() / scale);
+            }
+            (x, y, r.size.0 * k as f32, r.size.1 * k as f32)
+        };
+        let image = |r: &Raster, (x, y, w, h): (f32, f32, f32, f32)| img(ImageSource::Render(r.image.clone())).absolute().left(px(x)).top(px(y)).w(px(w)).h(px(h));
+        let mut layers = div().absolute().inset_0().bg(gpui::rgb(style.background));
+        // Far from its own zoom a raster is only a blur, and float precision suffers.
+        if let Some(b) = &m.backdrop
+            && m.zoom < 9.
+        {
+            let (x, y, w, h) = place(b);
+            for j in -1..=1 {
+                let x = x + j as f32 * w;
+                if x < m.size.0 && x + w > 0. {
+                    layers = layers.child(image(b, (x, y, w, h)));
+                }
+            }
         }
-        div()
-            .absolute()
-            .inset_0()
-            .bg(bg)
-            .child(img(ImageSource::Render(r.image.clone())).absolute().left(px(x)).top(px(y)).w(px(r.size.0 * k as f32)).h(px(r.size.1 * k as f32)))
-            .into_any_element()
+        if let Some(u) = m.under.as_ref().filter(|u| (u.zoom - m.zoom).abs() < 2.) {
+            layers = layers.child(image(u, place(u)));
+        }
+        if let Some(r) = &m.raster {
+            layers = layers.child(image(r, place(r)));
+        }
+        layers.into_any_element()
     }
 
     fn markers(&self, t: &Theme, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
@@ -614,27 +819,150 @@ fn attribution(t: &Theme) -> impl IntoElement {
         .child(div().size(px(24.)).rounded_full().bg(gpui::black().opacity(0.05)).flex().items_center().justify_center().child(div().text_px(12., 12.).bold().text_color(plain).child("i")))
 }
 
-/// You → entry → exit as great-circle polylines, in logical px of a raster of `size` centred on `center`.
+/// You → entry → exit as great-circle polylines in px of a raster of `size` centred on `center`, at every world copy it shows.
 fn route_legs(stops: &[(f64, f64)], center: (f64, f64), world: f64, size: (f32, f32)) -> Vec<Vec<(f32, f32)>> {
+    let half = size.0 as f64 / 2. / world;
     stops
         .windows(2)
-        .map(|w| {
-            let pts: Vec<(f64, f64)> = arc(w[0], w[1], 32).into_iter().map(|(la, lo)| unit(la, lo)).collect();
-            let mut prev = pts[0].0;
-            pts.into_iter()
-                .map(|mut u| {
+        .flat_map(|w| {
+            let mut prev = unit(w[0].0, w[0].1).0;
+            let pts: Vec<(f64, f64)> = arc(w[0], w[1], 32)
+                .into_iter()
+                .map(|(la, lo)| {
+                    let mut u = unit(la, lo);
                     u.0 -= (u.0 - prev).round();
                     prev = u.0;
                     u
                 })
-                .map(|u| {
-                    let mut dx = u.0 - center.0;
-                    if (dx - dx.round()).abs() < dx.abs() && dx.abs() > 0.5 {
-                        dx -= dx.round();
-                    }
-                    ((dx * world + size.0 as f64 / 2.) as f32, ((u.1 - center.1) * world + size.1 as f64 / 2.) as f32)
-                })
-                .collect()
+                .collect();
+            let (a, b) = pts.iter().fold((f64::MAX, f64::MIN), |(a, b), u| (a.min(u.0), b.max(u.0)));
+            copies(a, b, center.0, half)
+                .map(|k| pts.iter().map(|u| (((u.0 + k as f64 - center.0) * world + size.0 as f64 / 2.) as f32, ((u.1 - center.1) * world + size.1 as f64 / 2.) as f32)).collect())
+                .collect::<Vec<_>>()
         })
         .collect()
+}
+
+/// A finished pixmap as an image GPUI can draw (BGRA).
+fn render_image(pix: tiny_skia::Pixmap) -> Arc<RenderImage> {
+    let (w, h) = (pix.width(), pix.height());
+    let mut rgba = pix.take();
+    for px in rgba.chunks_exact_mut(4) {
+        px.swap(0, 2);
+    }
+    Arc::new(RenderImage::new(vec![image::Frame::new(image::RgbaImage::from_raw(w, h, rgba).expect("raster"))]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn map(size: (f32, f32), center: (f64, f64), zoom: f64) -> MapState {
+        MapState { size, center, zoom, ..MapState::new() }
+    }
+
+    fn close(a: (f32, f32), b: (f32, f32)) -> bool {
+        (a.0 - b.0).abs() < 0.01 && (a.1 - b.1).abs() < 0.01
+    }
+
+    #[test]
+    fn wheel_zoom_keeps_the_point_under_the_cursor() {
+        let mut m = map((1000., 800.), (0.55, 0.4), 3.);
+        let at = (150., 620.);
+        let u = m.unproject(at);
+        m.zoom_by(1., at, WHEEL_TAU);
+        let t0 = m.tick;
+        for i in 1..=60 {
+            m.step(t0 + Duration::from_millis(16 * i));
+            assert!(close(m.screen(u), at), "frame {i}: {:?} drifted from {at:?}", m.screen(u));
+        }
+        assert_eq!(m.zoom, 4.);
+        assert!(m.zooming.is_none());
+    }
+
+    #[test]
+    fn zoom_easing_ignores_frame_rate() {
+        let run = |frame_ms: u64| {
+            let mut m = map((1000., 800.), (0.5, 0.5), 3.);
+            m.zoom_by(1.5, (500., 400.), WHEEL_TAU);
+            let t0 = m.tick;
+            for i in 1..=(96 / frame_ms) {
+                m.step(t0 + Duration::from_millis(frame_ms * i));
+            }
+            m.zoom
+        };
+        let (fast, slow) = (run(8), run(32));
+        assert!((fast - slow).abs() < 1e-9, "{fast} vs {slow}");
+        assert!(fast > 3. && fast < 4.5);
+    }
+
+    #[test]
+    fn zoom_is_clamped_so_the_world_fills_the_view() {
+        let size = (1400., 900.);
+        let mut m = map(size, (0.5, 0.5), 3.);
+        m.zoom_by(-20., (700., 450.), WHEEL_TAU);
+        assert_eq!(m.zooming.as_ref().unwrap().to, min_zoom(size));
+        while m.step(m.tick + Duration::from_millis(16)) {}
+        let world = m.world();
+        assert!(world >= 1400. - 1e-6);
+        assert!(m.center.1 - 450. / world >= -1e-9 && m.center.1 + 450. / world <= 1. + 1e-9);
+        m.zoom_by(100., (700., 450.), WHEEL_TAU);
+        assert_eq!(m.zooming.as_ref().unwrap().to, MAX_USER_ZOOM);
+    }
+
+    #[test]
+    fn camera_stays_inside_the_poles_and_wraps_sideways() {
+        let size = (1024., 600.);
+        assert_eq!(min_zoom(size), 1.);
+        assert_eq!(constrain((0.3, 0.), 1., size), (0.3, 300. / 1024.));
+        assert_eq!(constrain((0.3, 1.), 1., size), (0.3, 1. - 300. / 1024.));
+        assert_eq!(constrain((1.25, 0.5), 1., size).0, 0.25);
+        assert_eq!(constrain((-0.25, 0.5), 1., size).0, 0.75);
+        let mut m = map(size, (0.98, 0.5), 2.);
+        let start = (gpui::point(px(0.), px(0.)), m.center);
+        m.pan(start, gpui::point(px(-100.), px(-5000.)));
+        assert!((m.center.0 - (0.98 + 100. / 2048. - 1.)).abs() < 1e-12);
+        assert_eq!(m.center.1, 1. - 300. / 2048.);
+    }
+
+    #[test]
+    fn points_use_the_copy_nearest_the_view() {
+        let m = map((1000., 800.), (0.95, 0.5), 2.);
+        let (x, _) = m.screen((0.05, 0.5));
+        assert!((x - (500. + 0.1 * 2048.)).abs() < 0.01);
+        let (x, _) = m.screen((0.85, 0.5));
+        assert!((x - (500. - 0.1 * 2048.)).abs() < 0.01);
+    }
+
+    #[test]
+    fn copies_cover_the_view() {
+        assert_eq!(copies(0.9, 1.1, 0., 0.2), -1..=-1);
+        assert_eq!(copies(0.9, 1.1, 0.5, 0.6), -1..=0);
+        assert!(copies(0.2, 0.3, 0.5, 0.1).is_empty());
+    }
+
+    #[test]
+    fn spans_take_the_short_way_round() {
+        let s = span(&[0.9, 0.05]);
+        assert!((s.0 - 0.9).abs() < 1e-12 && (s.1 - 1.05).abs() < 1e-12);
+        assert_eq!(span(&[0.2, 0.4, 0.3]), (0.2, 0.4));
+        assert_eq!(span(&[0.5]), (0.5, 0.5));
+    }
+
+    #[test]
+    fn routes_cross_the_antimeridian_unbroken() {
+        let (tokyo, la) = ((35.7, 139.7), (34.05, -118.2));
+        let world = world_px(2.);
+        let size = (1500., 1100.);
+        for center in [(0., 0.4), (0.5, 0.4), (0.8, 0.4)] {
+            for leg in route_legs(&[tokyo, la], center, world, size) {
+                assert!(leg.windows(2).all(|w| (w[1].0 - w[0].0).abs() < 0.05 * world as f32), "a leg jumps across the map at {center:?}");
+                assert!(leg.iter().any(|p| p.0 > -0.25 * world as f32 && p.0 < size.0 + 0.25 * world as f32));
+            }
+        }
+        let m = map((1200., 800.), (0.5, 0.5), 3.);
+        let ((cx, _), zoom) = m.fit(&[tokyo, la], &Padding { top: 64., bottom: 64., left: 64., right: 64. });
+        assert!(wrap(cx).abs() < 0.1, "fit centred at {cx}, not over the Pacific");
+        assert!(zoom >= min_zoom(m.size));
+    }
 }
