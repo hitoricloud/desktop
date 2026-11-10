@@ -114,6 +114,8 @@ pub struct WaylandWindowState {
     in_progress_window_controls: Option<WindowControls>,
     window_controls: WindowControls,
     client_inset: Option<Pixels>,
+    /// Min and max size, kept by floating windows when a configure asks for something else.
+    size_limits: (Option<Size<Pixels>>, Option<Size<Pixels>>),
 }
 
 #[derive(Clone)]
@@ -189,6 +191,11 @@ impl WaylandWindowState {
             in_progress_window_controls: None,
             window_controls: WindowControls::default(),
             client_inset: None,
+            size_limits: if options.is_resizable {
+                (options.window_min_size, None)
+            } else {
+                (Some(options.bounds.size), Some(options.bounds.size))
+            },
         })
     }
 
@@ -295,6 +302,13 @@ impl WaylandWindow {
             toplevel.set_min_size(size.width.0 as i32, size.height.0 as i32);
         }
 
+        // xdg-shell has no "not resizable": min == max fixes the size (and most compositors float such windows).
+        if !params.is_resizable {
+            let size = params.bounds.size;
+            toplevel.set_min_size(size.width.0 as i32, size.height.0 as i32);
+            toplevel.set_max_size(size.width.0 as i32, size.height.0 as i32);
+        }
+
         if let Some(fractional_scale_manager) = globals.fractional_scale_manager.as_ref() {
             fractional_scale_manager.get_fractional_scale(&surface, &globals.qh, surface.id());
         }
@@ -399,6 +413,13 @@ impl WaylandWindowStatePtr {
                         } else {
                             compute_outer_size(state.inset(), configure.size, state.tiling)
                         };
+                        if !state.tiling.is_tiled() {
+                            let (min, max) = state.size_limits;
+                            configure.size = configure.size.map(|size| {
+                                let size = min.map_or(size, |min| size.max(&min));
+                                max.map_or(size, |max| size.min(&max))
+                            });
+                        }
                         if let Some(size) = configure.size {
                             state.window_bounds = Bounds {
                                 origin: Point::default(),
