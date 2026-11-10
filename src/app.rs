@@ -278,6 +278,14 @@ impl Hitori {
                 "page" => self.page = if value == "rules" { Page::Rules } else { Page::Map },
                 "siterule" => self.open_palette(Mode::Site(data::intern(value)), window, cx),
                 "collapsed" => self.sidebar_open = false,
+                // A synthetic pointer move, to capture hover states.
+                "mouse" => {
+                    let (x, y) = value.split_once('x').map_or((0., 0.), |(x, y)| (x.parse().unwrap_or(0.), y.parse().unwrap_or(0.)));
+                    let event = gpui::MouseMoveEvent { position: gpui::point(gpui::px(x), gpui::px(y)), ..Default::default() };
+                    window.defer(cx, move |window, cx| {
+                        window.dispatch_event(gpui::PlatformInput::MouseMove(event), cx);
+                    });
+                }
                 "snooze" => self.s.snoozed.push(leak(value)),
                 "panel" => {
                     self.panel = Some(match value {
