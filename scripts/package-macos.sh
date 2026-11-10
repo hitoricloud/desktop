@@ -18,6 +18,7 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 lipo -create "$root/target/aarch64-apple-darwin/release/hitori" "$root/target/x86_64-apple-darwin/release/hitori" -output "$app/Contents/MacOS/hitori"
 lipo -create "$root/bin/xray-darwin-arm64" "$root/bin/xray-darwin-amd64" -output "$app/Contents/MacOS/xray"
 chmod 755 "$app/Contents/MacOS/"*
+cp "$root/LICENSE" "$root/NOTICE" "$app/Contents/Resources/"
 
 iconset="$stage/hitori.iconset"
 mkdir "$iconset"

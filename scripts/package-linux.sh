@@ -13,6 +13,8 @@ install -Dm755 "$root/target/release/hitori" "$stage/bin/hitori"
 install -Dm755 "$root/bin/xray-linux-amd64" "$stage/libexec/hitori/xray"
 install -Dm644 "$root/packaging/linux/hitori.desktop" "$stage/share/applications/hitori.desktop"
 install -Dm644 "$root/packaging/hitori.svg" "$stage/share/icons/hicolor/scalable/apps/hitori.svg"
+install -Dm644 "$root/LICENSE" "$stage/share/doc/hitori/LICENSE"
+install -Dm644 "$root/NOTICE" "$stage/share/doc/hitori/NOTICE"
 install -Dm644 "$root/packaging/hitori.png" "$stage/share/icons/hicolor/1024x1024/apps/hitori.png"
 
 tar -C "$root/dist/stage" --owner=0 --group=0 --sort=name -czf "$root/dist/$name.tar.gz" "$name"

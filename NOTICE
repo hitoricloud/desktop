@@ -1,0 +1,9 @@
+Hitori VPN desktop client is licensed under the hitoricloud Delayed Open Source License (LICENSE).
+These bundled third-party parts keep their own licenses:
+
+- vendor/gpui: GPUI by Zed Industries, Apache License 2.0 (vendor/gpui/LICENSE-APACHE), modified.
+- assets/fonts/GoogleSans-*.ttf: Google Sans, SIL Open Font License 1.1 (assets/fonts/GoogleSans.txt).
+- assets/fonts/Montserrat-SemiBold.ttf: Montserrat, SIL Open Font License 1.1.
+- scripts/fonts/country-flags.woff2: subset of Noto Color Emoji, SIL Open Font License 1.1 (scripts/fonts/NOTICE.txt).
+- assets/icons: Lucide icons, ISC License.
+- The Xray core shipped in the packages: github.com/hitoricloud/Xray-core, Mozilla Public License 2.0.

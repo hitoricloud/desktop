@@ -11,6 +11,7 @@ if (Test-Path (Join-Path $root "dist\stage")) { Remove-Item -Recurse -Force (Joi
 New-Item -ItemType Directory -Force $stage | Out-Null
 Copy-Item (Join-Path $root "target\release\hitori.exe") (Join-Path $stage "hitori.exe")
 Copy-Item (Join-Path $root "bin\xray-windows-amd64.exe") (Join-Path $stage "xray.exe")
+Copy-Item (Join-Path $root "LICENSE"), (Join-Path $root "NOTICE") $stage
 
 $zip = Join-Path $root "dist\$name.zip"
 if (Test-Path $zip) { Remove-Item -Force $zip }

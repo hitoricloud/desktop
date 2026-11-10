@@ -1,0 +1,92 @@
+hitoricloud Delayed Open Source License
+Version 1.0
+
+Copyright (c) 2026 hitoricloud and contributors
+
+1. Definitions
+
+"Software" means the Hitori VPN desktop client, including its source code and
+documentation, in each version released by hitoricloud.
+
+"Authorized Infrastructure" means servers and systems operated by
+hitoricloud or by partners holding a written agreement with
+hitoricloud that permits such operation ("Partners").
+
+"Competing Use" means making the Software, or any work based on it,
+available to anyone other than yourself by running it on
+infrastructure that is not Authorized Infrastructure, or offering
+the Software's functionality, or substantially similar functionality
+derived from it, as a product or service to others.
+
+"Change Date" means the tenth (10th) anniversary of the date on
+which hitoricloud first made a given version of the Software
+available.
+
+"Future License" means the Apache License, Version 2.0.
+
+2. Permitted Use
+
+You may use, copy, modify, and share the Software for any purpose
+other than a Competing Use. Permitted purposes include:
+(a) study, audit, and verification of the source code;
+(b) personal use and use inside your own organization, where the
+    Software is not made available to third parties;
+(c) non-commercial education and non-commercial research;
+(d) security research and preparing contributions to the Software.
+
+3. Competing Use
+
+Competing Use is not permitted unless you are hitoricloud or a
+Partner. Permission to operate the Software on other infrastructure
+may be granted only by hitoricloud, in writing. Permission from an
+individual contributor is not sufficient.
+
+4. Redistribution
+
+If you share a copy of the Software, including a modified one, you
+must include this License and all copyright notices, and the
+recipient receives it under this License. Modified versions must be
+clearly marked as modified.
+
+5. Contributions
+
+Any contribution you intentionally submit to the Software is
+licensed to hitoricloud under a perpetual, worldwide, irrevocable,
+royalty-free license, including the right to sublicense it to
+Partners and to release it under the Future License. You retain
+copyright in your contribution.
+
+6. Patents
+
+Each contributor grants you a license under their patent claims
+that are necessarily infringed by their contribution, for the uses
+permitted by this License. This grant ends if you start patent
+litigation claiming that the Software infringes your patent.
+
+7. Trademarks
+
+This License does not grant any right to use the names, logos, or
+trademarks of hitoricloud, except to describe the origin of the
+Software and to reproduce the notices required above.
+
+8. Termination
+
+If you violate this License, your rights end automatically. They are
+reinstated if you stop the violation within 30 days of becoming
+aware of it, unless hitoricloud notifies you otherwise.
+
+9. Grant of Future License
+
+On the Change Date of a given version, hitoricloud irrevocably
+grants everyone the right to use that version under the Future
+License. From that date, the restrictions in this License no longer
+apply to that version. Each version has its own Change Date.
+
+10. Disclaimer of Warranty and Limitation of Liability
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NONINFRINGEMENT. IN NO EVENT SHALL HITORICLOUD OR CONTRIBUTORS BE
+LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY ARISING FROM THE
+SOFTWARE OR ITS USE.

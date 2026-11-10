@@ -2,6 +2,8 @@
 name = "hitori"
 version = "0.1.0"
 edition = "2024"
+license-file = "LICENSE"
+publish = false
 
 [dependencies]
 gpui = { version = "0.2.2", default-features = false, features = ["wayland", "x11"] }
