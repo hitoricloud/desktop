@@ -3,8 +3,6 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-#[cfg(target_os = "linux")]
-use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -19,8 +17,6 @@ pub const HTTP_PORT: u16 = 10809;
 pub const TUN_NAME: &str = "hitori0";
 /// Firewall mark on the core's own sockets, so they skip the TUN routing table.
 pub const MARK: u32 = 0x6869;
-/// System-wide (TUN) mode needs the Linux root helper; elsewhere only proxy mode exists so far.
-pub const SYSTEM_WIDE: bool = cfg!(target_os = "linux");
 const PROBE_URL: &str = "https://www.gstatic.com/generate_204";
 
 /// `HITORI_XRAY`, next to the executable (also inside a macOS bundle), `../libexec/hitori/xray`, then the checkout's
@@ -124,6 +120,9 @@ fn field(extra: Value, outbound: &str) -> Value {
 /// then the default route (the autorouting lists and their direct catch-all for Auto).
 pub fn config(plan: &Plan, ports: Ports) -> Result<Value, String> {
     let exit = plan.exit;
+    // A TUN only on Linux (the system proxy elsewhere); app rules only where the core can tell apps apart.
+    let tun = plan.tun && crate::os::TUN;
+    let apps: &[(&'static str, AppRule)] = if crate::os::PER_APP { &plan.apps } else { &[] };
     let entry = plan.entry.filter(|e| e.id != exit.id);
     let mut out = Outbounds { list: vec![], protocol: plan.protocol };
     let main = match entry {
@@ -141,7 +140,7 @@ pub fn config(plan: &Plan, ports: Ports) -> Result<Value, String> {
     }
 
     let mut rules = vec![];
-    if plan.tun {
+    if tun {
         rules.push(json!({"type": "field", "inboundTag": ["tun"], "port": "53", "outboundTag": "dns-out"}));
     }
     rules.push(field(json!({"inboundTag": ["dns-internal", "probe-in"]}), "proxy"));
@@ -153,7 +152,7 @@ pub fn config(plan: &Plan, ports: Ports) -> Result<Value, String> {
     }
 
     let names = |app: &str| processes(app);
-    for (app, _) in plan.apps.iter().filter(|(_, r)| r.mode == RuleMode::Block) {
+    for (app, _) in apps.iter().filter(|(_, r)| r.mode == RuleMode::Block) {
         rules.push(field(json!({"process": names(app)}), "block"));
     }
     // Where a rule's tunnelled traffic goes: the main route, or the rule's own exit, cascade and protocol.
@@ -186,7 +185,7 @@ pub fn config(plan: &Plan, ports: Ports) -> Result<Value, String> {
             RuleMode::Auto => {}
         }
     }
-    for (app, r) in &plan.apps {
+    for (app, r) in apps {
         let custom = r.exit.is_some() || r.via.is_some() || r.protocol.is_some();
         match r.mode {
             RuleMode::Block => {}
@@ -226,14 +225,14 @@ pub fn config(plan: &Plan, ports: Ports) -> Result<Value, String> {
 
     out.list.push(json!({"tag": "direct", "protocol": "freedom"}));
     out.list.push(json!({"tag": "block", "protocol": "blackhole"}));
-    if plan.tun {
+    if tun {
         out.list.push(json!({"tag": "dns-out", "protocol": "dns"}));
         out.list = out.list.into_iter().map(|o| if o["tag"] == "block" { o } else { with_sockopt(o, "mark", json!(MARK)) }).collect();
     }
 
     let sniff = json!({"enabled": true, "destOverride": ["http", "tls", "quic"], "routeOnly": false});
     let mut inbounds = vec![json!({"tag": "probe-in", "listen": "127.0.0.1", "port": ports.probe, "protocol": "http"})];
-    if plan.tun {
+    if tun {
         inbounds.push(json!({"tag": "tun", "port": 0, "protocol": "tun", "settings": {"name": TUN_NAME, "mtu": 1500}, "sniffing": sniff}));
     } else {
         inbounds.push(json!({"tag": "socks", "listen": "127.0.0.1", "port": SOCKS_PORT, "protocol": "socks", "settings": {"udp": true}, "sniffing": sniff}));
@@ -301,25 +300,6 @@ fn write_config(path: &PathBuf, config: &Value) -> Result<(), String> {
     crate::store::write(path, &serde_json::to_vec(config).unwrap(), true).map_err(|e| format!("Cannot write the core config: {e}"))
 }
 
-/// Kill the core with the app, whatever way the app ends (Linux); no console window for it (Windows).
-fn as_child(cmd: &mut Command) {
-    // SAFETY: prctl is async-signal-safe; this runs between fork and exec.
-    #[cfg(target_os = "linux")]
-    unsafe {
-        cmd.pre_exec(|| {
-            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
-            Ok(())
-        });
-    }
-    #[cfg(windows)]
-    {
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        std::os::windows::process::CommandExt::creation_flags(cmd, CREATE_NO_WINDOW);
-    }
-    #[cfg(target_os = "macos")]
-    let _ = cmd;
-}
-
 /// Latest core log lines, kept for error messages, and lines handed to whoever watches for failures.
 #[derive(Clone, Default)]
 pub struct Log {
@@ -369,7 +349,10 @@ pub struct Core {
     helper: Option<ChildStdin>,
     helper_out: Option<std::sync::mpsc::Receiver<String>>,
     pub ports: Ports,
+    /// Started in system-wide mode (a TUN through the helper on Linux, the system proxy elsewhere).
     pub tun: bool,
+    /// The system proxy points at this core and is put back when it stops.
+    sysproxy: bool,
     pub log: Log,
     path: PathBuf,
 }
@@ -382,20 +365,23 @@ impl Core {
         let path = crate::store::runtime_dir().join("core.json");
         write_config(&path, &config(plan, ports)?)?;
         let log = Log::default();
-        if !plan.tun {
+        if !plan.tun || !crate::os::TUN {
             let mut cmd = Command::new(&xray);
             cmd.args(["run", "-c"]).arg(&path).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-            as_child(&mut cmd);
-            let mut child = cmd.spawn().map_err(|e| format!("Cannot start the core: {e}"))?;
+            let mut child = crate::os::spawn_core(&mut cmd).map_err(|e| format!("Cannot start the core: {e}"))?;
             // The core logs to stdout; stderr carries Go panics.
             log.follow(child.stdout.take().unwrap());
             log.follow(child.stderr.take().unwrap());
-            let mut core = Core { child, helper: None, helper_out: None, ports, tun: false, log, path };
+            let mut core = Core { child, helper: None, helper_out: None, ports, tun: plan.tun, sysproxy: false, log, path };
             core.wait_serving(Duration::from_secs(10))?;
+            if plan.tun {
+                crate::os::sysproxy::set(HTTP_PORT, SOCKS_PORT).map_err(|e| format!("Cannot set the system proxy: {e}"))?;
+                core.sysproxy = true;
+            }
             return Ok(core);
         }
         #[cfg(not(target_os = "linux"))]
-        return Err("System-wide mode is not available on this system yet".into());
+        unreachable!("system-wide mode is the system proxy outside Linux");
         #[cfg(target_os = "linux")]
         Self::start_helper(&xray, path, ports, log, plan)
     }
@@ -435,7 +421,7 @@ impl Core {
             }
         });
         let helper = child.stdin.take();
-        let mut core = Core { child, helper, helper_out: Some(rx), ports, tun: true, log, path };
+        let mut core = Core { child, helper, helper_out: Some(rx), ports, tun: true, sysproxy: false, log, path };
         core.wait_ready(Duration::from_secs(180))?;
         Ok(core)
     }
@@ -484,12 +470,14 @@ impl Core {
             return Err("mode changed".into());
         }
         write_config(&self.path, &config(plan, self.ports)?)?;
-        if self.tun {
+        if self.helper.is_some() {
             self.send("restart")?;
             return self.wait_ready(Duration::from_secs(30));
         }
         let _ = self.child.kill();
         let _ = self.child.wait();
+        // The system proxy stays in place for the core that replaces this one.
+        self.sysproxy = false;
         let mut fresh = Core::start(plan)?;
         std::mem::swap(self, &mut fresh);
         Ok(())
@@ -501,7 +489,7 @@ impl Core {
     }
 
     pub fn set_kill_switch(&mut self, on: bool) {
-        if self.tun {
+        if self.helper.is_some() {
             let _ = self.send(if on { "kill 1" } else { "kill 0" });
         }
     }
@@ -522,6 +510,9 @@ impl Core {
     }
 
     fn shutdown(&mut self) {
+        if std::mem::take(&mut self.sysproxy) {
+            crate::os::sysproxy::restore();
+        }
         if self.helper.take().is_some() {
             // EOF: the helper stops the core and removes its routes.
             let start = Instant::now();
@@ -531,6 +522,7 @@ impl Core {
         }
         let _ = self.child.kill();
         let _ = self.child.wait();
+        crate::os::reaped(&self.child);
         let _ = std::fs::remove_file(&self.path);
     }
 }
@@ -574,8 +566,7 @@ pub fn probe(servers: &[&'static Server], protocol: Protocol) -> Result<Vec<(&'s
     write_config(&path, &probe_config(servers, protocol, port))?;
     let mut cmd = Command::new(xray);
     cmd.args(["run", "-c"]).arg(&path).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-    as_child(&mut cmd);
-    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+    let mut child = crate::os::spawn_core(&mut cmd).map_err(|e| e.to_string())?;
     let start = Instant::now();
     let mut result = HashMap::new();
     while start.elapsed() < Duration::from_secs(15) {
@@ -589,6 +580,7 @@ pub fn probe(servers: &[&'static Server], protocol: Protocol) -> Result<Vec<(&'s
     }
     let _ = child.kill();
     let _ = child.wait();
+    crate::os::reaped(&child);
     let _ = std::fs::remove_file(&path);
     Ok(servers.iter().map(|s| (s.id, result.get(&format!("p-{}", s.id)).copied().flatten())).collect())
 }

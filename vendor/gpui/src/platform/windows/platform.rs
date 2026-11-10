@@ -716,7 +716,9 @@ impl WindowsPlatformInner {
         }
         match message {
             WM_GPUI_CLOSE_ONE_WINDOW => {
-                if self.close_one_window(HWND(lparam.0 as _)) {
+                if self.close_one_window(HWND(lparam.0 as _))
+                    && !crate::KEEP_ALIVE_WITHOUT_WINDOWS.load(std::sync::atomic::Ordering::Relaxed)
+                {
                     unsafe { PostQuitMessage(0) };
                 }
                 Some(0)

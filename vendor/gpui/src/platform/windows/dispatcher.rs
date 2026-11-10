@@ -44,26 +44,46 @@ impl WindowsDispatcher {
         }
     }
 
+    // Hitori: when the WinRT thread pool is unavailable (Wine), run on a plain thread instead of losing the task.
     fn dispatch_on_threadpool(&self, runnable: Runnable) {
+        let slot = std::sync::Arc::new(parking_lot::Mutex::new(Some(runnable)));
         let handler = {
-            let mut task_wrapper = Some(runnable);
+            let slot = slot.clone();
             WorkItemHandler::new(move |_| {
-                task_wrapper.take().unwrap().run();
+                if let Some(r) = slot.lock().take() {
+                    r.run();
+                }
                 Ok(())
             })
         };
-        ThreadPool::RunWithPriorityAsync(&handler, WorkItemPriority::High).log_err();
+        if ThreadPool::RunWithPriorityAsync(&handler, WorkItemPriority::High).is_err()
+            && let Some(r) = slot.lock().take()
+        {
+            std::thread::spawn(move || {
+                r.run();
+            });
+        }
     }
 
     fn dispatch_on_threadpool_after(&self, runnable: Runnable, duration: Duration) {
+        let slot = std::sync::Arc::new(parking_lot::Mutex::new(Some(runnable)));
         let handler = {
-            let mut task_wrapper = Some(runnable);
+            let slot = slot.clone();
             TimerElapsedHandler::new(move |_| {
-                task_wrapper.take().unwrap().run();
+                if let Some(r) = slot.lock().take() {
+                    r.run();
+                }
                 Ok(())
             })
         };
-        ThreadPoolTimer::CreateTimer(&handler, duration.into()).log_err();
+        if ThreadPoolTimer::CreateTimer(&handler, duration.into()).is_err()
+            && let Some(r) = slot.lock().take()
+        {
+            std::thread::spawn(move || {
+                std::thread::sleep(duration);
+                r.run();
+            });
+        }
     }
 }
 

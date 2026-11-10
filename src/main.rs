@@ -13,6 +13,7 @@ mod overlays;
 mod palette;
 mod score;
 mod suggest;
+mod os;
 mod theme;
 mod tray;
 #[cfg(target_os = "linux")]
@@ -78,6 +79,7 @@ fn skip_software_vulkan() {
 }
 
 /// `--tray`: only the tray popup window (screenshots). `--background`: start with just the tray icon.
+/// `--smoke`: open the main window, draw for a few seconds and exit 0 (CI on real Windows and macOS machines).
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     #[cfg(target_os = "linux")]
@@ -89,6 +91,10 @@ fn main() {
     }
     let tray_only = args.iter().any(|a| a == "--tray");
     let background = args.iter().any(|a| a == "--background");
+    let smoke = args.iter().any(|a| a == "--smoke");
+    // A previous run that crashed may have left the system proxy pointing at it, or (macOS) its core running.
+    os::sysproxy::restore();
+    os::reap_orphans();
     Application::new().with_assets(Assets).run(move |cx: &mut App| {
         let fonts = ["Regular", "Medium", "SemiBold", "Bold"]
             .iter()
@@ -112,8 +118,8 @@ fn main() {
         // macOS apps outlive their windows by default; without a tray icon there is no way back in.
         #[cfg(target_os = "macos")]
         {
-            cx.on_window_closed(|cx| {
-                if cx.windows().is_empty() {
+            cx.on_window_closed(move |cx| {
+                if !has_tray && cx.windows().is_empty() {
                     cx.quit();
                 }
             })
@@ -129,5 +135,29 @@ fn main() {
             cx.global_mut::<tray::Windows>().main = main;
         }
         cx.activate(true);
+        if smoke {
+            smoke_test(cx);
+        }
     });
+}
+
+/// The main window opened and keeps drawing frames: exit 0 after a few seconds, 2 if it never opened or closed early.
+fn smoke_test(cx: &mut App) {
+    let Some(main) = cx.global::<tray::Windows>().main else {
+        eprintln!("hitori --smoke: no main window");
+        std::process::exit(2);
+    };
+    cx.spawn(async move |cx| {
+        for _ in 0..50 {
+            cx.background_executor().timer(std::time::Duration::from_millis(100)).await;
+            let drawn = cx.update(|cx| main.update(cx, |_, window, _| window.refresh()).is_ok()).unwrap_or(false);
+            if !drawn {
+                eprintln!("hitori --smoke: the main window closed");
+                std::process::exit(2);
+            }
+        }
+        println!("hitori --smoke: ok, {} servers", data::servers().len());
+        std::process::exit(0);
+    })
+    .detach();
 }

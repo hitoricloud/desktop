@@ -169,7 +169,7 @@ impl Default for Settings {
             auto_connect: false,
             kill_switch: true,
             route: "auto".into(),
-            system_wide: crate::xray::SYSTEM_WIDE,
+            system_wide: true,
             dark: true,
             rules_big: true,
             apps: vec![],
