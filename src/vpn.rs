@@ -28,8 +28,6 @@ pub struct Stats {
     pub up: f64,
     /// Probe round trip through the whole route, ms.
     pub latency: Option<u32>,
-    /// Bytes this session.
-    pub total: u64,
 }
 
 /// VPN state every window shows: the main window and the tray popup mirror one `Vpn` model.
@@ -61,6 +59,11 @@ pub struct Shared {
     pub stats: Stats,
     /// Bumped when the server list, pings or exits change.
     pub servers_gen: u32,
+    /// A latency test is running; these servers have not answered yet.
+    pub testing: bool,
+    pub pending: Vec<&'static str>,
+    /// When the last latency test finished.
+    pub tested_at: Option<Instant>,
 }
 
 impl Shared {
@@ -76,6 +79,9 @@ impl Shared {
         self.error = model.error.clone();
         self.stats = model.stats.clone();
         self.servers_gen = model.servers_gen;
+        self.testing = model.testing;
+        self.pending = model.pending.clone();
+        self.tested_at = model.tested_at;
         if !data::has_server(self.server_id) {
             self.server_id = model.server_id;
         }
@@ -141,14 +147,13 @@ pub struct Vpn {
     ticker: Option<Task<()>>,
     reload: Option<Task<()>>,
     pinger: Option<Task<()>>,
-    probing: bool,
+    tester: Option<Task<()>>,
     login: Option<String>,
     lists: Lists,
     saved: Settings,
     /// Routing the running core was started with.
     applied: Option<Routing>,
     bytes: Option<(Instant, u64, u64)>,
-    first_bytes: u64,
     failures: u32,
     exits: HashMap<String, Exit>,
     autoconnect_done: bool,
@@ -187,6 +192,9 @@ impl Vpn {
             error: None,
             stats: Stats::default(),
             servers_gen: 0,
+            testing: false,
+            pending: vec![],
+            tested_at: None,
         };
         let mut this = Self {
             s,
@@ -196,13 +204,12 @@ impl Vpn {
             ticker: None,
             reload: None,
             pinger: None,
-            probing: false,
+            tester: None,
             login,
             lists: Lists::default(),
             saved,
             applied: None,
             bytes: None,
-            first_bytes: 0,
             failures: 0,
             exits,
             autoconnect_done: false,
@@ -412,6 +419,9 @@ impl Vpn {
         self.s.recents.clear();
         self.s.servers_gen += 1;
         self.pinger = None;
+        self.tester = None;
+        self.s.testing = false;
+        self.s.pending.clear();
         cx.notify();
     }
 
@@ -565,23 +575,15 @@ impl Vpn {
                 let dt = now.duration_since(t).as_secs_f64().max(0.1);
                 (m.down.saturating_sub(d) as f64 * 8. / 1e6 / dt, m.up.saturating_sub(u) as f64 * 8. / 1e6 / dt)
             }
-            None => {
-                self.first_bytes = m.down + m.up;
-                (0., 0.)
-            }
+            None => (0., 0.),
         };
         self.bytes = Some((now, m.down, m.up));
         let latency = m.delays.get("proxy").copied().flatten().or(self.s.stats.latency);
         if latency.is_some() {
             self.failures = 0;
         }
-        self.s.stats = Stats { down, up, latency, total: (m.down + m.up).saturating_sub(self.first_bytes) };
+        self.s.stats = Stats { down, up, latency };
         self.suggest(cx);
-        let pings: Vec<_> = m.delays.iter().filter_map(|(tag, d)| tag.strip_prefix("p-").filter(|id| data::has_server(id)).map(|id| (data::intern(id), *d))).collect();
-        if pings.iter().any(|(id, d)| data::ping(id) != *d) {
-            data::set_pings(pings);
-            self.s.servers_gen += 1;
-        }
         cx.notify();
     }
 
@@ -629,7 +631,6 @@ impl Vpn {
         self.s.conn = Conn::Off;
         self.s.connected_at = None;
         self.s.stats = Stats::default();
-        self.start_pinger(cx);
         cx.notify();
     }
 
@@ -703,44 +704,70 @@ impl Vpn {
         .detach();
     }
 
-    // ---------- latency while disconnected ----------
+    // ---------- latency ----------
 
-    /// Measure every server with a throwaway core now and every 5 minutes while disconnected.
+    /// A latency test now and every 5 minutes, connected or not.
     fn start_pinger(&mut self, cx: &mut Context<Self>) {
         if self.pinger.is_some() || data::servers().is_empty() {
             return;
         }
         self.pinger = Some(cx.spawn(async move |this, cx| {
-            loop {
-                let job = this.update(cx, |this, _| {
-                    let idle = this.s.conn == Conn::Off && !this.probing;
-                    if idle {
-                        this.probing = true;
-                    }
-                    idle.then(|| (data::servers(), this.s.protocol))
-                });
-                let Ok(job) = job else { break };
-                if let Some((servers, protocol)) = job {
-                    let result = cx.background_executor().spawn(async move { xray::probe(&servers, protocol) }).await;
-                    let gone = this
-                        .update(cx, |this, cx| {
-                            this.probing = false;
-                            if let Ok(pings) = result {
-                                data::set_pings(pings);
-                                if this.s.conn == Conn::Off && this.s.recents.is_empty() && this.s.entry_id.is_none() {
-                                    this.s.server_id = data::fastest().id;
-                                }
-                                this.s.servers_gen += 1;
-                                cx.notify();
-                            }
-                        })
-                        .is_err();
-                    if gone {
-                        break;
-                    }
-                }
+            while this.update(cx, |this, cx| this.test_pings(cx)).is_ok() {
                 cx.background_executor().timer(Duration::from_secs(300)).await;
             }
         }));
+    }
+
+    /// Measure every server with a real handshake, unless a test is already running. Connected, the running core
+    /// does it beside the tunnel; otherwise a throwaway core.
+    pub fn test_pings(&mut self, cx: &mut Context<Self>) {
+        let servers = data::servers();
+        if self.s.testing || servers.is_empty() {
+            return;
+        }
+        let via = self.core.as_ref().map(|c| c.ports.ping);
+        let rx = xray::ping_all(servers.clone(), self.s.protocol, via);
+        self.s.testing = true;
+        self.s.pending = servers.iter().map(|s| s.id).collect();
+        self.tester = Some(cx.spawn(async move |this, cx| {
+            while let Ok(got) = rx.recv().await {
+                if this.update(cx, |this, cx| this.pinged(got, via, cx)).is_err() {
+                    return;
+                }
+            }
+            this.update(cx, |this, cx| this.tested(cx)).ok();
+        }));
+        cx.notify();
+    }
+
+    fn pinged(&mut self, got: xray::Pinged, via: Option<u16>, cx: &mut Context<Self>) {
+        match got {
+            Ok((id, ms)) => {
+                self.s.pending.retain(|p| *p != id);
+                // A failure only counts if the core it went through is still the one running.
+                let gone = via.is_some() && self.core.as_ref().map(|c| c.ports.ping) != via;
+                if ms.is_some() || !gone {
+                    data::set_pings([(id, ms)]);
+                }
+            }
+            Err(e) => self.s.error = Some(e),
+        }
+        self.s.servers_gen += 1;
+        cx.notify();
+    }
+
+    fn tested(&mut self, cx: &mut Context<Self>) {
+        self.tester = None;
+        self.s.testing = false;
+        // Every server reported (the test core started).
+        if self.s.pending.is_empty() {
+            self.s.tested_at = Some(Instant::now());
+        }
+        self.s.pending.clear();
+        if self.s.conn == Conn::Off && self.s.recents.is_empty() && self.s.entry_id.is_none() {
+            self.s.server_id = data::fastest().id;
+        }
+        self.s.servers_gen += 1;
+        cx.notify();
     }
 }

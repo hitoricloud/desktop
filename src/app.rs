@@ -160,6 +160,8 @@ pub struct Hitori {
     /// New website rule on the rules page and sheet.
     pub site_input: Entity<TextInput>,
     pub page: Page,
+    /// The inspector's server list is ordered by the last latency test.
+    pub sort_ping: bool,
     pub menu: Option<Menu>,
     pub map: MapState,
     pub ring: std::cell::Cell<Option<Ring>>,
@@ -218,6 +220,7 @@ impl Hitori {
             link,
             site_input,
             page: Page::Map,
+            sort_ping: false,
             menu: None,
             map: MapState::new(),
             ring: Default::default(),
@@ -264,6 +267,8 @@ impl Hitori {
                 "entry" => self.s.entry_id = Some(data::server(value).id),
                 "on" => self.with_vpn(cx, |v, cx| v.connected(cx)),
                 "connecting" => self.connect(cx),
+                "ping" => self.test_pings(cx),
+                "sort" => self.sort_ping = true,
                 "tray" => self.variant = Variant::Tray,
                 "light" => self.set_dark(false, cx),
                 "small" => self.s.rules_big = false,
@@ -325,6 +330,10 @@ impl Hitori {
 
     pub fn connect(&mut self, cx: &mut Context<Self>) {
         self.with_vpn(cx, |v, cx| v.connect(cx));
+    }
+
+    pub fn test_pings(&mut self, cx: &mut Context<Self>) {
+        self.with_vpn(cx, |v, cx| v.test_pings(cx));
     }
 
     /// Power button: without an account it opens sign-in instead.

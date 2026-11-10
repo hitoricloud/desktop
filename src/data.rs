@@ -69,7 +69,8 @@ impl Server {
 static NONE: LazyLock<Server> =
     LazyLock::new(|| Server { id: "none", country: "No servers", code: "", city: "Sign in to connect", ip: "", lat: 52., lon: 30., variants: vec![] });
 static SERVERS: RwLock<Vec<&'static Server>> = RwLock::new(Vec::new());
-static PINGS: LazyLock<RwLock<HashMap<&'static str, u32>>> = LazyLock::new(Default::default);
+/// Last latency test result per server; `None` when it timed out.
+static PINGS: LazyLock<RwLock<HashMap<&'static str, Option<u32>>>> = LazyLock::new(Default::default);
 
 pub fn servers() -> Vec<&'static Server> {
     SERVERS.read().unwrap().clone()
@@ -101,19 +102,28 @@ pub fn learn_exit(id: &str, ip: &str, city: Option<&str>, lat: f64, lon: f64) {
     }
 }
 
-/// Measured round trip through the server (the core's HTTP probe), if any.
+/// Measured round trip through the server (the latency test), if it answered.
 pub fn ping(id: &str) -> Option<u32> {
-    PINGS.read().unwrap().get(id).copied()
+    PINGS.read().unwrap().get(id).copied().flatten()
+}
+
+/// The last latency test got no answer from this server.
+pub fn timed_out(id: &str) -> bool {
+    PINGS.read().unwrap().get(id).is_some_and(Option::is_none)
 }
 
 pub fn set_pings(pings: impl IntoIterator<Item = (&'static str, Option<u32>)>) {
-    let mut all = PINGS.write().unwrap();
-    for (id, ms) in pings {
-        match ms {
-            Some(ms) => all.insert(id, ms),
-            None => all.remove(id),
-        };
-    }
+    PINGS.write().unwrap().extend(pings);
+}
+
+/// Fastest first, then timeouts, then servers never measured; otherwise in subscription order.
+pub fn by_latency(list: &mut [&'static Server]) {
+    let pings = PINGS.read().unwrap();
+    list.sort_by_key(|s| match pings.get(s.id) {
+        Some(Some(ms)) => (0, *ms),
+        Some(None) => (1, 0),
+        None => (2, 0),
+    });
 }
 
 /// Lowest measured ping; the first server until something is measured.
@@ -505,6 +515,19 @@ mod tests {
         assert_eq!(app_id(".foot-wrapped"), "foot");
         let steam = processes("steam");
         assert!(steam.contains(&"steamwebhelper".to_owned()) && steam.contains(&".steam-wrapped".to_owned()));
+    }
+
+    #[test]
+    fn latency_order_and_timeouts() {
+        let node = |id: &'static str| &*Box::leak(Box::new(Server { id, country: "", code: "", city: "", ip: "", lat: 0., lon: 0., variants: vec![] }));
+        let mut list = vec![node("t-never"), node("t-dead"), node("t-slow"), node("t-fast")];
+        set_pings([("t-dead", None), ("t-slow", Some(300)), ("t-fast", Some(40))]);
+        by_latency(&mut list);
+        assert_eq!(list.iter().map(|s| s.id).collect::<Vec<_>>(), ["t-fast", "t-slow", "t-dead", "t-never"]);
+        assert!(timed_out("t-dead") && !timed_out("t-never") && !timed_out("t-fast"));
+        assert_eq!((ping("t-dead"), ping("t-fast")), (None, Some(40)));
+        set_pings([("t-dead", Some(90))]);
+        assert!(!timed_out("t-dead"), "a later answer replaces the timeout");
     }
 
     #[test]
