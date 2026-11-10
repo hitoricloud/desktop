@@ -95,6 +95,24 @@ jobs:
           $p = Start-Process target\release\hitori.exe -ArgumentList "--smoke" -PassThru -Wait -RedirectStandardError smoke.err
           Get-Content smoke.err -ErrorAction SilentlyContinue
           if ($p.ExitCode -ne 0) { throw "hitori --smoke exited with $($p.ExitCode)" }
+      - name: Screenshot
+        timeout-minutes: 2
+        shell: pwsh
+        run: |
+          # What the main window looks like on a real Windows desktop (not signed in), for review.
+          $app = Start-Process target\release\hitori.exe -PassThru
+          Start-Sleep -Seconds 12
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+          [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+          New-Item -ItemType Directory -Force screenshots | Out-Null
+          $bmp.Save("screenshots\windows.png")
+          Stop-Process -Id $app.Id -Force
+      - uses: actions/upload-artifact@v7
+        with:
+          name: screenshot-windows
+          path: screenshots/
       - run: ./scripts/package-windows.ps1
         shell: pwsh
       - uses: actions/upload-artifact@v7
