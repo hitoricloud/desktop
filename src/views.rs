@@ -1199,7 +1199,25 @@ impl Hitori {
             .child("Test")
             .on_click(cx.listener(|this, _, _, cx| this.test_pings(cx)));
         let n = servers.len();
-        let rows: Vec<AnyElement> = servers.into_iter().map(|s| self.server_row(s, window, cx).into_any_element()).collect();
+        // Servers of one country under one row; in latency order when sorted, so the best opens each group.
+        let mut groups: Vec<Vec<&'static data::Server>> = vec![];
+        for s in servers {
+            match groups.iter_mut().find(|g| g[0].code == s.code) {
+                Some(g) => g.push(s),
+                None => groups.push(vec![s]),
+            }
+        }
+        let mut rows: Vec<AnyElement> = vec![];
+        for g in &groups {
+            if let [s] = g.as_slice() {
+                rows.push(self.server_row(s, false, window, cx).into_any_element());
+                continue;
+            }
+            rows.push(self.country_row(g, window, cx).into_any_element());
+            if self.open_countries.contains(&g[0].code) {
+                rows.extend(g.iter().map(|s| self.server_row(s, true, window, cx).into_any_element()));
+            }
+        }
         div()
             .flex_1()
             .min_h_0()
@@ -1241,48 +1259,107 @@ impl Hitori {
             )
     }
 
-    /// Flag, place, and the last test's latency (a spinner while it runs); the current exit is highlighted.
-    fn server_row(&self, s: &'static data::Server, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Best last-test latency of these servers, coloured; a spinner while any of them is still being measured.
+    fn latency_el(&self, key: &str, ids: &[&'static str], t: &Theme) -> AnyElement {
+        if ids.iter().any(|id| self.s.pending.contains(id)) {
+            return spinner(SharedString::from(format!("ping-{key}")), 12., t.muted_fg).into_any_element();
+        }
+        let (text, c) = match ids.iter().filter_map(|id| data::ping(id)).min() {
+            Some(ms) => (format!("{ms} ms"), latency_tone(ms)),
+            None if ids.iter().any(|id| data::timed_out(id)) => ("timeout".into(), t.destructive),
+            None => ("—".into(), t.muted_fg),
+        };
+        div().xs().medium().text_color(c).child(text).into_any_element()
+    }
+
+    /// Row background: blue for the live exit, grey for the chosen one.
+    fn row_fx(&self, id: SharedString, current: bool, t: &Theme) -> Fx {
+        let live = current && self.s.conn == Conn::On;
+        let (rest, hover) = if live { (t.primary.opacity(0.1), t.primary.opacity(0.15)) } else { (if current { t.accent } else { gpui::transparent_black() }, t.accent) };
+        fx(id, rest, Some(hover)).flex_none().flex().items_center().gap(px(12.)).px(px(8.)).rounded(px(MD)).cursor_pointer()
+    }
+
+    /// Flag, place, and the last test's latency (a spinner while it runs); the current exit is highlighted. Under an
+    /// opened country only the server's own name, indented past the flag.
+    fn server_row(&self, s: &'static data::Server, nested: bool, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme(cx);
         let id = s.id;
         let current = id == self.s.server_id;
         let live = current && self.s.conn == Conn::On;
         let trailing = if current && self.s.conn == Conn::Connecting {
             spinner(SharedString::from(format!("srv-conn-{id}")), 16., t.muted_fg).into_any_element()
-        } else if self.s.pending.contains(&id) {
-            spinner(SharedString::from(format!("srv-ping-{id}")), 12., t.muted_fg).into_any_element()
         } else {
-            let (text, c) = match data::ping(id) {
-                Some(ms) => (format!("{ms} ms"), latency_tone(ms)),
-                None if data::timed_out(id) => ("timeout".into(), t.destructive),
-                None => ("—".into(), t.muted_fg),
-            };
-            div().xs().medium().text_color(c).child(text).into_any_element()
+            self.latency_el(id, &[id], &t)
         };
-        let (rest, hover) = if live { (t.primary.opacity(0.1), t.primary.opacity(0.15)) } else { (if current { t.accent } else { gpui::transparent_black() }, t.accent) };
-        fx(SharedString::from(format!("srv-{id}")), rest, Some(hover))
+        let name = if live { t.primary } else { t.foreground };
+        self.row_fx(SharedString::from(format!("srv-{id}")), current, &t)
+            .when(nested, |d| d.h(px(40.)).pl(px(44.)).child(div().flex_1().min_w_0().truncate().sm().text_color(name).child(s.city)))
+            .when(!nested, |d| {
+                d.h(px(48.)).child(flag(s.code, true, window)).child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w_0()
+                        .child(div().truncate().text_px(14., 20.).medium().text_color(name).child(s.country))
+                        .child(div().truncate().xs().text_color(t.muted_fg).child(s.city)),
+                )
+            })
+            .when(self.s.entry_id == Some(id), |d| d.child(div().xs().text_color(t.muted_fg).child("via")))
+            .when(live, |d| d.child(div().size(px(6.)).rounded_full().bg(t.primary)))
+            .child(trailing)
+            .on_click(cx.listener(move |this, _, window, cx| this.go(id, window, cx)))
+    }
+
+    /// A country with several servers: its best latency, and its servers below while open. Closed over the current
+    /// exit, it stands in for it.
+    fn country_row(&self, list: &[&'static data::Server], window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = self.theme(cx);
+        let code = list[0].code;
+        let open = self.open_countries.contains(&code);
+        let current = list.iter().find(|s| s.id == self.s.server_id).filter(|_| !open);
+        let live = current.is_some() && self.s.conn == Conn::On;
+        let ids: Vec<&'static str> = list.iter().map(|s| s.id).collect();
+        let trailing = if current.is_some() && self.s.conn == Conn::Connecting {
+            spinner(SharedString::from(format!("country-conn-{code}")), 16., t.muted_fg).into_any_element()
+        } else {
+            self.latency_el(code, &ids, &t)
+        };
+        let sub = match current {
+            Some(s) => format!("{} · {} servers", s.city, list.len()),
+            None => format!("{} servers", list.len()),
+        };
+        self.row_fx(SharedString::from(format!("country-{code}")), current.is_some(), &t)
             .h(px(48.))
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap(px(12.))
-            .px(px(8.))
-            .rounded(px(MD))
-            .cursor_pointer()
-            .child(flag(s.code, true, window))
+            .child(flag(code, true, window))
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .flex_1()
                     .min_w_0()
-                    .child(div().truncate().text_px(14., 20.).medium().text_color(if live { t.primary } else { t.foreground }).child(s.country))
-                    .child(div().truncate().xs().text_color(t.muted_fg).child(s.city)),
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .text_px(14., 20.)
+                            .medium()
+                            .text_color(if live { t.primary } else { t.foreground })
+                            .child(div().truncate().child(list[0].country))
+                            .child(icon(if open { "chevron-down" } else { "chevron-right" }, 14., t.muted_fg)),
+                    )
+                    .child(div().truncate().xs().text_color(t.muted_fg).child(sub)),
             )
-            .when(self.s.entry_id == Some(id), |d| d.child(div().xs().text_color(t.muted_fg).child("via")))
             .when(live, |d| d.child(div().size(px(6.)).rounded_full().bg(t.primary)))
             .child(trailing)
-            .on_click(cx.listener(move |this, _, window, cx| this.go(id, window, cx)))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                match this.open_countries.iter().position(|c| *c == code) {
+                    Some(i) => _ = this.open_countries.remove(i),
+                    None => this.open_countries.push(code),
+                }
+                cx.notify();
+            }))
     }
 
     pub fn menu_catcher(&self, cx: &mut Context<Self>) -> AnyElement {

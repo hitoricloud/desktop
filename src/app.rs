@@ -162,6 +162,8 @@ pub struct Hitori {
     pub page: Page,
     /// The inspector's server list is ordered by the last latency test.
     pub sort_ping: bool,
+    /// Countries opened in that list (flag codes).
+    pub open_countries: Vec<&'static str>,
     pub menu: Option<Menu>,
     pub map: MapState,
     pub ring: std::cell::Cell<Option<Ring>>,
@@ -221,6 +223,7 @@ impl Hitori {
             site_input,
             page: Page::Map,
             sort_ping: false,
+            open_countries: vec![],
             menu: None,
             map: MapState::new(),
             ring: Default::default(),
@@ -269,6 +272,7 @@ impl Hitori {
                 "connecting" => self.connect(cx),
                 "ping" => self.test_pings(cx),
                 "sort" => self.sort_ping = true,
+                "open" => self.open_countries.push(data::intern(&value.to_uppercase())),
                 "tray" => self.variant = Variant::Tray,
                 "light" => self.set_dark(false, cx),
                 "small" => self.s.rules_big = false,
