@@ -263,7 +263,7 @@ fn stroke(pix: &mut sk::Pixmap, ls: &[Line], p: &Placed, width: f32, dash: Optio
 /// Layer order and paint follow the style: background, water, waterway, boundary_state, boundary_country_inner,
 /// then the country and continent labels. `scale` is the device pixel ratio; tile positions are in device pixels.
 /// Stand-in tiles are drawn first and covered wherever a real tile is ready.
-pub fn rasterize(pix: &mut sk::Pixmap, zoom: f64, scale: f32, style: &Style, tiles: &[Placed]) {
+pub fn rasterize(pix: &mut sk::Pixmap, zoom: f64, scale: f32, style: &Style, tiles: &[Placed], with_labels: bool) {
     let bg = Rgba::from(Hsla::from(rgb(style.background)));
     pix.fill(sk::Color::from_rgba(bg.r, bg.g, bg.b, 1.).unwrap());
     let (stand_in, ready): (Vec<&Placed>, Vec<&Placed>) = tiles.iter().partition(|p| p.fallback);
@@ -278,7 +278,9 @@ pub fn rasterize(pix: &mut sk::Pixmap, zoom: f64, scale: f32, style: &Style, til
         }
     }
     layers(pix, zoom, scale, style, &ready);
-    labels(pix, zoom, scale, style, tiles);
+    if with_labels {
+        labels(pix, zoom, scale, style, tiles);
+    }
 }
 
 fn layers(pix: &mut sk::Pixmap, zoom: f64, scale: f32, style: &Style, tiles: &[&Placed]) {
