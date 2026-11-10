@@ -1,6 +1,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 mod app;
 mod apps;
+mod auth;
 mod data;
 mod store;
 mod sub;
