@@ -1162,11 +1162,11 @@ impl Hitori {
     fn kill_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme(cx);
         let on = self.s.kill_switch;
-        let hint = match (on, crate::os::TUN, self.s.system_wide) {
-            (_, false, _) => "Kill switch · only on Linux for now",
-            (true, _, true) => "Kill switch on · traffic is blocked while the tunnel is down",
-            (true, _, false) => "Kill switch on · takes effect in system-wide mode",
-            (false, ..) => "Kill switch off · block traffic while the tunnel is down",
+        let hint = match (on, self.s.uses_tun()) {
+            (true, true) => "Kill switch on · traffic is blocked while the tunnel is down",
+            (true, false) if crate::os::SYSTEM_PROXY => "Kill switch on · takes effect in TUN mode",
+            (true, false) => "Kill switch on · takes effect in system-wide mode",
+            (false, _) => "Kill switch off · block traffic while the tunnel is down",
         };
         button("kill", Variant::Ghost, Size::IconSm, true, &t)
             .when(on, |b| b.rest(t.primary.opacity(0.1)))

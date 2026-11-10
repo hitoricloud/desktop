@@ -1,5 +1,5 @@
-# dist\hitori-<version>-windows-x86_64.zip: hitori.exe with xray.exe next to it.
-# Needs target\release\hitori.exe and bin\xray-windows-amd64.exe (scripts/fetch-xray.sh).
+# dist\hitori-<version>-windows-x86_64.zip: hitori.exe with xray.exe and the signed wintun.dll (TUN mode) next to it.
+# Needs target\release\hitori.exe, bin\xray-windows-amd64.exe and bin\wintun.dll (scripts/fetch-xray.sh).
 $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $PSScriptRoot
@@ -11,6 +11,7 @@ if (Test-Path (Join-Path $root "dist\stage")) { Remove-Item -Recurse -Force (Joi
 New-Item -ItemType Directory -Force $stage | Out-Null
 Copy-Item (Join-Path $root "target\release\hitori.exe") (Join-Path $stage "hitori.exe")
 Copy-Item (Join-Path $root "bin\xray-windows-amd64.exe") (Join-Path $stage "xray.exe")
+Copy-Item (Join-Path $root "bin\wintun.dll") (Join-Path $stage "wintun.dll")
 Copy-Item (Join-Path $root "LICENSE"), (Join-Path $root "NOTICE") $stage
 
 $zip = Join-Path $root "dist\$name.zip"

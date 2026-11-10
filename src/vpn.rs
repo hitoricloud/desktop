@@ -57,6 +57,7 @@ pub struct Shared {
     pub kill_switch: bool,
     pub default_route: RuleMode,
     pub system_wide: bool,
+    pub tun: bool,
     pub app_routes: Vec<(&'static str, AppRule)>,
     pub sites: Vec<(&'static str, AppRule)>,
     pub suggestions: Vec<Suggestion>,
@@ -88,6 +89,11 @@ pub struct Shared {
 }
 
 impl Shared {
+    /// System-wide through a TUN device: always on Linux, by choice on Windows and macOS.
+    pub fn uses_tun(&self) -> bool {
+        self.system_wide && (self.tun || !crate::os::SYSTEM_PROXY)
+    }
+
     /// Fields only the model changes; a window adopts them even while it has edits of its own to push.
     pub fn adopt(&mut self, model: &Shared) {
         self.conn = model.conn;
@@ -123,6 +129,7 @@ impl Shared {
             kill_switch: self.kill_switch,
             route: self.default_route.key().into(),
             system_wide: self.system_wide,
+            tun: self.tun,
             dark: self.dark,
             rules_big: self.rules_big,
             apps: self.app_routes.iter().map(|(a, r)| Rule::from_app(a, r)).collect(),
@@ -218,6 +225,7 @@ impl Vpn {
             kill_switch: saved.kill_switch,
             default_route: RuleMode::parse(&saved.route),
             system_wide: saved.system_wide,
+            tun: saved.tun,
             app_routes: saved.apps.iter().map(Rule::to_app).collect(),
             sites: saved.sites(),
             suggestions: vec![],
@@ -367,7 +375,7 @@ impl Vpn {
 
     /// The app's own requests skip the tunnel: while disconnected, and in proxy mode (the app itself is not proxied).
     fn direct(&self) -> bool {
-        self.s.conn == Conn::Off || !(self.core.as_ref().map_or(self.s.system_wide, |c| c.tun) && crate::os::TUN)
+        self.s.conn == Conn::Off || !self.core.as_ref().map_or(self.s.uses_tun(), |c| c.tun)
     }
 
     /// Detect the country again and download its lists now (Settings, the onboarding screen).
@@ -403,7 +411,7 @@ impl Vpn {
     fn region_checked(&mut self, raced: bool, got: Result<Option<region::Found>, String>, cx: &mut Context<Self>) {
         self.checking = None;
         // A connection started meanwhile: in system-wide mode the lookup may have gone through it.
-        let raced = raced && self.s.system_wide && crate::os::TUN;
+        let raced = raced && self.s.uses_tun();
         self.s.region.status = match got {
             Ok(Some(found)) if !raced => {
                 let l = found.location;
@@ -754,7 +762,8 @@ impl Vpn {
             entry: self.s.entry_id.map(data::server),
             protocol: self.s.protocol,
             default_route: self.s.default_route,
-            tun: self.s.system_wide,
+            tun: self.s.uses_tun(),
+            system_proxy: self.s.system_wide && !self.s.tun && crate::os::SYSTEM_PROXY,
             kill_switch: self.s.kill_switch,
             apps: self.s.app_routes.clone(),
             sites: self.s.sites.clone(),

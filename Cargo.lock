@@ -2809,7 +2809,6 @@ dependencies = [
  "unicode-segmentation",
  "ureq",
  "windows 0.61.3",
- "windows-registry 0.5.3",
 ]
 
 [[package]]

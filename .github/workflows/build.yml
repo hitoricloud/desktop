@@ -92,9 +92,19 @@ jobs:
         run: |
           # The release build is a GUI app without a console: wait for it and check the exit code.
           Copy-Item bin\xray-windows-amd64.exe target\release\xray.exe
+          Copy-Item bin\wintun.dll target\release\wintun.dll
           $p = Start-Process target\release\hitori.exe -ArgumentList "--smoke" -PassThru -Wait -RedirectStandardError smoke.err
           Get-Content smoke.err -ErrorAction SilentlyContinue
           if ($p.ExitCode -ne 0) { throw "hitori --smoke exited with $($p.ExitCode)" }
+      - name: TUN self-test
+        timeout-minutes: 3
+        shell: pwsh
+        run: |
+          # The runner is already elevated, so `runas` needs no prompt: wintun, routes, WFP kill switch and teardown.
+          $p = Start-Process target\release\hitori.exe -ArgumentList "--tun-selftest" -PassThru -Wait -RedirectStandardOutput tun.out -RedirectStandardError tun.err
+          Get-Content tun.out, tun.err -ErrorAction SilentlyContinue
+          if ($p.ExitCode -ne 0) { throw "hitori --tun-selftest exited with $($p.ExitCode)" }
+          if (Get-NetAdapter -Name Hitori -ErrorAction SilentlyContinue) { throw "the Hitori adapter is still there" }
       - name: Screenshot
         timeout-minutes: 2
         shell: pwsh
@@ -147,6 +157,16 @@ jobs:
           cp bin/xray-darwin-arm64 target/aarch64-apple-darwin/release/xray
           chmod +x target/aarch64-apple-darwin/release/xray
           target/aarch64-apple-darwin/release/hitori --smoke
+      - name: TUN self-test
+        timeout-minutes: 3
+        run: |
+          # As root (no prompt): utun, routes, DNS of every service, pf kill switch and teardown.
+          before="$(networksetup -listallnetworkservices | tail -n +2 | grep -v '^\*' | while read -r s; do networksetup -getdnsservers "$s"; done)"
+          sudo -n target/aarch64-apple-darwin/release/hitori --tun-selftest
+          after="$(networksetup -listallnetworkservices | tail -n +2 | grep -v '^\*' | while read -r s; do networksetup -getdnsservers "$s"; done)"
+          [ "$before" = "$after" ] || { echo "DNS servers not restored"; echo "$before"; echo "$after"; exit 1; }
+          [ ! -e "/Library/Application Support/Hitori VPN/tun.json" ] || { echo "TUN state left behind"; exit 1; }
+          ! sudo -n pfctl -a com.apple/hitori -s rules 2>/dev/null | grep -q . || { echo "pf rules left behind"; exit 1; }
       - run: scripts/package-macos.sh
       - uses: actions/upload-artifact@v7
         with:
