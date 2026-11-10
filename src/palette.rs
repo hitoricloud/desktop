@@ -96,7 +96,7 @@ impl Hitori {
 
     /// Route settings for one app: route mode, exit, route through, protocol, options.
     fn rule_groups(&self, app_id: &'static str) -> Vec<Group> {
-        let rule = self.app_route(app_id).cloned().unwrap_or(AppRule::AUTO);
+        let rule = self.app_route(app_id).cloned().unwrap_or(AppRule::mode(self.s.default_route));
         let main_exit = server(self.s.server_id);
         let off = matches!(rule.mode, RuleMode::Direct | RuleMode::Block);
         let exit_id = rule.exit.unwrap_or(main_exit.id);
@@ -172,10 +172,10 @@ impl Hitori {
         }
     }
 
-    fn patch_rule(&mut self, app_id: &'static str, change: impl FnOnce(&mut AppRule), cx: &mut Context<Self>) {
-        let mut rule = self.app_route(app_id).cloned().unwrap_or(AppRule::AUTO);
+    pub fn patch_rule(&mut self, app_id: &'static str, change: impl FnOnce(&mut AppRule), cx: &mut Context<Self>) {
+        let mut rule = self.app_route(app_id).cloned().unwrap_or(AppRule::mode(self.s.default_route));
         change(&mut rule);
-        if rule.is_default() {
+        if rule.is_default(self.s.default_route) {
             self.s.app_routes.retain(|(a, _)| *a != app_id);
         } else if let Some(slot) = self.s.app_routes.iter_mut().find(|(a, _)| *a == app_id) {
             slot.1 = rule;
@@ -195,7 +195,8 @@ impl Hitori {
             (Act::Go(id), _) => self.go(id, window, cx),
             (Act::Via(id), _) => self.via(Some(id), window, cx),
             (Act::Remove, Some(a)) => {
-                self.patch_rule(a, |r| *r = AppRule::AUTO, cx);
+                let default = self.s.default_route;
+                self.patch_rule(a, |r| *r = AppRule::mode(default), cx);
                 self.close_palette(window, cx);
             }
             (_, None) => {}
@@ -379,7 +380,7 @@ impl Hitori {
             Look::Remove => vec![
                 icon("trash-2", 20., t.destructive).into_any_element(),
                 div().flex_1().child("Remove rule").into_any_element(),
-                div().xs().text_color(t.muted_fg).child("Back to autorouting").into_any_element(),
+                div().xs().text_color(t.muted_fg).child(format!("Back to default · {}", self.s.default_route.label())).into_any_element(),
             ],
         };
         let act = row.act;

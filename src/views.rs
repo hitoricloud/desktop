@@ -10,7 +10,7 @@ use crate::fx::{Fx, fx};
 use crate::theme::{Theme, color};
 use crate::ui::{
     LG, MD, SM, Size, Tw, Variant, XL, avatar, features, button, button_icon, flag, icon, menu, menu_item, menu_label, menu_radio, menu_separator,
-    pulse, skeleton, spinner, switch, tip,
+    pulse, skeleton, spinner, tip,
 };
 
 pub const SIDEBAR: f32 = 288.;
@@ -112,11 +112,16 @@ pub fn popover(placement: Placement, phase: (f32, bool), content: impl IntoEleme
 impl Hitori {
     // ---------- windows ----------
 
-    pub fn cockpit(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    pub fn cockpit(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = self.theme(cx);
         let vp = window.viewport_size();
         let (w, h) = (f32::from(vp.width), f32::from(vp.height));
         let wide = w >= 1024.;
+        if self.s.layout != crate::workspace::Layout::Map {
+            self.ring.set(None);
+            let inspector = wide.then(|| self.inspector(window, cx).into_any_element());
+            return div().flex().size_full().bg(t.background).child(self.workspace(wide, window, cx)).children(inspector).into_any_element();
+        }
         // Sidebar collapse: `transition-[left,right,width] duration-200 ease-linear`.
         let side_w = if w >= 768. { crate::fx::tween("sidebar-w", if self.sidebar_open { SIDEBAR } else { 0. }, 200., crate::fx::linear, window, cx) } else { 0. };
         let side = side_w > 0.;
@@ -125,7 +130,7 @@ impl Hitori {
         {
             let mut keep = self.keepout.borrow_mut();
             keep.clear();
-            keep.push([16., 16., 32., 32.]);
+            keep.push([16., 16., 32. + 8. + 100., 32.]);
             if wide {
                 keep.push([(map_w - 360.) / 2. - 8., h - 24. - 340., 376., 348.]);
             } else {
@@ -163,7 +168,7 @@ impl Hitori {
                 .child(self.power_button(cx))
                 .into_any_element()
         });
-        let trigger = div().absolute().top(px(16.)).left(px(16.)).flex().child(
+        let trigger = div().absolute().top(px(16.)).left(px(16.)).flex().gap(px(8.)).items_center().child(
             button("trigger", Variant::Ghost, Size::IconSm, true, &t)
                 .rest(t.card)
                 .shadow(t.panel_shadow())
@@ -178,8 +183,9 @@ impl Hitori {
             .size_full()
             .bg(t.background)
             .children(sidebar)
-            .child(div().relative().flex_1().min_w_0().h_full().child(map).child(trigger).children(toasts).children(narrow))
+            .child(div().relative().flex_1().min_w_0().h_full().child(map).child(trigger.child(self.layout_switch(cx))).children(toasts).children(narrow))
             .children(inspector)
+            .into_any_element()
     }
 
     pub fn tray(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -344,7 +350,7 @@ impl Hitori {
     }
 
     /// Tray header: avatar button with Account, Settings and Sign out.
-    fn account_menu(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+    pub fn account_menu(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme(cx);
         let open = self.menu == Some(Menu::TrayAccount);
         let trigger = button("tray-account", Variant::Ghost, Size::IconLg, true, &t)
@@ -376,7 +382,7 @@ impl Hitori {
 
     // ---------- routing ----------
 
-    /// Autorouting switch, Review for suggestions not on screen, every active rule, Manage rules.
+    /// Default route, Review for suggestions not on screen, every active rule, Manage rules.
     pub fn routing_panel(&self, toasts: bool, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme(cx);
         let wide = f32::from(window.viewport_size().width) >= 1024.;
@@ -420,7 +426,7 @@ impl Hitori {
             .flex_col()
             .size_full()
             .min_h_0()
-            .child(self.auto_switch(cx))
+            .child(self.default_route(cx))
             .children(review_btn)
             .child(
                 div()
@@ -463,34 +469,55 @@ impl Hitori {
             )
     }
 
-    fn auto_switch(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Where traffic without a rule goes: a segmented control with the chosen mode explained under it.
+    pub fn default_route(&self, cx: &mut Context<Self>) -> Div {
         let t = self.theme(cx);
+        let current = self.s.default_route;
+        let mut seg = div().flex().p(px(2.)).gap(px(2.)).rounded(px(MD)).bg(t.muted);
+        for mode in RuleMode::ALL {
+            let on = mode == current;
+            let fg = if on { if mode == RuleMode::Block { t.destructive } else { t.foreground } } else { t.muted_fg };
+            seg = seg.child(
+                fx(SharedString::from(format!("default-{}", mode.key())), if on { t.background } else { gpui::transparent_black() }, Some(if on { t.background } else { t.ghost_hover() }))
+                    .flex_1()
+                    .h(px(28.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(4.))
+                    .rounded(px(6.))
+                    .when(on, |d| d.shadow(crate::theme::shadow_xs()))
+                    .xs()
+                    .medium()
+                    .text_color(fg)
+                    .cursor_pointer()
+                    .child(icon(mode.icon(), 14., fg))
+                    .child(mode.label())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.s.default_route = mode;
+                        cx.notify();
+                    })),
+            );
+        }
         div()
-            .id("autoroute")
             .flex_none()
             .flex()
-            .items_center()
-            .gap(px(12.))
-            .min_h(px(48.))
+            .flex_col()
+            .gap(px(8.))
             .px(px(8.))
-            .cursor_pointer()
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.s.autoroute = !this.s.autoroute;
-                cx.notify();
-            }))
+            .py(px(8.))
             .child(
                 div()
                     .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_w_0()
-                    .child(div().sm().medium().child("Autorouting"))
-                    .child(div().xs().text_color(t.muted_fg).child("Direct first, VPN when it fails")),
+                    .items_baseline()
+                    .justify_between()
+                    .child(div().sm().medium().child("Default route"))
+                    .child(div().xs().text_color(t.muted_fg).child(current.default_hint())),
             )
-            .child(switch("autoroute-switch", self.s.autoroute, &t))
+            .child(seg)
     }
 
-    /// Every app and site with a rule, apps by traffic; anything else is autorouted and not listed.
+    /// Every app and site with a rule, apps by traffic; anything else follows the default route and is not listed.
     pub fn active_rules(&self, big: bool, sites: bool, place: Place, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mut apps: Vec<&'static AppInfo> = self.s.app_routes.iter().map(|(a, _)| app(a)).collect();
         // Recently active first; apps not seen this session last.
@@ -517,7 +544,7 @@ impl Hitori {
 
     /// Where traffic under this rule ends up; the main exit is muted because it follows the connection.
     /// Where traffic under this rule ends up; muted when it follows the main connection, which can change.
-    fn destination(&self, rule: &AppRule) -> (String, bool) {
+    pub fn destination(&self, rule: &AppRule) -> (String, bool) {
         match rule.mode {
             RuleMode::Direct => return ("Bypasses VPN".into(), false),
             RuleMode::Block => return ("Blocked".into(), false),
@@ -621,7 +648,8 @@ impl Hitori {
             menu_label(t).flex().items_center().gap(px(8.)).child(site_badge(t)).child(target).into_any_element(),
             menu_separator(t).into_any_element(),
         ];
-        for (value, label, r) in [("auto", "Auto", None), ("vpn", "Always VPN", Some(SiteRule::Vpn)), ("direct", "Always direct", Some(SiteRule::Direct))] {
+        let default = format!("Default · {}", self.s.default_route.label());
+        for (value, label, r) in [("auto", default, None), ("vpn", "Always VPN".into(), Some(SiteRule::Vpn)), ("direct", "Always direct".into(), Some(SiteRule::Direct))] {
             items.push(
                 menu_radio(SharedString::from(format!("s-{value}")), rule == r, t)
                     .child(label)
@@ -810,6 +838,7 @@ impl Hitori {
                 div()
                     .flex()
                     .flex_col()
+                    .flex_1()
                     .min_w_0()
                     .child(div().base().semibold().tight().text_color(tone).child(title))
                     .child(match (error, where_) {

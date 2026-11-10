@@ -285,6 +285,7 @@ pub fn running() -> Vec<&'static AppInfo> {
 // ---------- rules ----------
 
 /// Auto: direct first, VPN when it fails · Vpn: always tunnelled · Direct: never tunnelled · Block: no network.
+/// Also the default route: where traffic without a rule goes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RuleMode {
     Auto,
@@ -293,7 +294,57 @@ pub enum RuleMode {
     Block,
 }
 
-/// One app's route. `None` fields follow the main connection; an app without a rule is autorouted.
+impl RuleMode {
+    pub const ALL: [RuleMode; 4] = [RuleMode::Auto, RuleMode::Vpn, RuleMode::Direct, RuleMode::Block];
+
+    pub fn key(self) -> &'static str {
+        match self {
+            RuleMode::Auto => "auto",
+            RuleMode::Vpn => "vpn",
+            RuleMode::Direct => "direct",
+            RuleMode::Block => "block",
+        }
+    }
+
+    pub fn parse(key: &str) -> Self {
+        RuleMode::ALL.into_iter().find(|m| m.key() == key).unwrap_or(RuleMode::Auto)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            RuleMode::Auto => "Auto",
+            RuleMode::Vpn => "VPN",
+            RuleMode::Direct => "Direct",
+            RuleMode::Block => "Block",
+        }
+    }
+
+    pub fn icon(self) -> &'static str {
+        match self {
+            RuleMode::Auto => "wand-sparkles",
+            RuleMode::Vpn => "shield-check",
+            RuleMode::Direct => "globe",
+            RuleMode::Block => "ban",
+        }
+    }
+
+    /// Unruled traffic goes out directly first, so failures there can become suggestions.
+    pub fn tries_direct(self) -> bool {
+        matches!(self, RuleMode::Auto | RuleMode::Direct)
+    }
+
+    /// As the default route.
+    pub fn default_hint(self) -> &'static str {
+        match self {
+            RuleMode::Auto => "Direct first, VPN when it fails",
+            RuleMode::Vpn => "Everything through the VPN",
+            RuleMode::Direct => "Only your rules use the VPN",
+            RuleMode::Block => "Only apps and sites you allow",
+        }
+    }
+}
+
+/// One app's route. `None` fields follow the main connection; an app without a rule follows the default route.
 #[derive(Clone, PartialEq, Debug)]
 pub struct AppRule {
     pub mode: RuleMode,
@@ -311,9 +362,9 @@ impl AppRule {
     pub fn mode(mode: RuleMode) -> Self {
         Self { mode, ..Self::AUTO }
     }
-    /// Changes nothing: the app is plain autorouted again.
-    pub fn is_default(&self) -> bool {
-        *self == Self::AUTO
+    /// Changes nothing: the app just follows the default route.
+    pub fn is_default(&self, default: RuleMode) -> bool {
+        *self == Self::mode(default)
     }
 }
 

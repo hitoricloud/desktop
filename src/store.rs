@@ -97,22 +97,11 @@ pub struct Rule {
 
 impl Rule {
     pub fn from_app(app: &str, r: &AppRule) -> Self {
-        let mode = match r.mode {
-            RuleMode::Auto => "auto",
-            RuleMode::Vpn => "vpn",
-            RuleMode::Direct => "direct",
-            RuleMode::Block => "block",
-        };
-        Self { app: app.into(), mode: mode.into(), exit: r.exit.map(Into::into), via: r.via.map(Into::into), protocol: r.protocol.map(Into::into), kill: r.kill }
+        Self { app: app.into(), mode: r.mode.key().into(), exit: r.exit.map(Into::into), via: r.via.map(Into::into), protocol: r.protocol.map(Into::into), kill: r.kill }
     }
 
     pub fn to_app(&self) -> (&'static str, AppRule) {
-        let mode = match self.mode.as_str() {
-            "vpn" => RuleMode::Vpn,
-            "direct" => RuleMode::Direct,
-            "block" => RuleMode::Block,
-            _ => RuleMode::Auto,
-        };
+        let mode = RuleMode::parse(&self.mode);
         let i = crate::data::intern;
         (i(&self.app), AppRule { mode, exit: self.exit.as_deref().map(i), via: self.via.as_deref().map(i), protocol: self.protocol.map(Into::into), kill: self.kill })
     }
@@ -128,7 +117,10 @@ pub struct Settings {
     pub protocol: Proto,
     pub auto_connect: bool,
     pub kill_switch: bool,
-    pub autoroute: bool,
+    /// Where traffic without a rule goes: auto, vpn, direct or block.
+    pub route: String,
+    /// Main window: map, list or board.
+    pub layout: String,
     /// Route the whole system through a TUN device (needs the administrator once per connection).
     pub system_wide: bool,
     pub dark: bool,
@@ -148,7 +140,8 @@ impl Default for Settings {
             protocol: Proto::Tls,
             auto_connect: false,
             kill_switch: true,
-            autoroute: true,
+            route: "auto".into(),
+            layout: "map".into(),
             system_wide: true,
             dark: true,
             rules_big: true,

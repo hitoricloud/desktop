@@ -39,7 +39,7 @@ pub struct Plan {
     pub exit: &'static Server,
     pub entry: Option<&'static Server>,
     pub protocol: Protocol,
-    pub autoroute: bool,
+    pub default_route: RuleMode,
     pub tun: bool,
     pub kill_switch: bool,
     pub apps: Vec<(&'static str, AppRule)>,
@@ -115,7 +115,7 @@ fn field(extra: Value, outbound: &str) -> Value {
 }
 
 /// The complete core config. Rule order: DNS and app probes, LAN, provider rules, blocked apps, sites, other apps,
-/// then the autorouting lists and the catch-all.
+/// then the default route (the autorouting lists and their direct catch-all for Auto).
 pub fn config(plan: &Plan, ports: Ports) -> Result<Value, String> {
     let exit = plan.exit;
     let entry = plan.entry.filter(|e| e.id != exit.id);
@@ -141,7 +141,10 @@ pub fn config(plan: &Plan, ports: Ports) -> Result<Value, String> {
     rules.push(field(json!({"inboundTag": ["dns-internal", "probe-in"]}), "proxy"));
     rules.push(field(json!({"ip": PRIVATE}), "direct"));
     rules.push(field(json!({"domain": ["domain:localhost"]}), "direct"));
-    rules.extend(plan.base_rules.iter().cloned());
+    // The provider's rules send some traffic direct (torrents), which an allowlist must not do.
+    if plan.default_route != RuleMode::Block {
+        rules.extend(plan.base_rules.iter().cloned());
+    }
 
     let names = |app: &str| processes(app);
     for (app, _) in plan.apps.iter().filter(|(_, r)| r.mode == RuleMode::Block) {
@@ -177,8 +180,10 @@ pub fn config(plan: &Plan, ports: Ports) -> Result<Value, String> {
                     rules.push(field(json!({"process": names(app)}), &t));
                 }
             }
-            // Auto with its own exit: what needs the tunnel goes there, the rest stays direct like everything else.
-            RuleMode::Auto if custom => {
+            // Under the Auto default a plain Auto app needs no rules of its own.
+            RuleMode::Auto if !custom && plan.default_route == RuleMode::Auto => {}
+            // What needs the tunnel goes to the app's exit, the rest of the app direct.
+            RuleMode::Auto => {
                 if let Some(t) = tag(&mut out) {
                     for list in plan.tunnel_rules.iter() {
                         let mut rule = list.clone();
@@ -186,15 +191,22 @@ pub fn config(plan: &Plan, ports: Ports) -> Result<Value, String> {
                         rule["outboundTag"] = json!(t);
                         rules.push(rule);
                     }
+                    if plan.default_route != RuleMode::Auto {
+                        rules.push(field(json!({"process": names(app)}), "direct"));
+                    }
                 }
             }
-            RuleMode::Auto => {}
         }
     }
-    if plan.autoroute {
+    if plan.default_route == RuleMode::Auto {
         rules.extend(plan.tunnel_rules.iter().cloned());
     }
-    rules.push(field(json!({"network": "tcp,udp"}), if plan.autoroute { "direct" } else { "proxy" }));
+    let last = match plan.default_route {
+        RuleMode::Auto | RuleMode::Direct => "direct",
+        RuleMode::Vpn => "proxy",
+        RuleMode::Block => "block",
+    };
+    rules.push(field(json!({"network": "tcp,udp"}), last));
 
     out.list.push(json!({"tag": "direct", "protocol": "freedom"}));
     out.list.push(json!({"tag": "block", "protocol": "blackhole"}));
@@ -215,7 +227,7 @@ pub fn config(plan: &Plan, ports: Ports) -> Result<Value, String> {
     dns["tag"] = json!("dns-internal");
     Ok(json!({
         // Info carries the failed direct dials that autorouting suggestions come from.
-        "log": {"loglevel": if plan.autoroute { "info" } else { "warning" }},
+        "log": {"loglevel": if plan.default_route.tries_direct() { "info" } else { "warning" }},
         "dns": dns,
         "inbounds": inbounds,
         "outbounds": out.list,
@@ -574,7 +586,7 @@ mod tests {
             exit: a,
             entry: None,
             protocol: Protocol::Tls,
-            autoroute: true,
+            default_route: RuleMode::Auto,
             tun: false,
             kill_switch: true,
             apps: vec![],
@@ -604,11 +616,37 @@ mod tests {
         let tags: Vec<_> = c["outbounds"].as_array().unwrap().iter().map(|o| o["tag"].as_str().unwrap().to_owned()).collect();
         assert_eq!(tags, ["proxy", "p-aa-1", "p-bb-2-Grpc", "direct", "block"]);
         assert!(c["inbounds"].as_array().unwrap().iter().any(|i| i["port"] == SOCKS_PORT));
+    }
+
+    #[test]
+    fn default_route_decides_the_catch_all() {
+        let last = |p: &Plan| config(p, Ports { probe: 1, metrics: 2 }).unwrap()["routing"]["rules"].as_array().unwrap().last().unwrap()["outboundTag"].clone();
+        for (mode, out) in [(RuleMode::Vpn, "proxy"), (RuleMode::Direct, "direct"), (RuleMode::Block, "block")] {
+            let mut p = plan();
+            p.default_route = mode;
+            let c = config(&p, Ports { probe: 1, metrics: 2 }).unwrap();
+            assert_eq!(last(&p), out, "{mode:?}");
+            assert!(rule_for(&c, "domain", "domain:blocked.example").is_none(), "{mode:?}: lists only for Auto");
+            assert_eq!(rule_for(&c, "protocol", "bittorrent").is_some(), mode != RuleMode::Block, "{mode:?}: provider rules");
+            assert_eq!(rule_for(&c, "inboundTag", "probe-in").unwrap()["outboundTag"], "proxy", "{mode:?}: probes always tunnelled");
+        }
+    }
+
+    #[test]
+    fn auto_app_under_another_default_gets_its_own_lists() {
         let mut p = plan();
-        p.autoroute = false;
+        p.default_route = RuleMode::Vpn;
+        p.apps = vec![("steam", AppRule::mode(RuleMode::Auto))];
         let c = config(&p, Ports { probe: 1, metrics: 2 }).unwrap();
-        assert_eq!(c["routing"]["rules"].as_array().unwrap().last().unwrap()["outboundTag"], "proxy");
-        assert!(rule_for(&c, "domain", "domain:blocked.example").is_none());
+        let rules = c["routing"]["rules"].as_array().unwrap();
+        let listed = rules.iter().position(|r| r["process"].as_array().is_some_and(|v| v.iter().any(|x| x == "steam")) && r["domain"].is_array()).unwrap();
+        assert_eq!(rules[listed]["outboundTag"], "proxy");
+        let rest = rules.iter().position(|r| r["process"].as_array().is_some_and(|v| v.iter().any(|x| x == "steam")) && r["domain"].is_null()).unwrap();
+        assert_eq!(rules[rest]["outboundTag"], "direct");
+        assert!(listed < rest);
+        p.default_route = RuleMode::Auto;
+        let c = config(&p, Ports { probe: 1, metrics: 2 }).unwrap();
+        assert!(rule_for(&c, "process", "steam").is_none(), "follows the Auto default without rules");
     }
 
     #[test]
@@ -673,7 +711,7 @@ mod tests {
             exit: ee,
             entry: None,
             protocol: Protocol::Tls,
-            autoroute: false,
+            default_route: RuleMode::Vpn,
             tun: false,
             kill_switch: true,
             apps: vec![("curl", AppRule { exit: Some(ch.id), ..AppRule::mode(RuleMode::Vpn) })],
@@ -684,14 +722,14 @@ mod tests {
             dns: Arc::new(sub.dns),
         };
         // Every generated variant must pass the core's own validation.
-        for (tun, entry, auto, proto) in [(false, None, false, Protocol::Tls), (true, None, true, Protocol::Hy2), (false, Some(ch), true, Protocol::Grpc)] {
+        for (tun, entry, route, proto) in [(false, None, RuleMode::Vpn, Protocol::Tls), (true, None, RuleMode::Auto, Protocol::Hy2), (false, Some(ch), RuleMode::Block, Protocol::Grpc)] {
             let mut p = plan.clone();
-            (p.tun, p.entry, p.autoroute, p.protocol) = (tun, entry, auto, proto);
+            (p.tun, p.entry, p.default_route, p.protocol) = (tun, entry, route, proto);
             let path = std::env::temp_dir().join(format!("hitori-test-{}.json", std::process::id()));
             crate::store::write(&path, &serde_json::to_vec(&config(&p, Ports { probe: free_port(), metrics: free_port() }).unwrap()).unwrap(), true).unwrap();
             let out = Command::new(&xray).args(["run", "-test", "-c"]).arg(&path).output().unwrap();
             std::fs::remove_file(&path).unwrap();
-            assert!(out.status.success(), "tun={tun} entry={} auto={auto}: {}", entry.is_some(), String::from_utf8_lossy(&out.stdout));
+            assert!(out.status.success(), "tun={tun} entry={} route={route:?}: {}", entry.is_some(), String::from_utf8_lossy(&out.stdout));
         }
         plan.apps.clear();
         let core = Core::start(&plan).unwrap();
@@ -770,7 +808,7 @@ mod tests {
             exit,
             entry: None,
             protocol: Protocol::Tls,
-            autoroute: false,
+            default_route: RuleMode::Vpn,
             tun: true,
             kill_switch: true,
             apps: vec![],

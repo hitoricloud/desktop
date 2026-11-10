@@ -148,6 +148,8 @@ pub struct Hitori {
     pub search: Entity<TextInput>,
     /// Subscription link field on the Account sheet.
     pub link: Entity<TextInput>,
+    /// New website rule in the list layout.
+    pub site_input: Entity<TextInput>,
     pub menu: Option<Menu>,
     pub map: MapState,
     pub ring: std::cell::Cell<Option<Ring>>,
@@ -159,6 +161,7 @@ pub struct Hitori {
     pub panel_fx: Presence<Panel>,
     pub palette_fx: Presence<Mode>,
     _search_changes: Subscription,
+    _site_changes: Subscription,
     _vpn_changes: Subscription,
 }
 
@@ -167,6 +170,8 @@ impl Hitori {
         let t = theme(cx);
         let search = cx.new(|cx| TextInput::new("Search countries", t.muted_fg, t.foreground, cx));
         let link = cx.new(|cx| TextInput::new("https://…/sub/…", t.muted_fg, t.foreground, cx));
+        let site_input = cx.new(|cx| TextInput::new("Add a website, e.g. youtube.com", t.muted_fg, t.foreground, cx));
+        let site_changes = cx.observe(&site_input, |_, _, cx| cx.notify());
         let changes = cx.observe(&search, |this, _, cx| {
             this.palette_index = 0;
             cx.notify();
@@ -201,6 +206,7 @@ impl Hitori {
             palette_index: 0,
             search,
             link,
+            site_input,
             menu: None,
             map: MapState::new(),
             ring: Default::default(),
@@ -211,6 +217,7 @@ impl Hitori {
             panel_fx: Presence::new(),
             palette_fx: Presence::new(),
             _search_changes: changes,
+            _site_changes: site_changes,
             _vpn_changes: vpn_changes,
         };
         if let Ok(state) = std::env::var("HITORI_STATE") {
@@ -249,7 +256,8 @@ impl Hitori {
                 "tray" => self.variant = Variant::Tray,
                 "light" => self.set_dark(false, cx),
                 "small" => self.s.rules_big = false,
-                "noauto" => self.s.autoroute = false,
+                "route" => self.s.default_route = RuleMode::parse(value),
+                "layout" => self.s.layout = crate::workspace::Layout::parse(value),
                 "collapsed" => self.sidebar_open = false,
                 "snooze" => self.s.snoozed.push(leak(value)),
                 "panel" => {

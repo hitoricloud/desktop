@@ -60,7 +60,7 @@ impl Hitori {
                 _ if self.s.signed_in => ("Account", "Loading your subscription…".into()),
                 _ => ("Sign in", "Paste the subscription link from the Hitori bot.".into()),
             },
-            Panel::Routes => ("Routing rules", "Apps and sites without a rule are autorouted.".into()),
+            Panel::Routes => ("Routing rules", format!("Apps and sites without a rule follow the default route: {}.", self.s.default_route.label())),
             Panel::Settings => ("Settings", "Changes apply on the next connection.".into()),
         };
         // Sheet: overlay `fade-in-0` 150ms; content `slide-in-from-right` 500ms in / 300ms out, ease-in-out.
@@ -337,7 +337,7 @@ impl Hitori {
                     .child(self.active_rules(true, false, Place::Sheet, window, cx)),
             )
             .child(div().flex().flex_col().gap(px(8.)).child(heading(format!("Sites · {}", self.s.sites.len()))).child(sites))
-            .child(div().xs().text_color(t.muted_fg).child("Everything else is autorouted: direct first, VPN when it fails."))
+            .child(div().xs().text_color(t.muted_fg).child(format!("Everything else: {} · {}.", self.s.default_route.label(), self.s.default_route.default_hint().to_lowercase())))
             .into_any_element()
     }
 }

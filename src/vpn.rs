@@ -7,11 +7,12 @@ use gpui::{Context, Task};
 use serde_json::Value;
 
 use crate::app::Conn;
-use crate::data::{self, Account, AppRule, Protocol, Scope, SiteRule, Suggestion};
+use crate::data::{self, Account, AppRule, Protocol, RuleMode, Scope, SiteRule, Suggestion};
 use crate::net::{self, Geo};
 use crate::store::{self, Login, Rule, Settings};
 use crate::sub;
 use crate::suggest::Tracker;
+use crate::workspace::Layout;
 use crate::xray::{self, Core, Plan};
 
 #[derive(Clone, PartialEq)]
@@ -44,7 +45,8 @@ pub struct Shared {
     pub protocol: Protocol,
     pub auto_connect: bool,
     pub kill_switch: bool,
-    pub autoroute: bool,
+    pub default_route: RuleMode,
+    pub layout: Layout,
     pub system_wide: bool,
     pub app_routes: Vec<(&'static str, AppRule)>,
     pub sites: Vec<(&'static str, SiteRule)>,
@@ -89,7 +91,8 @@ impl Shared {
             protocol: self.protocol.into(),
             auto_connect: self.auto_connect,
             kill_switch: self.kill_switch,
-            autoroute: self.autoroute,
+            route: self.default_route.key().into(),
+            layout: self.layout.key().into(),
             system_wide: self.system_wide,
             dark: self.dark,
             rules_big: self.rules_big,
@@ -100,10 +103,13 @@ impl Shared {
     }
 
     /// What a running core has to be restarted for.
-    fn routing(&self) -> (bool, Vec<(&'static str, AppRule)>, Vec<(&'static str, SiteRule)>) {
-        (self.autoroute, self.app_routes.clone(), self.sites.clone())
+    fn routing(&self) -> Routing {
+        (self.default_route, self.app_routes.clone(), self.sites.clone())
     }
 }
+
+/// What a running core has to be restarted for: default route, app rules, site rules.
+type Routing = (RuleMode, Vec<(&'static str, AppRule)>, Vec<(&'static str, SiteRule)>);
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 struct Exit {
@@ -143,7 +149,7 @@ pub struct Vpn {
     lists: Lists,
     saved: Settings,
     /// Routing the running core was started with.
-    applied: Option<(bool, Vec<(&'static str, AppRule)>, Vec<(&'static str, SiteRule)>)>,
+    applied: Option<Routing>,
     bytes: Option<(Instant, u64, u64)>,
     first_bytes: u64,
     failures: u32,
@@ -169,7 +175,8 @@ impl Vpn {
             protocol: saved.protocol.into(),
             auto_connect: saved.auto_connect,
             kill_switch: saved.kill_switch,
-            autoroute: saved.autoroute,
+            default_route: RuleMode::parse(&saved.route),
+            layout: Layout::parse(&saved.layout),
             system_wide: saved.system_wide,
             app_routes: saved.apps.iter().map(Rule::to_app).collect(),
             sites: saved.sites(),
@@ -254,7 +261,7 @@ impl Vpn {
                 fresh.push((host, reason, hits));
             }
         }
-        if fresh.is_empty() || !self.s.autoroute {
+        if fresh.is_empty() || !self.s.default_route.tries_direct() {
             return;
         }
         let via = self.s.server_id;
@@ -419,7 +426,7 @@ impl Vpn {
             exit: data::server(self.s.server_id),
             entry: self.s.entry_id.map(data::server),
             protocol: self.s.protocol,
-            autoroute: self.s.autoroute,
+            default_route: self.s.default_route,
             tun: self.s.system_wide,
             kill_switch: self.s.kill_switch,
             apps: self.s.app_routes.clone(),
@@ -475,7 +482,7 @@ impl Vpn {
         cx.notify();
     }
 
-    fn started(&mut self, attempt: u64, routing: (bool, Vec<(&'static str, AppRule)>, Vec<(&'static str, SiteRule)>), result: Result<Core, String>, cx: &mut Context<Self>) {
+    fn started(&mut self, attempt: u64, routing: Routing, result: Result<Core, String>, cx: &mut Context<Self>) {
         if attempt != self.attempt {
             if let Ok(core) = result {
                 cx.background_executor().spawn(async move { core.stop() }).detach();
