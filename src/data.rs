@@ -57,9 +57,9 @@ impl Server {
         pick(want).or_else(|| Protocol::ALL.iter().find_map(|p| pick(*p)))
     }
 
-    /// `EE-0007`: the country and the node's number in the subscription, unique per server.
+    /// `EE-4821`: the country and a number no other server in the list has.
     pub fn tag(&self) -> String {
-        let n = self.id.rsplit_once('-').and_then(|(_, n)| n.parse::<u32>().ok()).unwrap_or(0);
+        let n = NUMBERS.read().unwrap().get(self.id).copied().unwrap_or_else(|| (fnv(self.id) % 10_000) as u16);
         format!("{}-{n:04}", self.code)
     }
 
@@ -75,6 +75,7 @@ impl Server {
 static NONE: LazyLock<Server> =
     LazyLock::new(|| Server { id: "none", country: "No servers", code: "", city: "Sign in to connect", ip: "", lat: 52., lon: 30., variants: vec![] });
 static SERVERS: RwLock<Vec<&'static Server>> = RwLock::new(Vec::new());
+static NUMBERS: LazyLock<RwLock<HashMap<&'static str, u16>>> = LazyLock::new(Default::default);
 /// Last latency test result per server; `None` when it timed out.
 static PINGS: LazyLock<RwLock<HashMap<&'static str, Option<u32>>>> = LazyLock::new(Default::default);
 
@@ -83,7 +84,30 @@ pub fn servers() -> Vec<&'static Server> {
 }
 
 pub fn set_servers(list: Vec<Server>) {
+    *NUMBERS.write().unwrap() = numbers(&list.iter().map(|s| s.id).collect::<Vec<_>>());
     *SERVERS.write().unwrap() = list.into_iter().map(|s| &*Box::leak(Box::new(s))).collect();
+}
+
+/// FNV-1a: the same on every run and Rust version, unlike the std hasher.
+fn fnv(s: &str) -> u32 {
+    s.bytes().fold(0x811c_9dc5, |h, b| (h ^ b as u32).wrapping_mul(0x0100_0193))
+}
+
+/// Server numbers from their subscription ids, so they stay put between launches; a clash takes the next free number.
+fn numbers(ids: &[&'static str]) -> HashMap<&'static str, u16> {
+    let mut sorted = ids.to_vec();
+    sorted.sort_unstable();
+    let mut taken = HashSet::new();
+    sorted
+        .into_iter()
+        .map(|id| {
+            let mut n = (fnv(id) % 10_000) as u16;
+            while !taken.insert(n) {
+                n = (n + 1) % 10_000;
+            }
+            (id, n)
+        })
+        .collect()
 }
 
 pub fn server(id: &str) -> &'static Server {
@@ -545,8 +569,20 @@ mod tests {
         assert_eq!((ping("t-dead"), ping("t-fast")), (None, Some(40)));
         set_pings([("t-dead", Some(90))]);
         assert!(!timed_out("t-dead"), "a later answer replaces the timeout");
-        let tag = |id: &'static str, code: &'static str| Server { id, country: "", code, city: "", ip: "", lat: 0., lon: 0., variants: vec![] }.tag();
-        assert_eq!((tag("ee-7", "EE"), tag("ch-12", "CH"), tag("lv", "LV")), ("EE-0007".into(), "CH-0012".into(), "LV-0000".into()));
+    }
+
+    #[test]
+    fn server_numbers_are_unique_and_stable() {
+        let ids: Vec<&'static str> = (0..3000).map(|i| intern(&format!("x{}-{}", i % 40, i / 40))).collect();
+        let got = numbers(&ids);
+        let distinct: HashSet<u16> = got.values().copied().collect();
+        assert_eq!(distinct.len(), ids.len(), "every server its own number, clashes included");
+        let mut reversed = ids.clone();
+        reversed.reverse();
+        assert_eq!(numbers(&reversed), got, "subscription order does not matter");
+        let pair = numbers(&["fi-2", "de-2"]);
+        assert_ne!(pair["fi-2"], pair["de-2"]);
+        assert_eq!(pair["fi-2"], (fnv("fi-2") % 10_000) as u16, "same number every launch");
     }
 
     #[test]
