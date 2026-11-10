@@ -159,19 +159,17 @@ impl Hitori {
                     row("Protocol", Some("TLS gets through the most filters."), hint_room(toggle_w), group, &t, window),
                     row(
                         "System-wide",
-                        Some(if !crate::xray::SYSTEM_WIDE {
-                            "Not on this system yet. Only apps set to use the proxy: SOCKS5 127.0.0.1:10808, HTTP 10809."
-                        } else if self.s.system_wide {
+                        Some(if !self.s.system_wide {
+                            "Only apps set to use the proxy: SOCKS5 127.0.0.1:10808, HTTP 10809."
+                        } else if crate::os::TUN {
                             "Every app goes through Hitori. Asks for your password to connect."
                         } else {
-                            "Only apps set to use the proxy: SOCKS5 127.0.0.1:10808, HTTP 10809."
+                            "Sets the system proxy: browsers and most apps go through Hitori."
                         }),
                         hint_room(32.),
-                        switch("system-wide", self.s.system_wide && crate::xray::SYSTEM_WIDE, &t).on_click(cx.listener(|this, _, _, cx| {
-                            if crate::xray::SYSTEM_WIDE {
-                                this.s.system_wide = !this.s.system_wide;
-                                cx.notify();
-                            }
+                        switch("system-wide", self.s.system_wide, &t).on_click(cx.listener(|this, _, _, cx| {
+                            this.s.system_wide = !this.s.system_wide;
+                            cx.notify();
                         })),
                         &t,
                         window,
@@ -189,7 +187,13 @@ impl Hitori {
                     ),
                     row(
                         "Kill switch",
-                        Some(if self.s.system_wide && crate::xray::SYSTEM_WIDE { "Block all traffic while the tunnel is down." } else { "Needs system-wide mode." }),
+                        Some(if !crate::os::TUN {
+                            "Only on Linux for now."
+                        } else if self.s.system_wide {
+                            "Block all traffic while the tunnel is down."
+                        } else {
+                            "Needs system-wide mode."
+                        }),
                         hint_room(32.),
                         switch("kill-switch", self.s.kill_switch, &t).on_click(cx.listener(|this, _, _, cx| {
                             this.s.kill_switch = !this.s.kill_switch;

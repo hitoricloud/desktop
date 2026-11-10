@@ -246,6 +246,7 @@ mod macos {
 }
 
 #[cfg(target_os = "windows")]
+#[allow(dead_code)]
 mod windows {
     use std::{
         fs,
@@ -255,9 +256,7 @@ mod windows {
     };
 
     pub(super) fn build() {
-        // Compile HLSL shaders
-        #[cfg(not(debug_assertions))]
-        compile_shaders();
+        // Hitori: shaders are compiled at runtime from embedded source (directx_renderer.rs), no fxc.exe needed.
 
         // Embed the Windows manifest and resource file
         #[cfg(feature = "windows-manifest")]

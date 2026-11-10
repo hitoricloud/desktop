@@ -84,14 +84,17 @@ jobs:
       - name: Version
         shell: bash
         run: echo "VERSION=$(scripts/version.sh)" >> "$GITHUB_ENV"
-      - name: Shader compiler
+      # Shaders are compiled when the app starts (vendor/gpui directx_renderer.rs), so no fxc.exe here.
+      - run: cargo build --release --locked
+      - name: Smoke test
+        timeout-minutes: 2
         shell: pwsh
         run: |
-          # GPUI compiles its HLSL shaders with the Windows SDK's fxc.exe in release builds.
-          $fxc = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\fxc.exe" | Sort-Object FullName -Descending | Select-Object -First 1
-          if (-not $fxc) { throw "fxc.exe not found: the Windows SDK is missing" }
-          "GPUI_FXC_PATH=$($fxc.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-      - run: cargo build --release --locked
+          # The release build is a GUI app without a console: wait for it and check the exit code.
+          Copy-Item bin\xray-windows-amd64.exe target\release\xray.exe
+          $p = Start-Process target\release\hitori.exe -ArgumentList "--smoke" -PassThru -Wait -RedirectStandardError smoke.err
+          Get-Content smoke.err -ErrorAction SilentlyContinue
+          if ($p.ExitCode -ne 0) { throw "hitori --smoke exited with $($p.ExitCode)" }
       - run: ./scripts/package-windows.ps1
         shell: pwsh
       - uses: actions/upload-artifact@v7
@@ -120,6 +123,12 @@ jobs:
         run: echo "VERSION=$(scripts/version.sh)" >> "$GITHUB_ENV"
       - run: cargo build --release --locked --target aarch64-apple-darwin
       - run: cargo build --release --locked --target x86_64-apple-darwin
+      - name: Smoke test
+        timeout-minutes: 2
+        run: |
+          cp bin/xray-darwin-arm64 target/aarch64-apple-darwin/release/xray
+          chmod +x target/aarch64-apple-darwin/release/xray
+          target/aarch64-apple-darwin/release/hitori --smoke
       - run: scripts/package-macos.sh
       - uses: actions/upload-artifact@v7
         with:

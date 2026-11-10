@@ -199,7 +199,8 @@ const KNOWN: &[(&str, &str, &[&str], (u32, u32))] = &[
     ("discord", "Discord", &["Discord", "discord", "DiscordCanary", "vesktop"], (VIOLET, 0xc4b4ff)),
     ("sunshine", "Sunshine", &["sunshine"], (AMBER, 0xffd230)),
     ("qbittorrent", "qBittorrent", &["qbittorrent", "qbittorrent-nox"], (RED, 0xff6467)),
-    ("spotify", "Spotify", &["spotify"], (EMERALD, 0x5ee9b5)),
+    ("spotify", "Spotify", &["spotify", "Spotify"], (EMERALD, 0x5ee9b5)),
+    ("edge", "Microsoft Edge", &["msedge"], (SKY, 0x00bcff)),
 ];
 
 const BADGES: [(u32, u32); 7] = [(SKY, 0x00bcff), (CYAN, 0x53eafd), (INDIGO, 0xa3b3ff), (VIOLET, 0xc4b4ff), (AMBER, 0xffd230), (RED, 0xff6467), (EMERALD, 0x5ee9b5)];
