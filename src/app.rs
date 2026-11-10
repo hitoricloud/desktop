@@ -273,6 +273,11 @@ impl Hitori {
                 "ping" => self.test_pings(cx),
                 "sort" => self.sort_ping = true,
                 "open" => self.open_countries.push(data::intern(&value.to_uppercase())),
+                "load" => {
+                    if let Some((id, pct)) = value.split_once('=') {
+                        data::set_loads([(data::intern(id), pct.parse().unwrap_or(0))]);
+                    }
+                }
                 "tray" => self.variant = Variant::Tray,
                 "light" => self.set_dark(false, cx),
                 "small" => self.s.rules_big = false,

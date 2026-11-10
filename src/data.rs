@@ -107,6 +107,17 @@ pub fn ping(id: &str) -> Option<u32> {
     PINGS.read().unwrap().get(id).copied().flatten()
 }
 
+static LOADS: LazyLock<RwLock<HashMap<&'static str, u8>>> = LazyLock::new(Default::default);
+
+/// How busy the server is, 0–100 %, when the provider reports it.
+pub fn load(id: &str) -> Option<u8> {
+    LOADS.read().unwrap().get(id).copied()
+}
+
+pub fn set_loads(loads: impl IntoIterator<Item = (&'static str, u8)>) {
+    LOADS.write().unwrap().extend(loads.into_iter().map(|(id, l)| (id, l.min(100))));
+}
+
 /// The last latency test got no answer from this server.
 pub fn timed_out(id: &str) -> bool {
     PINGS.read().unwrap().get(id).is_some_and(Option::is_none)

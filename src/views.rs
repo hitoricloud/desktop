@@ -8,7 +8,7 @@ use crate::map::Padding;
 use crate::fx::{Fx, fx};
 use crate::theme::{Theme, color};
 use crate::ui::{
-    LG, MD, SM, Size, Tw, Variant, XL, avatar, button, button_icon, flag, icon, menu, menu_item, menu_label, menu_separator,
+    LG, MD, SM, Size, Tw, Variant, XL, avatar, button, button_icon, flag, icon, menu, menu_item, menu_label, menu_separator, meter,
     pulse, skeleton, spinner, tip,
 };
 
@@ -24,11 +24,11 @@ pub fn tone(conn: Conn, t: &Theme) -> Hsla {
     }
 }
 
-/// Latency test result colour: green when quick, amber when usable, red when slow.
-pub fn latency_tone(ms: u32) -> Hsla {
-    color(match ms {
-        0..200 => EMERALD,
-        200..500 => AMBER,
+/// Server load colour: green while there is room, amber when busy, red when nearly full.
+pub fn load_tone(pct: u8) -> Hsla {
+    color(match pct {
+        0..60 => EMERALD,
+        60..85 => AMBER,
         _ => crate::theme::RED,
     })
 }
@@ -1259,60 +1259,77 @@ impl Hitori {
             )
     }
 
-    /// Best last-test latency of these servers, coloured; a spinner while any of them is still being measured.
+    /// Best last-test latency of these servers in quiet text; a spinner while any of them is still being measured.
     fn latency_el(&self, key: &str, ids: &[&'static str], t: &Theme) -> AnyElement {
         if ids.iter().any(|id| self.s.pending.contains(id)) {
             return spinner(SharedString::from(format!("ping-{key}")), 12., t.muted_fg).into_any_element();
         }
-        let (text, c) = match ids.iter().filter_map(|id| data::ping(id)).min() {
-            Some(ms) => (format!("{ms} ms"), latency_tone(ms)),
-            None if ids.iter().any(|id| data::timed_out(id)) => ("timeout".into(), t.destructive),
-            None => ("—".into(), t.muted_fg),
+        let text = match ids.iter().filter_map(|id| data::ping(id)).min() {
+            Some(ms) => format!("{ms} ms"),
+            None if ids.iter().all(|id| data::timed_out(id)) => "offline".into(),
+            None => "—".into(),
         };
-        div().xs().medium().text_color(c).child(text).into_any_element()
+        div().w(px(52.)).flex().justify_end().xs().text_color(t.muted_fg).child(text).into_any_element()
+    }
+
+    /// Load ring and percentage, like Proton's, in a fixed column; empty when unknown (the provider does not report it,
+    /// or the server did not answer).
+    fn load_el(&self, id: Option<&'static str>, t: &Theme) -> AnyElement {
+        let col = div().id(SharedString::from(format!("load-{}", id.unwrap_or("")))).w(px(44.)).flex_none().flex().items_center().justify_end().gap(px(4.));
+        let Some(pct) = id.and_then(data::load) else { return col.into_any_element() };
+        col.tooltip(tip(format!("Server load {pct}%"), t))
+            .child(meter(pct as f32 / 100., 14., 2., load_tone(pct), t.muted_fg.opacity(0.25)))
+            .child(div().xs().text_color(t.muted_fg).child(format!("{pct}%")))
+            .into_any_element()
     }
 
     /// Row background: blue for the live exit, grey for the chosen one.
     fn row_fx(&self, id: SharedString, current: bool, t: &Theme) -> Fx {
         let live = current && self.s.conn == Conn::On;
         let (rest, hover) = if live { (t.primary.opacity(0.1), t.primary.opacity(0.15)) } else { (if current { t.accent } else { gpui::transparent_black() }, t.accent) };
-        fx(id, rest, Some(hover)).flex_none().flex().items_center().gap(px(12.)).px(px(8.)).rounded(px(MD)).cursor_pointer()
+        fx(id, rest, Some(hover)).flex_none().flex().items_center().gap(px(8.)).px(px(8.)).rounded(px(MD)).cursor_pointer()
     }
 
-    /// Flag, place, and the last test's latency (a spinner while it runs); the current exit is highlighted. Under an
-    /// opened country only the server's own name, indented past the flag.
+    /// Flag, place, latency and load; the current exit is highlighted, unreachable servers are dimmed. Under an opened
+    /// country only the server's own name, indented past the flag. The last column keeps the countries' chevrons.
     fn server_row(&self, s: &'static data::Server, nested: bool, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme(cx);
         let id = s.id;
         let current = id == self.s.server_id;
         let live = current && self.s.conn == Conn::On;
-        let trailing = if current && self.s.conn == Conn::Connecting {
-            spinner(SharedString::from(format!("srv-conn-{id}")), 16., t.muted_fg).into_any_element()
+        let quiet = !current && data::timed_out(id) && !self.s.pending.contains(&id);
+        let latency = if current && self.s.conn == Conn::Connecting {
+            spinner(SharedString::from(format!("srv-conn-{id}")), 14., t.muted_fg).into_any_element()
         } else {
             self.latency_el(id, &[id], &t)
         };
         let name = if live { t.primary } else { t.foreground };
+        let label = if nested {
+            div().flex_1().min_w_0().truncate().sm().text_color(name).child(s.city)
+        } else {
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .child(div().truncate().text_px(14., 20.).medium().text_color(name).child(s.country))
+                .child(div().truncate().xs().text_color(t.muted_fg).child(s.city))
+        };
         self.row_fx(SharedString::from(format!("srv-{id}")), current, &t)
-            .when(nested, |d| d.h(px(40.)).pl(px(44.)).child(div().flex_1().min_w_0().truncate().sm().text_color(name).child(s.city)))
-            .when(!nested, |d| {
-                d.h(px(48.)).child(flag(s.code, true, window)).child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .flex_1()
-                        .min_w_0()
-                        .child(div().truncate().text_px(14., 20.).medium().text_color(name).child(s.country))
-                        .child(div().truncate().xs().text_color(t.muted_fg).child(s.city)),
-                )
-            })
+            .h(px(if nested { 40. } else { 48. }))
+            .when(nested, |d| d.pl(px(44.)))
+            .when(!nested, |d| d.child(div().pr(px(4.)).when(quiet, |d| d.opacity(0.5)).child(flag(s.code, true, window))))
+            .child(label.when(quiet, |d| d.opacity(0.6)))
             .when(self.s.entry_id == Some(id), |d| d.child(div().xs().text_color(t.muted_fg).child("via")))
             .when(live, |d| d.child(div().size(px(6.)).rounded_full().bg(t.primary)))
-            .child(trailing)
+            .child(latency)
+            .child(self.load_el((!quiet).then_some(id), &t))
+            .child(div().w(px(16.)).flex_none())
             .on_click(cx.listener(move |this, _, window, cx| this.go(id, window, cx)))
     }
 
-    /// A country with several servers: its best latency, and its servers below while open. Closed over the current
-    /// exit, it stands in for it.
+    /// A country with several servers: its best latency and a chevron; its servers below while open. Closed over the
+    /// current exit, it stands in for it.
     fn country_row(&self, list: &[&'static data::Server], window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme(cx);
         let code = list[0].code;
@@ -1320,8 +1337,8 @@ impl Hitori {
         let current = list.iter().find(|s| s.id == self.s.server_id).filter(|_| !open);
         let live = current.is_some() && self.s.conn == Conn::On;
         let ids: Vec<&'static str> = list.iter().map(|s| s.id).collect();
-        let trailing = if current.is_some() && self.s.conn == Conn::Connecting {
-            spinner(SharedString::from(format!("country-conn-{code}")), 16., t.muted_fg).into_any_element()
+        let latency = if current.is_some() && self.s.conn == Conn::Connecting {
+            spinner(SharedString::from(format!("country-conn-{code}")), 14., t.muted_fg).into_any_element()
         } else {
             self.latency_el(code, &ids, &t)
         };
@@ -1331,28 +1348,20 @@ impl Hitori {
         };
         self.row_fx(SharedString::from(format!("country-{code}")), current.is_some(), &t)
             .h(px(48.))
-            .child(flag(code, true, window))
+            .child(div().pr(px(4.)).child(flag(code, true, window)))
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .flex_1()
                     .min_w_0()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(4.))
-                            .text_px(14., 20.)
-                            .medium()
-                            .text_color(if live { t.primary } else { t.foreground })
-                            .child(div().truncate().child(list[0].country))
-                            .child(icon(if open { "chevron-down" } else { "chevron-right" }, 14., t.muted_fg)),
-                    )
+                    .child(div().truncate().text_px(14., 20.).medium().text_color(if live { t.primary } else { t.foreground }).child(list[0].country))
                     .child(div().truncate().xs().text_color(t.muted_fg).child(sub)),
             )
             .when(live, |d| d.child(div().size(px(6.)).rounded_full().bg(t.primary)))
-            .child(trailing)
+            .child(latency)
+            .child(self.load_el(None, &t))
+            .child(icon(if open { "chevron-up" } else { "chevron-down" }, 16., t.muted_fg))
             .on_click(cx.listener(move |this, _, _, cx| {
                 match this.open_countries.iter().position(|c| *c == code) {
                     Some(i) => _ = this.open_countries.remove(i),
