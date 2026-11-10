@@ -204,12 +204,38 @@ impl Hitori {
                     ),
                 ],
             ))
+            .child(section("Location".into(), &t, vec![self.region_row(window, cx)]))
             .child(section(
                 "Appearance".into(),
                 &t,
                 vec![row("Dark theme", None, hint_room(32.), switch("dark", dark, &t).on_click(cx.listener(move |this, _, _, cx| this.set_dark(!dark, cx))), &t, window)],
             ))
             .into_any_element()
+    }
+
+    /// Detected country, how much of it is routed through the VPN, and a recheck button.
+    fn region_row(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let t = self.theme(cx);
+        let r = &self.s.region;
+        let busy = r.status == crate::region::Status::Computing;
+        let hint = match (&r.country, &r.status) {
+            (Some(_), crate::region::Status::Failed(e)) if r.domains + r.subnets > 0 => format!("{} · {e}. The saved lists still apply.", r.place()),
+            (Some(_), crate::region::Status::Failed(e)) => format!("{} · {e}.", r.place()),
+            (Some(_), _) => format!("{} · {}", r.place(), r.line()),
+            (None, _) => r.line(),
+        };
+        let label = if busy { "Checking…" } else { "Recheck" };
+        let w = 2. + 24. + 16. + 8. + crate::ui::text_width(label, 14., gpui::FontWeight::MEDIUM, window);
+        let button = button("region-recheck", Variant::Outline, Size::Sm, true, &t)
+            .when(busy, |b| b.opacity(0.5))
+            .child(if busy { crate::ui::spinner("region-spin", 16., t.foreground).into_any_element() } else { icon("refresh-cw", 16., t.foreground).into_any_element() })
+            .child(label)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if !busy {
+                    this.recheck_region(cx);
+                }
+            }));
+        row("Detected location", Some(&hint), hint_room(w), button, &t, window)
     }
 
     fn sign_in_body(&self, cx: &mut Context<Self>) -> AnyElement {

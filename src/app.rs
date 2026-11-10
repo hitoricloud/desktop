@@ -345,6 +345,11 @@ impl Hitori {
         self.with_vpn(cx, |v, cx| v.sign_in(link, cx));
     }
 
+    /// Detect the location again and reload its blocked lists; `self.s.region` has the result (Settings, onboarding).
+    pub fn recheck_region(&mut self, cx: &mut Context<Self>) {
+        self.with_vpn(cx, |v, cx| v.recheck_region(cx));
+    }
+
     pub fn sign_out(&mut self, cx: &mut Context<Self>) {
         self.menu = None;
         self.link.update(cx, |input, _| input.reset());
