@@ -1,15 +1,14 @@
 //! Main window (Cockpit) and tray.
-use std::time::Instant;
-
 use gpui::{AnyElement, Context, Corner, Div, Focusable, Hsla, MouseButton, SharedString, Window, anchored, deferred, div, prelude::*, px};
 
 use crate::app::{Conn, Hitori, Menu, Mode, Page, Panel, Place};
 use crate::data::{self, AppInfo, AppRule, RuleMode, Scope, Suggestion, ago, app, fixed1, js_num, server};
+use crate::theme::{AMBER, EMERALD};
 use crate::map::Padding;
 use crate::fx::{Fx, fx};
 use crate::theme::{Theme, color};
 use crate::ui::{
-    LG, MD, SM, Size, Tw, Variant, XL, avatar, features, button, button_icon, flag, icon, menu, menu_item, menu_label, menu_separator,
+    LG, MD, SM, Size, Tw, Variant, XL, avatar, button, button_icon, flag, icon, menu, menu_item, menu_label, menu_separator, meter,
     pulse, skeleton, spinner, tip,
 };
 
@@ -28,8 +27,13 @@ pub fn tone(conn: Conn, t: &Theme) -> Hsla {
     }
 }
 
-pub fn uptime(secs: u64) -> String {
-    format!("{:02}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
+/// Server load colour: green while there is room, amber when busy, red when nearly full.
+pub fn load_tone(pct: u8) -> Hsla {
+    color(match pct {
+        0..60 => EMERALD,
+        60..85 => AMBER,
+        _ => crate::theme::RED,
+    })
 }
 
 pub fn route_label(r: &AppRule) -> String {
@@ -261,7 +265,8 @@ impl Hitori {
             .flex()
             .flex_col()
             .child(div().flex_none().h(px(56.)).flex().flex_col().justify_center().px(px(16.)).py(px(8.)).child(self.brand(cx)))
-            .child(div().flex_1().min_h_0().flex().flex_col().child(self.routing_panel(true, window, cx)))
+            // The Rules page shows every rule itself.
+            .child(div().flex_1().min_h_0().flex().flex_col().when(self.page == Page::Map, |d| d.child(self.routing_panel(true, window, cx))))
             .child(div().flex_none().p(px(8.)).flex().flex_col().child(self.nav_user(window, cx)))
     }
 
@@ -379,7 +384,8 @@ impl Hitori {
 
     // ---------- routing ----------
 
-    /// Default route, Review for suggestions not on screen, every active rule, Manage rules.
+    /// Default route, Review for suggestions not on screen, every active rule; the tray also gets Manage rules,
+    /// since it has no Rules page.
     pub fn routing_panel(&self, toasts: bool, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme(cx);
         let wide = f32::from(window.viewport_size().width) >= 1024.;
@@ -455,7 +461,7 @@ impl Hitori {
                     .pb(px(8.))
                     .child(self.active_rules(big, true, Place::Side, window, cx)),
             )
-            .child(
+            .when(!toasts, |d| d.child(
                 div().flex_none().p(px(8.)).child(
                     fx("manage", gpui::transparent_black(), Some(hover_bg))
                         .fg(muted, fg)
@@ -472,7 +478,7 @@ impl Hitori {
                         .child("Manage rules")
                         .child(icon("chevron-right", 16., muted)),
                 ),
-            )
+            ))
     }
 
     /// Map or every rule beside the sidebar.
@@ -942,23 +948,31 @@ impl Hitori {
             .bg(t.card)
             .flex()
             .flex_col()
-            .child(div().flex_none().h(px(56.)).flex().items_center().px(px(16.)).child(self.status(cx)))
             .child(
                 div()
-                    .id("inspector")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
+                    .flex_none()
+                    .h(px(56.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .pl(px(16.))
+                    .pr(px(12.))
+                    .child(div().flex_1().min_w_0().flex().flex_col().child(self.status(cx)))
+                    .child(self.kill_toggle(cx)),
+            )
+            .child(
+                div()
+                    .flex_none()
                     .flex()
                     .flex_col()
                     .gap(px(16.))
                     .px(px(16.))
-                    .pb(px(16.))
+                    .pb(px(12.))
                     .child(self.route_field(false, window, cx))
                     .child(self.power_button(cx))
-                    .child(self.stats(cx)),
+                    .child(self.metrics(cx)),
             )
-            .child(self.shortcuts(cx))
+            .child(self.server_list(window, cx))
     }
 
     pub fn status(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1098,73 +1112,227 @@ impl Hitori {
             .on_click(cx.listener(|this, _, _, cx| this.toggle(cx)))
     }
 
-    fn stats(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Latency, download and upload in one row. Disconnected, the latency is the last test's to the chosen server.
+    fn metrics(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme(cx);
-        let secs = self.s.connected_at.map(|c| Instant::now().saturating_duration_since(c).as_secs_f64()).unwrap_or(0.);
+        let on = self.s.conn == Conn::On;
         let st = &self.s.stats;
-        let (down, up) = (st.down, st.up);
-        let used = server(self.s.server_id).variant(self.s.protocol).map_or(self.s.protocol, |(p, _)| p);
-        let rows = [
-            ("Protocol", used.label().to_owned()),
-            ("Latency", st.latency.map_or("—".into(), |ms| format!("{ms} ms"))),
-            ("Transferred", data::bytes(st.total)),
-            ("Session", uptime(secs as u64)),
-        ];
-        let speed = |name: &str, label: &str, v: f64| {
+        let latency = if on { st.latency } else { data::ping(self.s.server_id) };
+        let cell = |id: &'static str, name: &str, value: String, unit: &str, hint: &str| {
             div()
+                .id(id)
                 .flex_1()
+                .min_w_0()
+                .h(px(36.))
                 .flex()
-                .flex_col()
-                .gap(px(4.))
-                .child(div().flex().items_center().gap(px(4.)).xs().text_color(t.muted_fg).child(icon(name, 12., t.muted_fg)).child(label.to_owned()))
+                .items_center()
+                .justify_center()
+                .gap(px(6.))
+                .tooltip(tip(hint.to_owned(), &t))
+                .child(icon(name, 14., t.muted_fg))
                 .child(
-                    // items-baseline: the 14/20 unit's baseline sits 6.04px lower than the 20/28 value's (Google Sans ascent .966, descent .286).
-                    div().flex().items_start().gap(px(4.)).xl().semibold().tight().child(fixed1(v)).child({
-                        let mut unit = div().mt(px(6.)).sm().normal().text_color(t.muted_fg);
-                        // letter-spacing inherits as a length: -0.5px at 14px is -0.036em.
-                        unit.text_style().get_or_insert_with(Default::default).font_features = Some(features(-36));
-                        unit.child("Mbit/s")
-                    }),
+                    div()
+                        .flex()
+                        .items_baseline()
+                        .gap(px(3.))
+                        .whitespace_nowrap()
+                        .when(value == "—", |d| d.text_color(t.muted_fg))
+                        .child(div().sm().medium().child(value.clone()))
+                        .when(value != "—", |d| d.child(div().xs().text_color(t.muted_fg).child(unit.to_owned()))),
                 )
         };
+        let speed = |v: f64| if on { fixed1(v) } else { "—".into() };
         div()
             .flex()
-            .flex_col()
-            .gap(px(16.))
-            .pt(px(16.))
-            .child(div().flex().gap(px(12.)).child(speed("arrow-down", "Download", down)).child(speed("arrow-up", "Upload", up)))
-            .child(div().flex().flex_col().text_px(14., 24.).children(rows.into_iter().map(|(k, v)| {
-                div().flex().gap(px(12.)).child(div().flex_1().text_color(t.muted_fg).child(k)).child(div().flex_1().flex().justify_end().child(v))
-            })))
+            .px(px(4.))
+            .rounded(px(LG))
+            .bg(t.muted.opacity(0.5))
+            .child(cell(
+                "m-latency",
+                "activity",
+                latency.map_or("—".into(), |ms| ms.to_string()),
+                "ms",
+                if on { "Latency through the tunnel" } else { "Latency to this server, from the last test" },
+            ))
+            .child(cell("m-down", "arrow-down", speed(st.down), "Mbit/s", "Download"))
+            .child(cell("m-up", "arrow-up", speed(st.up), "Mbit/s", "Upload"))
     }
 
-    fn shortcuts(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Kill switch as an icon toggle, blue while on; the full switch and its explanation live in Settings.
+    fn kill_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme(cx);
-        let item = |id: &'static str, name: &str, label: &str, value: String, on: bool| {
-            button(id, Variant::Ghost, Size::Default, true, &t)
-                .flex_1()
-                .h_auto()
-                .flex_col()
-                .gap(px(4.))
-                .py(px(8.))
-                .child(icon(name, 20., if on { t.primary } else { t.muted_fg }))
-                .child(div().xs().medium().child(label.to_owned()))
-                .child(div().xs().normal().text_color(t.muted_fg).child(value))
+        let on = self.s.kill_switch;
+        let hint = match (on, crate::os::TUN, self.s.system_wide) {
+            (_, false, _) => "Kill switch · only on Linux for now",
+            (true, _, true) => "Kill switch on · traffic is blocked while the tunnel is down",
+            (true, _, false) => "Kill switch on · takes effect in system-wide mode",
+            (false, ..) => "Kill switch off · block traffic while the tunnel is down",
         };
-        div()
-            .flex_none()
-            .flex()
-            .gap(px(4.))
-            .p(px(8.))
-            .child(item("kill", "shield-check", "Kill switch", if self.s.kill_switch { "On" } else { "Off" }.into(), self.s.kill_switch).on_click(cx.listener(|this, _, _, cx| {
+        button("kill", Variant::Ghost, Size::IconSm, true, &t)
+            .when(on, |b| b.rest(t.primary.opacity(0.1)))
+            .tooltip(tip(hint, &t))
+            .child(icon("shield-x", 16., if on { t.primary } else { t.muted_fg }))
+            .on_click(cx.listener(|this, _, _, cx| {
                 this.s.kill_switch = !this.s.kill_switch;
                 cx.notify();
-            })))
-            .child(item("auto", "repeat", "Auto-connect", if self.s.auto_connect { "On" } else { "Off" }.into(), self.s.auto_connect).on_click(cx.listener(|this, _, _, cx| {
-                this.s.auto_connect = !this.s.auto_connect;
+            }))
+    }
+
+    /// Every server; clicking one connects there. The header runs the latency test and sorts by its results.
+    fn server_list(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = self.theme(cx);
+        let mut servers = data::servers();
+        if self.sort_ping {
+            data::by_latency(&mut servers);
+        }
+        let testing = self.s.testing;
+        let tested = self.s.tested_at.map(|at| match ago((at.elapsed().as_secs() / 60) as u32) {
+            now if now == "now" => "tested just now".to_owned(),
+            a => format!("tested {a} ago"),
+        });
+        let sort = button("sort-ping", Variant::Ghost, Size::IconXs, true, &t)
+            .when(self.sort_ping, |b| b.rest(t.accent))
+            .tooltip(tip(if self.sort_ping { "Sorted by latency" } else { "Sort by latency" }, &t))
+            .child(icon("arrow-down-narrow-wide", 12., if self.sort_ping { t.foreground } else { t.muted_fg }))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.sort_ping = !this.sort_ping;
                 cx.notify();
-            })))
-            .child(item("proto", "zap", "Protocol", self.s.protocol.label().into(), true).on_click(cx.listener(|this, _, _, cx| this.open_panel(Panel::Settings, cx))))
+            }));
+        let test = button("ping-test", Variant::Ghost, Size::Xs, true, &t)
+            .when(testing || servers.is_empty(), |b| b.opacity(0.5))
+            .tooltip(tip(if testing { "Measuring every server…" } else { "Measure every server through its own protocol" }, &t))
+            .child(if testing { spinner("ping-spin", 12., t.foreground).into_any_element() } else { icon("gauge", 12., t.foreground).into_any_element() })
+            .child("Test")
+            .on_click(cx.listener(|this, _, _, cx| this.test_pings(cx)));
+        let n = servers.len();
+        // Servers under their country, in latency order when sorted (so countries by their best server). Servers that did
+        // not answer the last test are left out, except the one in use.
+        let mut groups: Vec<Vec<&'static data::Server>> = vec![];
+        for s in servers.into_iter().filter(|s| s.id == self.s.server_id || !data::timed_out(s.id) || self.s.pending.contains(&s.id)) {
+            match groups.iter_mut().find(|g| g[0].code == s.code) {
+                Some(g) => g.push(s),
+                None => groups.push(vec![s]),
+            }
+        }
+        let mut rows: Vec<AnyElement> = vec![];
+        for g in &groups {
+            rows.push(self.country_row(g, window, cx).into_any_element());
+            if self.open_countries.contains(&g[0].code) {
+                rows.extend(g.iter().map(|s| self.server_row(s, cx).into_any_element()));
+            }
+        }
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(32.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .pl(px(16.))
+                    .pr(px(12.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .gap(px(6.))
+                            .xs()
+                            .text_color(t.muted_fg)
+                            .child(div().medium().child("Servers"))
+                            .children(tested.map(|s| div().truncate().child(s))),
+                    )
+                    .child(sort)
+                    .child(test),
+            )
+            .child(
+                div()
+                    .id("servers")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px(px(8.))
+                    .pb(px(8.))
+                    .when(n == 0, |d| d.child(div().px(px(8.)).py(px(8.)).sm().text_color(t.muted_fg).child("Sign in to see your servers.")))
+                    .children(rows),
+            )
+    }
+
+    /// Load ring, like Proton's, in the flag column; empty when the provider does not report load.
+    fn load_el(&self, id: &'static str, t: &Theme) -> AnyElement {
+        let col = div().id(SharedString::from(format!("load-{id}"))).w(px(24.)).flex_none().flex().items_center().justify_center();
+        let Some(pct) = data::load(id) else { return col.into_any_element() };
+        col.tooltip(tip(format!("Server load {pct}%"), t)).child(meter(pct as f32 / 100., 16., 2., load_tone(pct), t.muted_fg.opacity(0.25))).into_any_element()
+    }
+
+    /// Row background: blue for the live exit, grey for the chosen one.
+    fn row_fx(&self, id: SharedString, current: bool, t: &Theme) -> Fx {
+        let live = current && self.s.conn == Conn::On;
+        let (rest, hover) = if live { (t.primary.opacity(0.1), t.primary.opacity(0.15)) } else { (if current { t.accent } else { gpui::transparent_black() }, t.accent) };
+        fx(id, rest, Some(hover)).flex_none().flex().items_center().gap(px(12.)).px(px(8.)).rounded(px(MD)).cursor_pointer()
+    }
+
+    /// One server under its country: load on the left, its id, and the last test's latency on the right (a spinner
+    /// while it runs). The current exit is highlighted.
+    fn server_row(&self, s: &'static data::Server, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = self.theme(cx);
+        let id = s.id;
+        let current = id == self.s.server_id;
+        let live = current && self.s.conn == Conn::On;
+        let latency = if (current && self.s.conn == Conn::Connecting) || self.s.pending.contains(&id) {
+            spinner(SharedString::from(format!("srv-spin-{id}")), 14., t.muted_fg).into_any_element()
+        } else {
+            let text = match data::ping(id) {
+                Some(ms) => format!("{ms} ms"),
+                None if data::timed_out(id) => "offline".into(),
+                None => "—".into(),
+            };
+            div().xs().text_color(t.muted_fg).child(text).into_any_element()
+        };
+        self.row_fx(SharedString::from(format!("srv-{id}")), current, &t)
+            .h(px(40.))
+            .child(self.load_el(id, &t))
+            .child(div().flex_1().min_w_0().truncate().sm().text_color(if live { t.primary } else { t.foreground }).child(s.tag()))
+            .when(self.s.entry_id == Some(id), |d| d.child(div().xs().text_color(t.muted_fg).child("via")))
+            .when(live, |d| d.child(div().size(px(6.)).rounded_full().bg(t.primary)))
+            .child(latency)
+            .on_click(cx.listener(move |this, _, window, cx| this.go(id, window, cx)))
+    }
+
+    /// A country: flag, name and a chevron; its servers below while open. Closed over the current exit, it stands in
+    /// for it and names it.
+    fn country_row(&self, list: &[&'static data::Server], window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = self.theme(cx);
+        let code = list[0].code;
+        let open = self.open_countries.contains(&code);
+        let current = list.iter().find(|s| s.id == self.s.server_id).filter(|_| !open);
+        let live = current.is_some() && self.s.conn == Conn::On;
+        self.row_fx(SharedString::from(format!("country-{code}")), current.is_some(), &t)
+            .h(px(48.))
+            .child(flag(code, true, window))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .child(div().truncate().text_px(14., 20.).medium().text_color(if live { t.primary } else { t.foreground }).child(list[0].country))
+                    .children(current.map(|s| div().truncate().xs().text_color(t.muted_fg).child(s.tag()))),
+            )
+            .when(live, |d| d.child(div().size(px(6.)).rounded_full().bg(t.primary)))
+            .when(current.is_some() && self.s.conn == Conn::Connecting, |d| d.child(spinner(SharedString::from(format!("country-spin-{code}")), 14., t.muted_fg)))
+            .child(icon(if open { "chevron-up" } else { "chevron-down" }, 16., t.muted_fg))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                match this.open_countries.iter().position(|c| *c == code) {
+                    Some(i) => _ = this.open_countries.remove(i),
+                    None => this.open_countries.push(code),
+                }
+                cx.notify();
+            }))
     }
 
     pub fn menu_catcher(&self, cx: &mut Context<Self>) -> AnyElement {

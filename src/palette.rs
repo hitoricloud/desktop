@@ -24,6 +24,7 @@ pub enum Act {
     Proto(Option<Protocol>),
     Kill,
     Remove,
+    Test,
 }
 
 #[derive(Clone)]
@@ -89,6 +90,10 @@ impl Hitori {
                     g.push(("Recents".to_owned(), rows.collect()));
                 }
                 g.push((format!("All countries ({})", servers.len()), servers.into_iter().map(|s| country("", s, None, false, act(s.id))).collect()));
+                if mode == Mode::Exit {
+                    let hint = if self.s.testing { "Running…" } else { "Every server" };
+                    g.push(("Actions".to_owned(), vec![choice("test latency ping speed", "gauge", "Test latency", Some(hint.into()), false, self.s.testing, Act::Test)]));
+                }
                 g
             }
             Mode::Rule(_) | Mode::Site(_) => self.rule_groups(mode),
@@ -217,6 +222,7 @@ impl Hitori {
         match (act, rule_app) {
             (Act::Go(id), _) => self.go(id, window, cx),
             (Act::Via(id), _) => self.via(Some(id), window, cx),
+            (Act::Test, _) => self.test_pings(cx),
             (Act::Remove, Some(Mode::Site(s))) => {
                 self.site(s, None, cx);
                 self.close_palette(window, cx);
