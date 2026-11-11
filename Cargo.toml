@@ -25,6 +25,8 @@ ureq = { version = "2", features = ["json"] }
 # Same rustls 0.23 (ring) and webpki-roots 0.26 as ureq.
 tungstenite = { version = "0.29", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
 unicode-segmentation = "1"
+# The user's preferred languages on every platform; already used by cosmic-text on Linux, no dependencies.
+sys-locale = "0.3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -46,6 +48,8 @@ windows = { version = "0.61", features = [
 
 [build-dependencies]
 embed-resource = "3"
+# Locale files (embed-resource already builds it).
+toml = "1"
 
 [profile.dev]
 opt-level = 1

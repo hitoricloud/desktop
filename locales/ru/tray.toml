@@ -1,0 +1,8 @@
+protected = "Защищено · {country}"
+connecting = "Подключение: {country}…"
+unprotected = "Не защищено"
+connect = "Подключиться"
+disconnect = "Отключиться"
+location = "Сервер"
+open = "Открыть Hitori"
+quit = "Выход"

@@ -1,0 +1,73 @@
+[account]
+title = "Account"
+signed_in_as = "Signed in as {name}"
+loading = "Loading your subscription…"
+days = { one = "{n} day", other = "{n} days" }
+until = "until {date}"
+used_of = "{used} of {limit} used"
+used_unlimited = "{used} used · no traffic limit"
+telegram_account = "Telegram account"
+plan = "Plan"
+extend = "Extend subscription"
+desktop = "{os} desktop"
+this_device = "This device"
+devices = "Devices"
+session = "Session"
+sign_out = "Sign out"
+sign_out_telegram = "Signs this computer out of your Telegram account; the tunnel stops."
+sign_out_link = "Forgets the subscription link on this computer; the tunnel stops."
+
+[signin]
+title = "Sign in"
+desc = "Paste the subscription link from the Hitori bot."
+button = "Sign in"
+busy = "Signing in…"
+note = "The link stays on this computer; it is the only key to your subscription."
+
+[routes]
+title = "Routing rules"
+desc = "Apps and sites without a rule follow the default route: {route}."
+suggestions = "Suggestions · {count}"
+apps = "Apps · {count}"
+sites = "Sites · {count}"
+everything_else = "Everything else: {route} · {hint}."
+
+[settings]
+title = "Settings"
+location = "Location"
+theme = "Theme"
+dark = "Dark theme"
+dark_hint = "Use the dark color scheme."
+language = "Language"
+language_row = "Interface language"
+language_hint = "System follows your computer's language."
+language_system = "System"
+
+[connection]
+title = "Connection"
+protocol = "Protocol"
+protocol_hint = "TLS gets through the most filters."
+system_wide = "System-wide"
+system_wide_off = "Only apps set to use the proxy: SOCKS5 127.0.0.1:10808, HTTP 10809."
+system_wide_proxy = "Browsers and most apps, or every app in TUN mode, go through Hitori."
+system_wide_tun = "Every app goes through Hitori. Asks for your password to connect."
+startup = "Connect on startup"
+startup_hint = "Connect as soon as the app starts."
+kill_switch = "Kill switch"
+kill_switch_needs_system_wide = "Needs system-wide mode."
+kill_switch_needs_tun = "Needs TUN mode."
+kill_switch_hint = "Block all traffic while the tunnel is down."
+
+[region]
+detected = "Detected location"
+checking = "Checking…"
+recheck = "Recheck"
+failed = "{place} · {error}."
+failed_saved = "{place} · {error}. The saved lists still apply."
+
+[mode]
+title = "Mode"
+system_proxy = "System proxy"
+proxy_hint = "Browsers and most apps, no administrator rights."
+tun_hint = "Every app and DNS. Asks for your password."
+tun_hint_windows = "Every app and DNS. Asks for administrator rights."

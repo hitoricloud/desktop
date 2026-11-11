@@ -66,6 +66,8 @@ pub struct Shared {
     pub dismissed: Vec<String>,
     pub rules_big: bool,
     pub dark: bool,
+    /// Chosen UI language; `None` follows the system.
+    pub language: Option<crate::i18n::Lang>,
     pub signed_in: bool,
     /// Signed in with Telegram: name and avatar.
     pub user: Option<auth::User>,
@@ -132,6 +134,7 @@ impl Shared {
             system_wide: self.system_wide,
             tun: self.tun,
             dark: self.dark,
+            language: self.language.map_or("system", |l| l.code()).into(),
             rules_big: self.rules_big,
             apps: self.app_routes.iter().map(|(a, r)| Rule::from_app(a, r)).collect(),
             sites: self.sites.iter().map(|(t, r)| Rule::from_app(t, r)).collect(),
@@ -241,6 +244,7 @@ impl Vpn {
             dismissed: saved.dismissed.clone(),
             rules_big: saved.rules_big,
             dark: saved.dark,
+            language: crate::i18n::Lang::parse(&saved.language),
             signed_in: login.is_some() || session.is_some(),
             user: session.as_ref().map(|s| s.user.clone()),
             avatar: None,

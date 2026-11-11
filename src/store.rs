@@ -153,6 +153,8 @@ pub struct Settings {
     /// Windows and macOS: system-wide mode is a TUN (administrator rights once per connection), not the system proxy.
     pub tun: bool,
     pub dark: bool,
+    /// UI language: `system`, `en` or `ru`.
+    pub language: String,
     pub rules_big: bool,
     pub apps: Vec<Rule>,
     #[serde(deserialize_with = "sites")]
@@ -174,6 +176,7 @@ impl Default for Settings {
             system_wide: true,
             tun: false,
             dark: true,
+            language: "system".into(),
             rules_big: true,
             apps: vec![],
             sites: vec![],
