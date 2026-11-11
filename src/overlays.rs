@@ -392,7 +392,66 @@ impl Hitori {
         )]
     }
 
-    /// Local proxy: where it listens and on which ports.
+    /// DNS: the subscription's servers or a DoH/DoT server, through the tunnel or not.
+    fn dns_section(&self, cw: f32, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        use crate::xray::{DNS_PRESETS, DnsMode};
+        let t = self.theme(cx);
+        let dns = self.s.dns.clone();
+        let modes = [(DnsMode::Subscription, "Subscription"), (DnsMode::Https, "HTTPS"), (DnsMode::Tls, "TLS")];
+        let width = segmented_width(modes.iter().map(|(_, l)| *l), window);
+        let items = modes
+            .into_iter()
+            .map(|(m, label)| {
+                let pick = move |this: &mut Self, cx: &mut Context<Self>| this.set_dns(crate::xray::Dns { mode: m, ..this.s.dns.clone() }, cx);
+                (label.to_owned(), dns.mode == m, Box::new(pick) as Pick)
+            })
+            .collect();
+        let hint = match dns.mode {
+            DnsMode::Subscription => "The servers your subscription sets.",
+            DnsMode::Https => "Encrypted DNS over HTTPS.",
+            DnsMode::Tls => "Encrypted DNS over TLS.",
+        };
+        let mut rows = vec![row("Servers", Some(hint), page_room(cw, width), self.segmented("dns-mode", items, cx), &t, window)];
+        if dns.mode != DnsMode::Subscription {
+            let tls = dns.mode == DnsMode::Tls;
+            let typed = self.dns_input.read(cx).content.trim().to_owned();
+            let width = segmented_width(DNS_PRESETS.iter().map(|p| p.0), window);
+            let presets = DNS_PRESETS
+                .iter()
+                .map(|&(name, https, dot)| {
+                    let pick = move |this: &mut Self, cx: &mut Context<Self>| {
+                        let mut d = this.s.dns.clone();
+                        if tls { d.tls = dot.into() } else { d.https = https.into() }
+                        this.set_dns(d, cx);
+                    };
+                    (name.to_owned(), typed == if tls { dot } else { https }, Box::new(pick) as Pick)
+                })
+                .collect();
+            rows.push(row("Provider", Some("Or type another server below."), page_room(cw, width), self.segmented("dns-preset", presets, cx), &t, window));
+            let error = self.typed_dns(cx).err();
+            let hint = match (&error, tls) {
+                (Some(e), _) => format!("{e}."),
+                (None, false) => "With an IP address in the URL no lookup is needed first.".to_owned(),
+                (None, true) => "A host or host:port, port 853 if none is given.".to_owned(),
+            };
+            rows.push(row("Server", Some(&hint), page_room(cw, 260.), text_field("dns-server", &self.dns_input, 260., error.is_some(), &t, cx), &t, window));
+        }
+        let direct = dns.direct;
+        rows.push(row(
+            "Through the VPN",
+            Some(if direct { "Queries leave from this computer directly." } else { "Queries go through the tunnel, unseen by your network." }),
+            page_room(cw, 32.),
+            switch("dns-direct", !direct, &t).on_click(cx.listener(move |this, _, _, cx| {
+                this.s.dns.direct = !direct;
+                cx.notify();
+            })),
+            &t,
+            window,
+        ));
+        page_section("DNS", &t, rows)
+    }
+
+    /// Local proxy and DNS.
     fn network_sections(&self, cw: f32, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let t = self.theme(cx);
         let listen = self.s.proxy.listen.clone();
@@ -447,6 +506,7 @@ impl Hitori {
                     row("Ports", Some(&ports_hint), page_room(cw, ports_w), ports, &t, window),
                 ],
             ),
+            self.dns_section(cw, window, cx),
             div().px(px(4.)).sm().text_color(t.muted_fg).child("Changes apply on the next connection.").into_any_element(),
         ]
     }

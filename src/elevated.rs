@@ -139,12 +139,18 @@ fn serve(out: &Out, commands: Receiver<String>, peer: &sys::Peer) -> Result<(), 
             let config = config.as_ref().ok_or("no config")?;
             let n = match net.as_mut() {
                 Some(n) => n,
-                None => net.insert(sys::Net::up(peer, &xray, kill)?),
+                None => net.insert(sys::Net::up(peer, &xray, kill, resolver(config))?),
             };
             core = Some(start(n, &xray, config, out)?);
         }
     }
     Ok(())
+}
+
+/// The system resolver the app chose (`dns` of the TUN inbound).
+fn resolver(config: &Value) -> &str {
+    let tun = config["inbounds"].as_array().into_iter().flatten().find(|i| i["protocol"] == "tun");
+    tun.and_then(|i| i["settings"]["dns"][0].as_str()).unwrap_or(crate::xray::TUN_DNS)
 }
 
 /// Start the core and report `ready` once it serves inside the TUN (or let the main loop report it `down`).

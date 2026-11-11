@@ -262,6 +262,8 @@ pub struct Hitori {
     /// Local proxy ports in Settings › Network.
     pub socks_input: Entity<TextInput>,
     pub http_input: Entity<TextInput>,
+    /// The DoH URL or DoT server, whichever the DNS mode uses.
+    pub dns_input: Entity<TextInput>,
     pub page: Page,
     /// The inspector's server list is ordered by the last latency test.
     pub sort_ping: bool,
@@ -291,6 +293,11 @@ pub fn port(input: &Entity<TextInput>, cx: &App) -> Option<u16> {
     input.read(cx).content.trim().parse().ok().filter(|p| *p > 0)
 }
 
+/// The server the DNS field shows in this mode.
+pub fn dns_server(dns: &crate::xray::Dns) -> &str {
+    if dns.mode == crate::xray::DnsMode::Tls { &dns.tls } else { &dns.https }
+}
+
 impl Hitori {
     pub fn new(variant: Variant, vpn: Entity<Vpn>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let t = theme(cx);
@@ -298,16 +305,17 @@ impl Hitori {
         let link = cx.new(|cx| TextInput::new("https://…/sub/…", t.muted_fg, t.foreground, cx));
         let site_input = cx.new(|cx| TextInput::new("Add a website, e.g. youtube.com", t.muted_fg, t.foreground, cx));
         let site_changes = cx.observe(&site_input, |_, _, cx| cx.notify());
-        let proxy = vpn.read(cx).s.proxy.clone();
-        let field = |text: u16, cx: &mut Context<Self>| {
+        let (proxy, dns) = (vpn.read(cx).s.proxy.clone(), vpn.read(cx).s.dns.clone());
+        let field = |text: &str, cx: &mut Context<Self>| {
             cx.new(|cx| {
                 let mut input = TextInput::new("", t.muted_fg, t.foreground, cx);
-                input.set_content(&text.to_string());
+                input.set_content(text);
                 input
             })
         };
-        let (socks_input, http_input) = (field(proxy.socks, cx), field(proxy.http, cx));
-        let network_changes = [&socks_input, &http_input].map(|i| cx.observe(i, |this, _, cx| this.network_edited(cx))).into();
+        let (socks_input, http_input) = (field(&proxy.socks.to_string(), cx), field(&proxy.http.to_string(), cx));
+        let dns_input = field(dns_server(&dns), cx);
+        let network_changes = [&socks_input, &http_input, &dns_input].map(|i| cx.observe(i, |this, _, cx| this.network_edited(cx))).into();
         // The caret blink notifies too; only an edit moves the selection back to the top.
         let changes = cx.observe(&search, |this, search, cx| {
             let query = search.read(cx).content.clone();
@@ -353,6 +361,7 @@ impl Hitori {
             site_input,
             socks_input,
             http_input,
+            dns_input,
             page: Page::Map,
             sort_ping: false,
             open_countries: vec![],
@@ -683,7 +692,7 @@ impl Hitori {
 
     /// Valid values go to the settings; invalid ones stay in their fields, flagged.
     fn network_edited(&mut self, cx: &mut Context<Self>) {
-        let typed: Vec<_> = [&self.socks_input, &self.http_input].iter().map(|i| i.read(cx).content.clone()).collect();
+        let typed: Vec<_> = [&self.socks_input, &self.http_input, &self.dns_input].iter().map(|i| i.read(cx).content.clone()).collect();
         if typed == self.network_typed {
             return;
         }
@@ -695,6 +704,30 @@ impl Hitori {
                 self.s.proxy = proxy;
             }
         }
+        if let Ok(dns) = self.typed_dns(cx) {
+            self.s.dns = dns;
+        }
+    }
+
+    /// The DNS settings with the typed server, if it is valid.
+    pub fn typed_dns(&self, cx: &App) -> Result<crate::xray::Dns, String> {
+        let text = self.dns_input.read(cx).content.trim().to_owned();
+        let mut dns = self.s.dns.clone();
+        match dns.mode {
+            crate::xray::DnsMode::Https => dns.https = text,
+            crate::xray::DnsMode::Tls => dns.tls = text,
+            crate::xray::DnsMode::Subscription => {}
+        }
+        dns.check().map(|_| dns)
+    }
+
+    /// Show `dns`, its server in the field.
+    pub fn set_dns(&mut self, dns: crate::xray::Dns, cx: &mut Context<Self>) {
+        self.dns_input.update(cx, |input, cx| {
+            input.set_content(dns_server(&dns));
+            cx.notify();
+        });
+        self.s.dns = dns;
     }
 
     /// What is wrong with the typed ports.
@@ -709,7 +742,7 @@ impl Hitori {
         cx.set_global(if dark { Theme::dark() } else { Theme::light() });
         self.s.dark = dark;
         let t = theme(cx);
-        for input in [&self.search, &self.link, &self.socks_input, &self.http_input] {
+        for input in [&self.search, &self.link, &self.socks_input, &self.http_input, &self.dns_input] {
             input.update(cx, |input, _| {
                 input.placeholder_color = t.muted_fg;
                 input.caret = t.foreground;

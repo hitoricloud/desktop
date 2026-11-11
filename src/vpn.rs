@@ -17,7 +17,7 @@ use crate::region::{self, Location};
 use crate::store::{self, Login, Rule, Settings};
 use crate::sub;
 use crate::suggest::Tracker;
-use crate::xray::{self, Core, LocalProxy, Plan};
+use crate::xray::{self, Core, Dns, LocalProxy, Plan};
 
 #[derive(Clone, PartialEq)]
 pub struct Me {
@@ -61,6 +61,7 @@ pub struct Shared {
     pub system_wide: bool,
     pub tun: bool,
     pub proxy: LocalProxy,
+    pub dns: Dns,
     /// This computer's address on the LAN, which the local proxy can listen on.
     pub lan: Option<Ipv4Addr>,
     pub app_routes: Vec<(&'static str, AppRule)>,
@@ -137,6 +138,7 @@ impl Shared {
             system_wide: self.system_wide,
             tun: self.tun,
             proxy: self.proxy.clone(),
+            dns: self.dns.clone(),
             dark: self.dark,
             rules_big: self.rules_big,
             apps: self.app_routes.iter().map(|(a, r)| Rule::from_app(a, r)).collect(),
@@ -250,6 +252,7 @@ impl Vpn {
             system_wide: saved.system_wide,
             tun: saved.tun,
             proxy: saved.proxy.clone(),
+            dns: saved.dns.clone(),
             lan: lan(net_addr),
             app_routes: saved.apps.iter().map(Rule::to_app).collect(),
             sites: saved.sites(),
@@ -881,7 +884,8 @@ impl Vpn {
                 Arc::new(self.lists.tunnel.iter().chain(self.region_rules.iter()).cloned().collect())
             },
             base_rules: self.lists.base.clone(),
-            dns: self.lists.dns.clone(),
+            sub_dns: self.lists.dns.clone(),
+            dns: self.s.dns.clone(),
         }
     }
 
