@@ -78,7 +78,7 @@ impl Link {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut child = cmd.spawn().map_err(|e| format!("Cannot ask for administrator rights (pkexec): {e}"))?;
+        let mut child = cmd.spawn().map_err(|e| t!("helper.error.cannot_ask_rights_pkexec", error = e))?;
         log.follow(child.stderr.take().unwrap());
         let lines = read_lines(child.stdout.take().unwrap(), None);
         let mut link = Link { input: child.stdin.take(), lines, process: child, log: log.clone() };
@@ -93,10 +93,10 @@ impl Link {
         let sock = crate::store::runtime_dir().join("helper.sock");
         let _ = std::fs::remove_file(&sock);
         // The runtime dir is 0700: only this user (and root) can reach the socket.
-        let listener = UnixListener::bind(&sock).map_err(|e| format!("Cannot start the TUN helper: {e}"))?;
+        let listener = UnixListener::bind(&sock).map_err(|e| t!("helper.error.cannot_start_helper", error = e))?;
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         let command = format!("{} --tun-helper {}", sh_quote(&exe.to_string_lossy()), sh_quote(&sock.to_string_lossy()));
-        let prompt = "Hitori VPN needs administrator rights to route all traffic through the tunnel.";
+        let prompt = t!("helper.admin_prompt");
         let script = format!("do shell script {} with prompt {} with administrator privileges", applescript_str(&command), applescript_str(prompt));
         // Already root (`sudo hitori --tun-selftest`): no prompt.
         // SAFETY: geteuid cannot fail.
@@ -109,7 +109,7 @@ impl Link {
             cmd.arg("-e").arg(script);
             cmd
         };
-        let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().map_err(|e| format!("Cannot ask for administrator rights: {e}"))?;
+        let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().map_err(|e| t!("helper.error.cannot_ask_rights", error = e))?;
         listener.set_nonblocking(true).map_err(|e| e.to_string())?;
         let start = Instant::now();
         let stream = loop {
@@ -123,12 +123,12 @@ impl Link {
                 let _ = child.stderr.take().map(|mut s| s.read_to_string(&mut err));
                 let _ = std::fs::remove_file(&sock);
                 // osascript: "User canceled. (-128)"
-                return Err(if err.contains("-128") { "Administrator rights were not granted".into() } else { format!("TUN mode could not start: {}", err.trim()) });
+                return Err(if err.contains("-128") { t!("helper.error.not_granted").into() } else { t!("helper.error.could_not_start_error", error = err.trim()) });
             }
             if start.elapsed() > Duration::from_secs(180) {
                 let _ = child.kill();
                 let _ = std::fs::remove_file(&sock);
-                return Err("Timed out waiting for administrator rights".into());
+                return Err(t!("helper.error.timed_out_rights").into());
             }
             std::thread::sleep(Duration::from_millis(100));
         };
@@ -143,7 +143,7 @@ impl Link {
     /// Windows: `hitori --tun-helper <port> <token>` elevated through UAC; it connects back to 127.0.0.1:<port>.
     #[cfg(windows)]
     pub fn start(_xray: &Path, _path: &PathBuf, config: &Value, kill_switch: bool, log: &Log) -> Result<Link, String> {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| format!("Cannot start the TUN helper: {e}"))?;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| t!("helper.error.cannot_start_helper", error = e))?;
         let port = listener.local_addr().map_err(|e| e.to_string())?.port();
         let token = elevate::token()?;
         let mut process = elevate::run(&format!("--tun-helper {port} {token}"))?;
@@ -164,11 +164,11 @@ impl Link {
                 Err(e) => return Err(e.to_string()),
             }
             if let Ok(Some(status)) = process.try_wait() {
-                return Err(format!("The TUN helper stopped ({status})"));
+                return Err(t!("helper.error.helper_stopped_status", status = status));
             }
             if start.elapsed() > Duration::from_secs(60) {
                 let _ = process.kill();
-                return Err("The TUN helper did not start".into());
+                return Err(t!("helper.error.helper_did_not_start").into());
             }
             std::thread::sleep(Duration::from_millis(100));
         };
@@ -198,7 +198,7 @@ impl Link {
 
     pub fn send(&mut self, line: &str) -> Result<(), String> {
         let input = self.input.as_mut().ok_or("no helper")?;
-        writeln!(input, "{line}").and_then(|_| input.flush()).map_err(|_| "The TUN helper stopped".to_owned())
+        writeln!(input, "{line}").and_then(|_| input.flush()).map_err(|_| t!("helper.error.helper_stopped").to_owned())
     }
 
     /// Helper lines until `ready`; `down`/exit means it failed.
@@ -208,18 +208,18 @@ impl Link {
             match self.lines.recv_timeout(Duration::from_millis(200)) {
                 Ok(line) if line == "ready" => return Ok(()),
                 Ok(line) if line.starts_with("error ") => return Err(line[6..].to_owned()),
-                Ok(line) if line.starts_with("down") => return Err(self.log.last_error().unwrap_or_else(|| "The core stopped".into())),
+                Ok(line) if line.starts_with("down") => return Err(self.log.last_error().unwrap_or_else(|| t!("helper.error.core_stopped").into())),
                 Ok(_) | Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => {
                     let status = self.process.wait().ok().and_then(|s| s.code());
                     return Err(match status {
-                        Some(126) | Some(127) if cfg!(target_os = "linux") => "Administrator rights were not granted".into(),
-                        _ => self.log.last_error().unwrap_or_else(|| "TUN mode could not start".into()),
+                        Some(126) | Some(127) if cfg!(target_os = "linux") => t!("helper.error.not_granted").into(),
+                        _ => self.log.last_error().unwrap_or_else(|| t!("helper.error.could_not_start").into()),
                     });
                 }
             }
         }
-        Err(if cfg!(target_os = "linux") { "Timed out waiting for administrator rights" } else { "TUN mode did not start in time" }.into())
+        Err(if cfg!(target_os = "linux") { t!("helper.error.timed_out_rights") } else { t!("helper.error.did_not_start_in_time") }.into())
     }
 
     /// Still running? The helper outlives a crashed core and reports it.
@@ -403,13 +403,13 @@ mod elevate {
         // SAFETY: the strings outlive the call.
         unsafe { ShellExecuteExW(&mut info) }.map_err(|e| {
             if e.code() == HRESULT::from_win32(ERROR_CANCELLED.0) {
-                "Administrator rights were not granted".to_owned()
+                t!("helper.error.not_granted").to_owned()
             } else {
-                format!("Cannot ask for administrator rights: {e}")
+                t!("helper.error.cannot_ask_rights", error = e)
             }
         })?;
         if info.hProcess.is_invalid() {
-            return Err("Cannot ask for administrator rights".into());
+            return Err(t!("helper.error.cannot_ask_rights_plain").into());
         }
         Ok(Elevated(info.hProcess))
     }

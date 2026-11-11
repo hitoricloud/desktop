@@ -1,0 +1,2 @@
+[error]
+linux_is_tun = "system-wide mode is a TUN on Linux"

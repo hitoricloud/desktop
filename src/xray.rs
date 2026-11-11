@@ -142,12 +142,12 @@ pub fn config(plan: &Plan, ports: Ports) -> Result<Value, String> {
     let mut out = Outbounds { list: vec![], protocol: plan.protocol };
     let main = match entry {
         Some(e) => {
-            let hop = e.chainable(plan.protocol).ok_or("The first server has no usable transport")?.1.clone();
+            let hop = e.chainable(plan.protocol).ok_or(t!("xray.error.first_no_transport"))?.1.clone();
             out.list.push(tagged(hop, "entry"));
-            let last = exit.chainable(plan.protocol).ok_or("The exit server has no usable transport")?.1.clone();
+            let last = exit.chainable(plan.protocol).ok_or(t!("xray.error.exit_no_transport"))?.1.clone();
             with_sockopt(tagged(last, "proxy"), "dialerProxy", json!("entry"))
         }
-        None => tagged(exit.variant(plan.protocol).ok_or("This server has no usable transport")?.1.clone(), "proxy"),
+        None => tagged(exit.variant(plan.protocol).ok_or(t!("xray.error.no_transport"))?.1.clone(), "proxy"),
     };
     out.list.insert(0, main);
     let routed: Vec<_> = plan.servers.iter().filter_map(|s| Some((s.id, out.route(s, None, plan.protocol)?))).collect();
@@ -348,7 +348,7 @@ pub fn metrics(port: u16) -> Option<Metrics> {
 }
 
 pub fn write_config(path: &PathBuf, config: &Value) -> Result<(), String> {
-    crate::store::write(path, &serde_json::to_vec(config).unwrap(), true).map_err(|e| format!("Cannot write the core config: {e}"))
+    crate::store::write(path, &serde_json::to_vec(config).unwrap(), true).map_err(|e| t!("xray.error.cannot_write_config", error = e))
 }
 
 /// Latest core log lines, kept for error messages, and lines handed to whoever watches for failures.
@@ -415,7 +415,7 @@ pub struct Core {
 impl Core {
     /// Start and wait until it serves; TUN mode may wait for the administrator's password.
     pub fn start(plan: &Plan) -> Result<Core, String> {
-        let xray = xray_path().ok_or("The Xray core is missing — run scripts/fetch-xray.sh")?;
+        let xray = xray_path().ok_or(t!("xray.error.core_missing"))?;
         let ports = Ports { probe: free_port(), metrics: free_port(), ping: free_port() };
         let path = crate::store::runtime_dir().join("core.json");
         let config = config(plan, ports)?;
@@ -427,14 +427,14 @@ impl Core {
         write_config(&path, &config)?;
         let mut cmd = Command::new(&xray);
         cmd.args(["run", "-c"]).arg(&path).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-        let mut child = crate::os::spawn_core(&mut cmd).map_err(|e| format!("Cannot start the core: {e}"))?;
+        let mut child = crate::os::spawn_core(&mut cmd).map_err(|e| t!("xray.error.cannot_start_core", error = e))?;
         // The core logs to stdout; stderr carries Go panics.
         log.follow(child.stdout.take().unwrap());
         log.follow(child.stderr.take().unwrap());
         let mut core = Core { child: Some(child), helper: None, ports, tun: false, system_proxy: None, log, path };
         core.wait_serving(Duration::from_secs(10))?;
         if plan.system_proxy {
-            core.system_proxy = Some(crate::sysproxy::set(HTTP_PORT, SOCKS_PORT).map_err(|e| format!("Cannot set the system proxy: {e}"))?);
+            core.system_proxy = Some(crate::sysproxy::set(HTTP_PORT, SOCKS_PORT).map_err(|e| t!("xray.error.cannot_set_system_proxy", error = e))?);
         }
         Ok(core)
     }
@@ -444,20 +444,20 @@ impl Core {
         let addr = SocketAddr::from(([127, 0, 0, 1], self.ports.metrics));
         while start.elapsed() < limit {
             if let Some(Ok(Some(status))) = self.child.as_mut().map(|c| c.try_wait()) {
-                return Err(self.log.last_error().unwrap_or_else(|| format!("The core stopped ({status})")));
+                return Err(self.log.last_error().unwrap_or_else(|| t!("xray.error.core_stopped", status = status)));
             }
             if TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok() {
                 return Ok(());
             }
             std::thread::sleep(Duration::from_millis(100));
         }
-        Err("The core did not start in time".into())
+        Err(t!("xray.error.did_not_start").into())
     }
 
     /// Apply a new plan: the helper restarts the core under the same routing; otherwise the core is restarted.
     pub fn reload(&mut self, plan: &Plan) -> Result<(), String> {
         if plan.tun != self.tun || plan.system_proxy != self.system_proxy.is_some() {
-            return Err("mode changed".into());
+            return Err(t!("xray.error.mode_changed").into());
         }
         let config = config(plan, self.ports)?;
         if let Some(helper) = self.helper.as_mut() {
@@ -629,13 +629,13 @@ pub fn ping_all(servers: Vec<&'static Server>, protocol: Protocol, running: Opti
 
 /// A core with only `ping-in` and the servers' outbounds, serving once its port accepts.
 fn probe_core(servers: &[&'static Server], protocol: Protocol) -> Result<(Child, PathBuf, u16), String> {
-    let xray = xray_path().ok_or("The Xray core is missing — run scripts/fetch-xray.sh")?;
+    let xray = xray_path().ok_or(t!("xray.error.core_missing"))?;
     let port = free_port();
     let path = crate::store::runtime_dir().join(format!("probe-{port}.json"));
     write_config(&path, &probe_config(servers, protocol, port))?;
     let mut cmd = Command::new(xray);
     cmd.args(["run", "-c"]).arg(&path).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-    let mut child = crate::os::spawn_core(&mut cmd).map_err(|e| format!("Cannot start the latency test: {e}"))?;
+    let mut child = crate::os::spawn_core(&mut cmd).map_err(|e| t!("xray.error.cannot_start_latency_test", error = e))?;
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(10) {
         if matches!(child.try_wait(), Ok(Some(_))) {
@@ -650,7 +650,7 @@ fn probe_core(servers: &[&'static Server], protocol: Protocol) -> Result<(Child,
     let _ = child.wait();
     crate::os::reaped(&child);
     let _ = std::fs::remove_file(&path);
-    Err("The latency test core did not start".into())
+    Err(t!("xray.error.latency_core_did_not_start").into())
 }
 
 #[cfg(test)]

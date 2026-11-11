@@ -436,7 +436,7 @@ impl Vpn {
                 store::save(&Location::path(), &l, false);
                 self.location = Some(l);
                 self.set_region_lists(&found.lists, cx);
-                if found.missing { region::Status::Failed(format!("Cannot download the lists for {}", self.s.region.place())) } else { region::Status::Ready }
+                if found.missing { region::Status::Failed(t!("vpn.region.cannot_download", place = self.s.region.place())) } else { region::Status::Ready }
             }
             Ok(_) => region::Status::Ready,
             Err(e) => region::Status::Failed(e),
@@ -876,7 +876,7 @@ impl Vpn {
     /// Connect, or move the running connection to the current server and rules.
     pub fn connect(&mut self, cx: &mut Context<Self>) {
         if !self.s.signed_in || !data::has_server(self.s.server_id) {
-            self.s.error = Some(if self.s.signed_in { "No server to connect to".into() } else { "Sign in to connect".into() });
+            self.s.error = Some(if self.s.signed_in { t!("vpn.error.no_server").into() } else { t!("vpn.error.sign_in_to_connect").into() });
             cx.notify();
             return;
         }
@@ -986,7 +986,7 @@ impl Vpn {
             self.ticker = None;
             self.s.conn = Conn::Off;
             self.s.connected_at = None;
-            self.s.error = Some(format!("Connection lost{}", why.map(|w| format!(": {w}")).unwrap_or_default()));
+            self.s.error = Some(why.map_or_else(|| t!("vpn.error.connection_lost").into(), |w| t!("vpn.error.connection_lost_why", why = w)));
             cx.notify();
         }
         None

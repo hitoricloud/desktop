@@ -1,0 +1,16 @@
+[error]
+offline = "You seem to be offline"
+cannot_tell_country = "Cannot tell which country this is"
+checked_while_off = "Your location is checked while the VPN is off"
+
+[place]
+unknown = "Unknown"
+
+[summary]
+checking = "Checking where you are…"
+no_list = "No ready-made list for {place}; your provider's rules apply."
+loading = "Loading the lists of blocked sites…"
+cannot_download = "Cannot download the lists for {place}."
+line = "{sites} and {subnets} go through the VPN."
+sites = { one = "{count} blocked site", other = "{count} blocked sites" }
+subnets = { one = "{count} subnet", other = "{count} subnets" }

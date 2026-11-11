@@ -1,0 +1,12 @@
+[error]
+paste_full_link = "Paste the full subscription link (https://…)"
+not_found = "Subscription not found — check the link"
+refused_device = "The panel refused this device (device limit?)"
+server_answered = "Subscription server answered {code}"
+cannot_reach = "Cannot reach the subscription server ({kind})"
+no_profiles = "This subscription has no Xray JSON profiles"
+no_servers = "The subscription has no servers you can use"
+
+[label]
+server = "Server"
+server_number = "Server #{n}"

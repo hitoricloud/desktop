@@ -1,0 +1,109 @@
+via = "via"
+
+[route]
+exit = "Exit {country}"
+always_vpn = "Always VPN"
+blocked = "Blocked"
+
+[reason]
+timed_out = "Timed out directly"
+reset = "Reset directly"
+refused = "Refused directly"
+blocked = "Blocked directly"
+
+[suggestion]
+worked_via = "worked via {server}"
+hits = "{count}× today"
+in_app = "in {app}"
+needs_vpn = "{subject} needs VPN"
+keep_auto = "Keep auto"
+
+[review]
+button = "Review"
+need_vpn = { one = "{n} needs VPN", other = "{n} need VPN" }
+more = "{count} more · Review"
+
+[rules]
+active = "Active rules · {count}"
+idle = "{count} idle"
+apps_idle = "Apps · {apps} · {idle} idle"
+websites = "Websites · {count}"
+no_apps = "No app rules yet. Add a running app with +, or accept a suggestion."
+intro = "Apps and websites without a rule follow the default route."
+manage = "Manage rules"
+compact = "Compact list"
+cards = "Cards"
+
+[page]
+map = "Map"
+rules = "Rules"
+
+[default_route]
+title = "Default route"
+
+[dest]
+bypass = "Bypasses VPN"
+via = " via {country}"
+auto = "Auto · {country}"
+
+[glyph]
+blocked = "All traffic blocked"
+direct = "Uses your real connection"
+exit = "Own exit, separate from the main route"
+cascade = "Cascaded through two servers"
+encrypted = "Encrypted"
+waiting = "Waiting for the tunnel"
+
+[site]
+website = "website"
+add = "Add"
+
+[add_app]
+running = "Running apps"
+
+[status]
+protected = "Protected"
+connecting = "Connecting…"
+
+[field]
+connected_to = "Connected to"
+connecting_to = "Connecting to"
+fastest = "Fastest location"
+add_entry = "Route through another server"
+go_direct = "Go direct"
+
+[power]
+cancel = "Cancel"
+
+[metrics]
+latency_on = "Latency through the tunnel"
+latency_off = "Latency to this server, from the last test"
+download = "Download"
+upload = "Upload"
+
+[kill]
+on_blocks = "Kill switch on · traffic is blocked while the tunnel is down"
+on_tun = "Kill switch on · takes effect in TUN mode"
+on_system_wide = "Kill switch on · takes effect in system-wide mode"
+off = "Kill switch off · block traffic while the tunnel is down"
+
+[servers]
+title = "Servers"
+tested_now = "tested just now"
+tested_ago = "tested {ago} ago"
+sort = "Sort by latency"
+sorted = "Sorted by latency"
+measure = "Measure every server through its own protocol"
+measuring = "Measuring every server…"
+test = "Test"
+sign_in = "Sign in to see your servers."
+load = "Server load {pct}%"
+offline = "offline"
+show = "Show servers"
+hide = "Hide servers"
+
+[account]
+not_signed_in = "Not signed in"
+loading = "Loading…"
+paste_link = "Paste your subscription link"
+renews = "renews {date}"
