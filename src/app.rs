@@ -50,16 +50,18 @@ pub enum Panel {
 #[derive(Clone, Copy, PartialEq)]
 pub enum SettingsTab {
     Connection,
+    Network,
     Location,
     Appearance,
 }
 
 impl SettingsTab {
-    pub const ALL: [SettingsTab; 3] = [Self::Connection, Self::Location, Self::Appearance];
+    pub const ALL: [SettingsTab; 4] = [Self::Connection, Self::Network, Self::Location, Self::Appearance];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Connection => "Connection",
+            Self::Network => "Network",
             Self::Location => "Location",
             Self::Appearance => "Appearance",
         }
@@ -68,6 +70,7 @@ impl SettingsTab {
     pub fn icon(self) -> &'static str {
         match self {
             Self::Connection => "shield-check",
+            Self::Network => "globe",
             Self::Location => "map",
             Self::Appearance => "wand-sparkles",
         }
@@ -256,6 +259,9 @@ pub struct Hitori {
     pub paste_link: bool,
     /// New website rule on the rules page and sheet.
     pub site_input: Entity<TextInput>,
+    /// Local proxy ports in Settings › Network.
+    pub socks_input: Entity<TextInput>,
+    pub http_input: Entity<TextInput>,
     pub page: Page,
     /// The inspector's server list is ordered by the last latency test.
     pub sort_ping: bool,
@@ -274,7 +280,15 @@ pub struct Hitori {
     pub palette_fx: Presence<Mode>,
     _search_changes: Subscription,
     _site_changes: Subscription,
+    /// What the Network fields held at the last edit; caret blinks notify too.
+    network_typed: Vec<gpui::SharedString>,
+    _network_changes: Vec<Subscription>,
     _vpn_changes: Subscription,
+}
+
+/// A port typed into a settings field.
+pub fn port(input: &Entity<TextInput>, cx: &App) -> Option<u16> {
+    input.read(cx).content.trim().parse().ok().filter(|p| *p > 0)
 }
 
 impl Hitori {
@@ -284,6 +298,16 @@ impl Hitori {
         let link = cx.new(|cx| TextInput::new("https://…/sub/…", t.muted_fg, t.foreground, cx));
         let site_input = cx.new(|cx| TextInput::new("Add a website, e.g. youtube.com", t.muted_fg, t.foreground, cx));
         let site_changes = cx.observe(&site_input, |_, _, cx| cx.notify());
+        let proxy = vpn.read(cx).s.proxy.clone();
+        let field = |text: u16, cx: &mut Context<Self>| {
+            cx.new(|cx| {
+                let mut input = TextInput::new("", t.muted_fg, t.foreground, cx);
+                input.set_content(&text.to_string());
+                input
+            })
+        };
+        let (socks_input, http_input) = (field(proxy.socks, cx), field(proxy.http, cx));
+        let network_changes = [&socks_input, &http_input].map(|i| cx.observe(i, |this, _, cx| this.network_edited(cx))).into();
         // The caret blink notifies too; only an edit moves the selection back to the top.
         let changes = cx.observe(&search, |this, search, cx| {
             let query = search.read(cx).content.clone();
@@ -327,6 +351,8 @@ impl Hitori {
             link,
             paste_link: false,
             site_input,
+            socks_input,
+            http_input,
             page: Page::Map,
             sort_ping: false,
             open_countries: vec![],
@@ -342,6 +368,8 @@ impl Hitori {
             palette_fx: Presence::new(),
             _search_changes: changes,
             _site_changes: site_changes,
+            network_typed: vec![],
+            _network_changes: network_changes,
             _vpn_changes: vpn_changes,
         };
         if let Ok(state) = std::env::var("HITORI_STATE") {
@@ -653,11 +681,35 @@ impl Hitori {
         cx.notify();
     }
 
+    /// Valid values go to the settings; invalid ones stay in their fields, flagged.
+    fn network_edited(&mut self, cx: &mut Context<Self>) {
+        let typed: Vec<_> = [&self.socks_input, &self.http_input].iter().map(|i| i.read(cx).content.clone()).collect();
+        if typed == self.network_typed {
+            return;
+        }
+        self.network_typed = typed;
+        cx.notify();
+        if let (Some(socks), Some(http)) = (port(&self.socks_input, cx), port(&self.http_input, cx)) {
+            let proxy = crate::xray::LocalProxy { socks, http, ..self.s.proxy.clone() };
+            if proxy.check().is_ok() {
+                self.s.proxy = proxy;
+            }
+        }
+    }
+
+    /// What is wrong with the typed ports.
+    pub fn ports_error(&self, cx: &App) -> Option<String> {
+        let (Some(socks), Some(http)) = (port(&self.socks_input, cx), port(&self.http_input, cx)) else {
+            return Some("Ports are numbers from 1 to 65535".into());
+        };
+        crate::xray::LocalProxy { socks, http, ..self.s.proxy.clone() }.check().err()
+    }
+
     pub fn set_dark(&mut self, dark: bool, cx: &mut Context<Self>) {
         cx.set_global(if dark { Theme::dark() } else { Theme::light() });
         self.s.dark = dark;
         let t = theme(cx);
-        for input in [&self.search, &self.link] {
+        for input in [&self.search, &self.link, &self.socks_input, &self.http_input] {
             input.update(cx, |input, _| {
                 input.placeholder_color = t.muted_fg;
                 input.caret = t.foreground;

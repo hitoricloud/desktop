@@ -1,10 +1,38 @@
 //! Sheet (Account, Settings, Routing rules) and the location palette.
-use gpui::{AnyElement, Context, Div, Focusable, MouseButton, SharedString, Window, div, hsla, prelude::*, px};
+use gpui::{AnyElement, Context, Div, Entity, Focusable, MouseButton, SharedString, Window, div, hsla, prelude::*, px};
 
 use crate::app::{Hitori, Panel, Place, Protocol, SettingsTab};
 use crate::data;
+use crate::input::TextInput;
 use crate::theme::{Theme, shadow_lg};
 use crate::ui::{LG, MD, Size, Tw, Variant, XL, badge_secondary, button, icon, progress, switch};
+
+type Pick = Box<dyn Fn(&mut Hitori, &mut Context<Hitori>)>;
+
+/// Width of a segmented control with these labels.
+fn segmented_width<'a>(labels: impl IntoIterator<Item = &'a str>, window: &Window) -> f32 {
+    8. + labels.into_iter().map(|l| crate::ui::text_width(l, 14., gpui::FontWeight::MEDIUM, window) + 24.).sum::<f32>()
+}
+
+/// Single-line field around a `TextInput`; `invalid` gives it the destructive border.
+fn text_field(id: &'static str, input: &Entity<TextInput>, w: f32, invalid: bool, t: &Theme, cx: &gpui::App) -> impl IntoElement {
+    let focus = input.read(cx).focus_handle(cx);
+    div()
+        .id(id)
+        .w(px(w))
+        .h(px(36.))
+        .px(px(12.))
+        .flex()
+        .items_center()
+        .rounded(px(MD))
+        .border_1()
+        .border_color(if invalid { t.destructive } else { t.border })
+        .bg(t.background)
+        .sm()
+        .cursor_text()
+        .on_mouse_down(MouseButton::Left, move |_, window, _| window.focus(&focus))
+        .child(div().flex_1().min_w_0().child(input.clone()))
+}
 
 
 fn section(title: String, t: &Theme, rows: Vec<AnyElement>) -> Div {
@@ -174,6 +202,7 @@ impl Hitori {
         }
         let content = match tab {
             SettingsTab::Connection => self.connection_sections(cw, window, cx),
+            SettingsTab::Network => self.network_sections(cw, window, cx),
             SettingsTab::Location => vec![page_section("Location", &t, vec![self.region_row(cw, window, cx)])],
             SettingsTab::Appearance => {
                 let dark = t.dark;
@@ -265,43 +294,47 @@ impl Hitori {
             .into_any_element()
     }
 
+    /// Segmented control: one button per item, the `on` one highlighted.
+    fn segmented(&self, id: &str, items: Vec<(String, bool, Pick)>, cx: &mut Context<Self>) -> Div {
+        let t = self.theme(cx);
+        let mut group = div().flex().bg(t.background).rounded(px(MD)).p(px(4.));
+        let n = items.len();
+        for (i, (label, on, pick)) in items.into_iter().enumerate() {
+            let (muted, muted_fg) = (t.muted, t.muted_fg);
+            group = group.child(
+                div()
+                    .id(SharedString::from(format!("{id}-{label}")))
+                    .h(px(32.))
+                    .px(px(12.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .sm()
+                    .medium()
+                    .cursor_pointer()
+                    .when(i == 0, |d| d.rounded_l(px(MD)))
+                    .when(i == n - 1, |d| d.rounded_r(px(MD)))
+                    .when(on, |d| d.bg(t.accent))
+                    .when(!on, |d| d.hover(move |s| s.bg(muted).text_color(muted_fg)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        pick(this, cx);
+                        cx.notify();
+                    }))
+                    .child(label),
+            );
+        }
+        group
+    }
+
     fn connection_sections(&self, cw: f32, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let t = self.theme(cx);
-        let segmented = |id: &'static str, items: Vec<(String, bool)>, on_pick: Vec<Box<dyn Fn(&mut Self, &mut Context<Self>)>>| {
-            let mut group = div().flex().bg(t.background).rounded(px(MD)).p(px(4.));
-            let n = items.len();
-            for (i, ((label, on), pick)) in items.into_iter().zip(on_pick).enumerate() {
-                let (muted, muted_fg) = (t.muted, t.muted_fg);
-                group = group.child(
-                    div()
-                        .id(SharedString::from(format!("{id}-{label}")))
-                        .h(px(32.))
-                        .px(px(12.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .sm()
-                        .medium()
-                        .cursor_pointer()
-                        .when(i == 0, |d| d.rounded_l(px(MD)))
-                        .when(i == n - 1, |d| d.rounded_r(px(MD)))
-                        .when(on, |d| d.bg(t.accent))
-                        .when(!on, |d| d.hover(move |s| s.bg(muted).text_color(muted_fg)))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            pick(this, cx);
-                            cx.notify();
-                        }))
-                        .child(label),
-                );
-            }
-            group
-        };
-        let proto_items: Vec<(String, bool)> = Protocol::ALL.into_iter().map(|p| (p.label().to_owned(), self.s.protocol == p)).collect();
-        let proto_picks: Vec<Box<dyn Fn(&mut Self, &mut Context<Self>)>> = Protocol::ALL.into_iter().map(|p| Box::new(move |this: &mut Self, _: &mut Context<Self>| this.s.protocol = p) as Box<dyn Fn(&mut Self, &mut Context<Self>)>).collect();
-        let group = segmented("proto", proto_items, proto_picks);
-        let toggle_w = 8. + Protocol::ALL.iter().map(|p| crate::ui::text_width(p.label(), 14., gpui::FontWeight::MEDIUM, window) + 24.).sum::<f32>();
+        let proto_items = Protocol::ALL.into_iter().map(|p| (p.label().to_owned(), self.s.protocol == p, Box::new(move |this: &mut Self, _: &mut Context<Self>| this.s.protocol = p) as Pick)).collect();
+        let group = self.segmented("proto", proto_items, cx);
+        let toggle_w = segmented_width(Protocol::ALL.iter().map(|p| p.label()), window);
         let mode = (crate::os::SYSTEM_PROXY && self.s.system_wide).then(|| self.mode_row(cw, window, cx));
         let room = page_room(cw, 32.);
+        let p = &self.s.proxy;
+        let proxy_hint = format!("Only apps set to use the proxy: SOCKS5 {}:{}, HTTP {}.", p.host(), p.socks, p.http);
         vec![page_section(
             "Connection",
             &t,
@@ -310,7 +343,7 @@ impl Hitori {
                 .chain([row(
                     "System-wide",
                     Some(if !self.s.system_wide {
-                        "Only apps set to use the proxy: SOCKS5 127.0.0.1:10808, HTTP 10809."
+                        &proxy_hint
                     } else if crate::os::SYSTEM_PROXY {
                         "Browsers and most apps, or every app in TUN mode, go through Hitori."
                     } else {
@@ -357,6 +390,65 @@ impl Hitori {
                 ])
                 .collect(),
         )]
+    }
+
+    /// Local proxy: where it listens and on which ports.
+    fn network_sections(&self, cw: f32, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let t = self.theme(cx);
+        let listen = self.s.proxy.listen.clone();
+        let lan = self.s.lan.map(|a| a.to_string());
+        // Loopback, the LAN address, a saved address from another network, every network.
+        let mut choices: Vec<String> = vec![];
+        for c in ["127.0.0.1".to_owned()].into_iter().chain(lan.clone()).chain([listen.clone(), "0.0.0.0".into()]) {
+            if !choices.contains(&c) {
+                choices.push(c);
+            }
+        }
+        let width = segmented_width(choices.iter().map(String::as_str), window);
+        let items = choices
+            .into_iter()
+            .map(|c| {
+                let on = c == listen;
+                let pick = c.clone();
+                (c, on, Box::new(move |this: &mut Self, _: &mut Context<Self>| this.s.proxy.listen = pick.clone()) as Pick)
+            })
+            .collect();
+        let listen_hint = match listen.as_str() {
+            "127.0.0.1" => "Only apps on this computer can connect.".to_owned(),
+            "0.0.0.0" => "Any network this computer is on. Anyone there can use your VPN.".to_owned(),
+            ip if Some(ip) == lan.as_deref() => "Devices on your network can connect. Anyone there can use your VPN.".to_owned(),
+            ip => format!("{ip} is from another network."),
+        };
+        let error = self.ports_error(cx);
+        let socks_bad = crate::app::port(&self.socks_input, cx).is_none() || error.as_deref().is_some_and(|e| e.contains("different"));
+        let http_bad = crate::app::port(&self.http_input, cx).is_none() || error.as_deref().is_some_and(|e| e.contains("different"));
+        let caption = |s: &str| div().sm().text_color(t.muted_fg).child(s.to_owned());
+        let ports = div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .child(caption("SOCKS5"))
+            .child(text_field("socks-port", &self.socks_input, 80., socks_bad, &t, cx))
+            .child(caption("HTTP"))
+            .child(text_field("http-port", &self.http_input, 80., http_bad, &t, cx));
+        let ports_w = 3. * 8. + 2. * 80. + ["SOCKS5", "HTTP"].iter().map(|s| crate::ui::text_width(s, 14., gpui::FontWeight::NORMAL, window)).sum::<f32>();
+        let p = &self.s.proxy;
+        let ports_hint = match error {
+            Some(e) => format!("{e}."),
+            None if self.s.uses_tun() => "Not used while every app goes through the TUN.".to_owned(),
+            None => format!("Apps connect to SOCKS5 {0}:{1} and HTTP {0}:{2}.", p.host(), p.socks, p.http),
+        };
+        vec![
+            page_section(
+                "Local proxy",
+                &t,
+                vec![
+                    row("Listen on", Some(&listen_hint), page_room(cw, width), self.segmented("listen", items, cx), &t, window),
+                    row("Ports", Some(&ports_hint), page_room(cw, ports_w), ports, &t, window),
+                ],
+            ),
+            div().px(px(4.)).sm().text_color(t.muted_fg).child("Changes apply on the next connection.").into_any_element(),
+        ]
     }
 
     /// Detected country, how much of it is routed through the VPN, and a recheck button.
