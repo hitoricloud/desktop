@@ -225,7 +225,7 @@ fn place_popup(click: (i32, i32)) -> Option<Popover> {
     Some(Popover { size: (aw, ah), card: Card { x: x.round(), gap: 8., bottom }, origin: None })
 }
 
-fn handle(msg: Msg, cx: &mut App) {
+pub fn handle(msg: Msg, cx: &mut App) {
     let vpn = cx.global::<Windows>().vpn.clone();
     match msg {
         Msg::TogglePopup(x, y) => {

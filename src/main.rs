@@ -15,6 +15,7 @@ mod sub;
 mod xray;
 mod fx;
 mod input;
+mod ipc;
 mod live;
 mod map;
 mod net;
@@ -110,6 +111,8 @@ fn main() {
     let tray_only = args.iter().any(|a| a == "--tray");
     let background = args.iter().any(|a| a == "--background");
     let smoke = args.iter().any(|a| a == "--smoke");
+    // One instance per user: a second launch shows the running one instead. `--smoke` may run beside it.
+    let control = if smoke { None } else { ipc::claim() };
     // A previous run that crashed may have left the system proxy pointing at it, or (macOS) its core running.
     sysproxy::restore();
     os::reap_orphans();
@@ -130,6 +133,9 @@ fn main() {
         }
         let vpn = cx.new(app::Vpn::new);
         cx.set_global(tray::Windows { vpn: Some(vpn.clone()), ..Default::default() });
+        if let Some(listener) = control {
+            ipc::serve(listener, cx);
+        }
         let has_tray = !tray_only && tray::start(&vpn, cx);
         // With a tray icon, closing every window leaves the app (and the tunnel) running.
         gpui::KEEP_ALIVE_WITHOUT_WINDOWS.store(has_tray, std::sync::atomic::Ordering::Relaxed);
