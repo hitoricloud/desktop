@@ -1314,6 +1314,19 @@ impl Hitori {
         fx(id, rest, Some(hover)).flex_none().flex().items_center().gap(px(12.)).px(px(8.)).rounded(px(MD)).cursor_pointer()
     }
 
+    /// The last test's latency to a server, or a spinner while it is measured or being connected to.
+    fn latency_el(&self, id: &'static str, connecting: bool, spin: String, t: &Theme) -> AnyElement {
+        if connecting || self.s.pending.contains(&id) {
+            return spinner(SharedString::from(spin), 14., t.muted_fg).into_any_element();
+        }
+        let text = match data::ping(id) {
+            Some(ms) => format!("{ms} ms"),
+            None if data::timed_out(id) => "offline".into(),
+            None => "—".into(),
+        };
+        div().flex_none().whitespace_nowrap().xs().text_color(t.muted_fg).child(text).into_any_element()
+    }
+
     /// One server under its country: load on the left, its id, and the last test's latency on the right (a spinner
     /// while it runs). The current exit is highlighted.
     fn server_row(&self, s: &'static data::Server, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1321,16 +1334,7 @@ impl Hitori {
         let id = s.id;
         let current = id == self.s.server_id;
         let live = current && self.s.conn == Conn::On;
-        let latency = if (current && self.s.conn == Conn::Connecting) || self.s.pending.contains(&id) {
-            spinner(SharedString::from(format!("srv-spin-{id}")), 14., t.muted_fg).into_any_element()
-        } else {
-            let text = match data::ping(id) {
-                Some(ms) => format!("{ms} ms"),
-                None if data::timed_out(id) => "offline".into(),
-                None => "—".into(),
-            };
-            div().xs().text_color(t.muted_fg).child(text).into_any_element()
-        };
+        let latency = self.latency_el(id, current && self.s.conn == Conn::Connecting, format!("srv-spin-{id}"), &t);
         self.row_fx(SharedString::from(format!("srv-{id}")), current, &t)
             .h(px(40.))
             .child(self.load_el(id, &t))
@@ -1341,14 +1345,16 @@ impl Hitori {
             .on_click(cx.listener(move |this, _, window, cx| this.go(id, window, cx)))
     }
 
-    /// A country: flag, name and a chevron; its servers below while open. Closed over the current exit, it stands in
-    /// for it and names it.
+    /// A country: flag, name, the latency of the server a click connects to, and a chevron; its servers below while
+    /// open. Closed over the current exit, it stands in for it and names it.
     fn country_row(&self, list: &[&'static data::Server], window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme(cx);
         let code = list[0].code;
         let open = self.open_countries.contains(&code);
         let current = list.iter().find(|s| s.id == self.s.server_id).filter(|_| !open);
         let live = current.is_some() && self.s.conn == Conn::On;
+        let shown = current.map_or_else(|| data::best_in(code), |s| s.id);
+        let latency = self.latency_el(shown, current.is_some() && self.s.conn == Conn::Connecting, format!("country-spin-{code}"), &t);
         self.row_fx(SharedString::from(format!("country-{code}")), current.is_some(), &t)
             .h(px(48.))
             .child(flag(code, true, window))
@@ -1362,7 +1368,7 @@ impl Hitori {
                     .children(current.map(|s| div().truncate().xs().text_color(t.muted_fg).child(s.tag()))),
             )
             .when(live, |d| d.child(div().size(px(6.)).rounded_full().bg(t.primary)))
-            .when(current.is_some() && self.s.conn == Conn::Connecting, |d| d.child(spinner(SharedString::from(format!("country-spin-{code}")), 14., t.muted_fg)))
+            .child(latency)
             .child(
                 button(SharedString::from(format!("country-open-{code}")), Variant::Ghost, Size::IconSm, true, &t)
                     .tooltip(tip(if open { "Hide servers" } else { "Show servers" }, &t))
