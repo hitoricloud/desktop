@@ -257,7 +257,15 @@ pub fn selftest() -> i32 {
         let metrics = crate::xray::free_port();
         let link = Link::start(&xray, &PathBuf::new(), &crate::xray::selftest_config(metrics), true, &log)?;
         println!("tun selftest: up");
-        fetch("https://1.1.1.1/cdn-cgi/trace")?;
+        if let Err(e) = fetch("https://1.1.1.1/cdn-cgi/trace") {
+            #[cfg(target_os = "macos")]
+            for args in [&["/usr/sbin/netstat", "-rn", "-f", "inet"][..], &["/sbin/route", "-n", "get", "1.1.1.1"], &["/sbin/route", "-n", "get", "-ifscope", "en0", "1.1.1.1"], &["/sbin/ifconfig", "en0"], &["/sbin/pfctl", "-a", "com.apple/hitori", "-sr"]] {
+                let out = std::process::Command::new(args[0]).args(&args[1..]).output();
+                let text = out.map(|o| format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))).unwrap_or_else(|e| e.to_string());
+                eprintln!("--- {}\n{text}", args.join(" "));
+            }
+            return Err(e);
+        }
         fetch("https://one.one.one.one/cdn-cgi/trace")?;
         let vars: Value = ureq::get(&format!("http://127.0.0.1:{metrics}/debug/vars")).call().map_err(|e| e.to_string())?.into_json().map_err(|e| e.to_string())?;
         let down = vars["stats"]["outbound"]["direct"]["downlink"].as_u64().unwrap_or(0);
