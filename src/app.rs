@@ -47,6 +47,33 @@ pub enum Panel {
     Routes,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+pub enum SettingsTab {
+    Connection,
+    Location,
+    Appearance,
+}
+
+impl SettingsTab {
+    pub const ALL: [SettingsTab; 3] = [Self::Connection, Self::Location, Self::Appearance];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Connection => "Connection",
+            Self::Location => "Location",
+            Self::Appearance => "Appearance",
+        }
+    }
+
+    pub fn icon(self) -> &'static str {
+        match self {
+            Self::Connection => "shield-check",
+            Self::Location => "map",
+            Self::Appearance => "wand-sparkles",
+        }
+    }
+}
+
 pub use crate::data::Protocol;
 
 /// What the palette is for: the main exit, the main entry hop, or one app's or website's route settings.
@@ -243,6 +270,7 @@ pub struct Hitori {
     pub keepout: std::cell::RefCell<Vec<[f32; 4]>>,
     pub menu_fx: Presence<Menu>,
     pub panel_fx: Presence<Panel>,
+    pub settings_tab: SettingsTab,
     pub palette_fx: Presence<Mode>,
     _search_changes: Subscription,
     _site_changes: Subscription,
@@ -310,6 +338,7 @@ impl Hitori {
             keepout: Default::default(),
             menu_fx: Presence::new(),
             panel_fx: Presence::new(),
+            settings_tab: SettingsTab::Connection,
             palette_fx: Presence::new(),
             _search_changes: changes,
             _site_changes: site_changes,

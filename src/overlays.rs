@@ -1,7 +1,7 @@
 //! Sheet (Account, Settings, Routing rules) and the location palette.
 use gpui::{AnyElement, Context, Div, Focusable, MouseButton, SharedString, Window, div, hsla, prelude::*, px};
 
-use crate::app::{Hitori, Panel, Place, Protocol};
+use crate::app::{Hitori, Panel, Place, Protocol, SettingsTab};
 use crate::data;
 use crate::theme::{Theme, shadow_lg};
 use crate::ui::{LG, MD, Size, Tw, Variant, XL, badge_secondary, button, icon, progress, switch};
@@ -19,6 +19,20 @@ fn section(title: String, t: &Theme, rows: Vec<AnyElement>) -> Div {
 /// Content width of a sheet `<Item>` row next to a control of this width: sheet 448 − border − body padding − item padding − gap.
 fn hint_room(control: f32) -> f32 {
     448. - 1. - 32. - 32. - 16. - control
+}
+
+/// Content width of a settings-page row next to a control of this width: card width − border − item padding − gap.
+fn page_room(card: f32, control: f32) -> f32 {
+    card - 2. - 32. - 16. - control
+}
+
+/// Section heading above a bordered card whose rows are split by dividers.
+fn page_section(title: &str, t: &Theme, rows: Vec<AnyElement>) -> AnyElement {
+    let mut card = div().flex().flex_col().rounded(px(XL)).border_1().border_color(t.border).bg(t.muted.opacity(0.3)).overflow_hidden();
+    for (i, r) in rows.into_iter().enumerate() {
+        card = card.child(div().when(i > 0, |d| d.border_t_1().border_color(t.border)).child(r));
+    }
+    div().flex().flex_col().gap(px(12.)).child(div().px(px(4.)).base().semibold().child(title.to_owned())).child(card).into_any_element()
 }
 
 /// `<Item>` row: title and hint on the left, a control on the right. `room` balances the hint's lines.
@@ -52,6 +66,9 @@ impl Hitori {
 
     pub fn sheet(&self, panel: Panel, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = self.theme(cx);
+        if panel == Panel::Settings {
+            return self.settings_page(window, cx);
+        }
         let vp = self.viewport(window);
         let w = if f32::from(vp.width) >= 640. { 448. } else { f32::from(vp.width) };
         let (title, desc) = match panel {
@@ -61,14 +78,14 @@ impl Hitori {
                 _ => ("Sign in", "Paste the subscription link from the Hitori bot.".into()),
             },
             Panel::Routes => ("Routing rules", format!("Apps and sites without a rule follow the default route: {}.", self.s.default_route.label())),
-            Panel::Settings => ("Settings", "Changes apply on the next connection.".into()),
+            Panel::Settings => unreachable!(),
         };
         // Sheet: overlay `fade-in-0` 150ms; content `slide-in-from-right` 500ms in / 300ms out, ease-in-out.
         let dim = self.panel_fx.phase(panel, 150., 150., crate::fx::ease).map_or(0., |p| p.0);
         let slide = self.panel_fx.phase(panel, 500., 300., crate::fx::ease_in_out).map_or(0., |p| p.0);
         let body = match panel {
             Panel::Account => self.account_body(window, cx),
-            Panel::Settings => self.settings_body(window, cx),
+            Panel::Settings => unreachable!(),
             Panel::Routes => self.routes_body(window, cx),
         };
         div()
@@ -117,71 +134,202 @@ impl Hitori {
             .into_any_element()
     }
 
-    fn settings_body(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    /// Full-window settings: category sidebar (tabs on a narrow window), breadcrumb header, sections of bordered cards.
+    fn settings_page(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let t = self.theme(cx);
-        let mut group = div().flex().bg(t.background).rounded(px(MD)).p(px(4.));
-        let n = Protocol::ALL.len();
-        for (i, p) in Protocol::ALL.into_iter().enumerate() {
-            let on = self.s.protocol == p;
+        let fade = self.panel_fx.phase(Panel::Settings, 150., 150., crate::fx::ease).map_or(0., |p| p.0);
+        let vp = self.viewport(window);
+        let dw = (f32::from(vp.width) - 32.).min(880.);
+        let dh = (f32::from(vp.height) - 32.).min(640.);
+        let wide = dw >= 640.;
+        let side = if wide { 220. } else { 0. };
+        let cw = (dw - side - 48.).min(760.);
+        let tab = self.settings_tab;
+        let mut nav = div().flex().gap(px(4.)).when(wide, |d| d.flex_col().w(px(side)).flex_none().p(px(12.)).border_r_1().border_color(t.border)).when(!wide, |d| d.px(px(12.)).py(px(8.)).border_b_1().border_color(t.border));
+        for k in SettingsTab::ALL {
+            let on = k == tab;
             let (muted, muted_fg) = (t.muted, t.muted_fg);
-            group = group.child(
+            nav = nav.child(
                 div()
-                    .id(SharedString::from(format!("proto-{}", p.label())))
-                    .h(px(32.))
+                    .id(SharedString::from(format!("settings-tab-{}", k.label())))
+                    .h(px(36.))
                     .px(px(12.))
                     .flex()
                     .items_center()
-                    .justify_center()
+                    .gap(px(12.))
+                    .rounded(px(MD))
                     .sm()
                     .medium()
                     .cursor_pointer()
-                    .when(i == 0, |d| d.rounded_l(px(MD)))
-                    .when(i == n - 1, |d| d.rounded_r(px(MD)))
+                    .when(!wide, |d| d.flex_1().justify_center())
                     .when(on, |d| d.bg(t.accent))
-                    .when(!on, |d| d.hover(move |s| s.bg(muted).text_color(muted_fg)))
+                    .when(!on, |d| d.text_color(t.muted_fg).hover(move |s| s.bg(muted).text_color(muted_fg)))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.s.protocol = p;
+                        this.settings_tab = k;
                         cx.notify();
                     }))
-                    .child(p.label()),
+                    .child(icon(k.icon(), 16., if on { t.foreground } else { t.muted_fg }))
+                    .child(k.label()),
             );
         }
-        let dark = t.dark;
-        let toggle_w = 8. + Protocol::ALL.iter().map(|p| crate::ui::text_width(p.label(), 14., gpui::FontWeight::MEDIUM, window) + 24.).sum::<f32>();
-        let mode = (crate::os::SYSTEM_PROXY && self.s.system_wide).then(|| self.mode_row(window, cx));
-        div()
+        let content = match tab {
+            SettingsTab::Connection => self.connection_sections(cw, window, cx),
+            SettingsTab::Location => vec![page_section("Location", &t, vec![self.region_row(cw, window, cx)])],
+            SettingsTab::Appearance => {
+                let dark = t.dark;
+                let room = page_room(cw, 32.);
+                vec![page_section("Theme", &t, vec![row("Dark theme", Some("Use the dark color scheme."), room, switch("dark", dark, &t).on_click(cx.listener(move |this, _, _, cx| this.set_dark(!dark, cx))), &t, window)])]
+            }
+        };
+        let dialog = div()
+            .id("settings-page")
+            .occlude()
+            .w(px(dw))
+            .h(px(dh))
+            .rounded(px(XL))
+            .border_1()
+            .border_color(t.border)
+            .overflow_hidden()
+            .shadow(shadow_lg())
+            .bg(t.background)
             .flex()
             .flex_col()
-            .gap(px(24.))
-            .child(section(
-                "Connection".into(),
-                &t,
-                vec![
-                    row("Protocol", Some("TLS gets through the most filters."), hint_room(toggle_w), group, &t, window),
-                    row(
-                        "System-wide",
-                        Some(if !self.s.system_wide {
-                            "Only apps set to use the proxy: SOCKS5 127.0.0.1:10808, HTTP 10809."
-                        } else if crate::os::SYSTEM_PROXY {
-                            "Browsers and most apps, or every app in TUN mode, go through Hitori."
-                        } else {
-                            "Every app goes through Hitori. Asks for your password to connect."
-                        }),
-                        hint_room(32.),
-                        switch("system-wide", self.s.system_wide, &t).on_click(cx.listener(|this, _, _, cx| {
-                            this.s.system_wide = !this.s.system_wide;
-                            cx.notify();
-                        })),
-                        &t,
-                        window,
+            .child(
+                div()
+                    .flex_none()
+                    .h(px(53.))
+                    .px(px(16.))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .border_b_1()
+                    .border_color(t.border)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .sm()
+                            .child(div().text_color(t.muted_fg).child("Settings"))
+                            .child(div().text_color(t.muted_fg).child("/"))
+                            .child(div().medium().child(tab.label())),
+                    )
+                    .child(
+                        div()
+                            .id("settings-close")
+                            .size(px(32.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(MD))
+                            .opacity(0.7)
+                            .hover(|s| s.opacity(1.))
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.panel = None;
+                                cx.notify();
+                            }))
+                            .child(icon("x", 16., t.foreground)),
                     ),
-                ]
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .when(wide, |d| d.flex_row())
+                    .when(!wide, |d| d.flex_col())
+                    .child(nav)
+                    .child(
+                        div().id("settings-scroll").flex_1().min_w_0().min_h_0().overflow_y_scroll().child(
+                            div().w(px(cw)).mx_auto().py(px(24.)).flex().flex_col().gap(px(32.)).children(content),
+                        ),
+                    ),
+            )
+            ;
+        div()
+            .absolute()
+            .inset_0()
+            .opacity(fade)
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(div().id("settings-overlay").absolute().inset_0().bg(hsla(0., 0., 0., 0.5)).occlude().on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.panel = None;
+                    cx.notify();
+                }),
+            ))
+            .child(dialog)
+            .into_any_element()
+    }
+
+    fn connection_sections(&self, cw: f32, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let t = self.theme(cx);
+        let segmented = |id: &'static str, items: Vec<(String, bool)>, on_pick: Vec<Box<dyn Fn(&mut Self, &mut Context<Self>)>>| {
+            let mut group = div().flex().bg(t.background).rounded(px(MD)).p(px(4.));
+            let n = items.len();
+            for (i, ((label, on), pick)) in items.into_iter().zip(on_pick).enumerate() {
+                let (muted, muted_fg) = (t.muted, t.muted_fg);
+                group = group.child(
+                    div()
+                        .id(SharedString::from(format!("{id}-{label}")))
+                        .h(px(32.))
+                        .px(px(12.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .sm()
+                        .medium()
+                        .cursor_pointer()
+                        .when(i == 0, |d| d.rounded_l(px(MD)))
+                        .when(i == n - 1, |d| d.rounded_r(px(MD)))
+                        .when(on, |d| d.bg(t.accent))
+                        .when(!on, |d| d.hover(move |s| s.bg(muted).text_color(muted_fg)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            pick(this, cx);
+                            cx.notify();
+                        }))
+                        .child(label),
+                );
+            }
+            group
+        };
+        let proto_items: Vec<(String, bool)> = Protocol::ALL.into_iter().map(|p| (p.label().to_owned(), self.s.protocol == p)).collect();
+        let proto_picks: Vec<Box<dyn Fn(&mut Self, &mut Context<Self>)>> = Protocol::ALL.into_iter().map(|p| Box::new(move |this: &mut Self, _: &mut Context<Self>| this.s.protocol = p) as Box<dyn Fn(&mut Self, &mut Context<Self>)>).collect();
+        let group = segmented("proto", proto_items, proto_picks);
+        let toggle_w = 8. + Protocol::ALL.iter().map(|p| crate::ui::text_width(p.label(), 14., gpui::FontWeight::MEDIUM, window) + 24.).sum::<f32>();
+        let mode = (crate::os::SYSTEM_PROXY && self.s.system_wide).then(|| self.mode_row(cw, window, cx));
+        let room = page_room(cw, 32.);
+        vec![page_section(
+            "Connection",
+            &t,
+            [row("Protocol", Some("TLS gets through the most filters."), page_room(cw, toggle_w), group, &t, window)]
                 .into_iter()
-                .chain(mode)
                 .chain([row(
+                    "System-wide",
+                    Some(if !self.s.system_wide {
+                        "Only apps set to use the proxy: SOCKS5 127.0.0.1:10808, HTTP 10809."
+                    } else if crate::os::SYSTEM_PROXY {
+                        "Browsers and most apps, or every app in TUN mode, go through Hitori."
+                    } else {
+                        "Every app goes through Hitori. Asks for your password to connect."
+                    }),
+                    room,
+                    switch("system-wide", self.s.system_wide, &t).on_click(cx.listener(|this, _, _, cx| {
+                        this.s.system_wide = !this.s.system_wide;
+                        cx.notify();
+                    })),
+                    &t,
+                    window,
+                )])
+                .chain(mode)
+                .chain([
+                    row(
                         "Connect on startup",
-                        None,
-                        hint_room(32.),
+                        Some("Connect as soon as the app starts."),
+                        room,
                         switch("startup", self.s.auto_connect, &t).on_click(cx.listener(|this, _, _, cx| {
                             this.s.auto_connect = !this.s.auto_connect;
                             cx.notify();
@@ -198,7 +346,7 @@ impl Hitori {
                         } else {
                             "Block all traffic while the tunnel is down."
                         }),
-                        hint_room(32.),
+                        room,
                         switch("kill-switch", self.s.kill_switch, &t).on_click(cx.listener(|this, _, _, cx| {
                             this.s.kill_switch = !this.s.kill_switch;
                             cx.notify();
@@ -208,18 +356,11 @@ impl Hitori {
                     ),
                 ])
                 .collect(),
-            ))
-            .child(section("Location".into(), &t, vec![self.region_row(window, cx)]))
-            .child(section(
-                "Appearance".into(),
-                &t,
-                vec![row("Dark theme", None, hint_room(32.), switch("dark", dark, &t).on_click(cx.listener(move |this, _, _, cx| this.set_dark(!dark, cx))), &t, window)],
-            ))
-            .into_any_element()
+        )]
     }
 
     /// Detected country, how much of it is routed through the VPN, and a recheck button.
-    fn region_row(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    fn region_row(&self, cw: f32, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let t = self.theme(cx);
         let r = &self.s.region;
         let busy = r.status == crate::region::Status::Computing;
@@ -240,11 +381,11 @@ impl Hitori {
                     this.recheck_region(cx);
                 }
             }));
-        row("Detected location", Some(&hint), hint_room(w), button, &t, window)
+        row("Detected location", Some(&hint), page_room(cw, w), button, &t, window)
     }
 
     /// Windows and macOS: how system-wide mode works, the system proxy or a TUN.
-    fn mode_row(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    fn mode_row(&self, cw: f32, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let t = self.theme(cx);
         let modes = [(false, "System proxy"), (true, "TUN")];
         let mut group = div().flex().bg(t.background).rounded(px(MD)).p(px(4.));
@@ -277,7 +418,7 @@ impl Hitori {
             (true, true) => "Every app and DNS. Asks for administrator rights.",
             (true, false) => "Every app and DNS. Asks for your password.",
         };
-        row("Mode", Some(hint), hint_room(w), group, &t, window)
+        row("Mode", Some(hint), page_room(cw, w), group, &t, window)
     }
 
     pub fn sign_in_body(&self, cx: &mut Context<Self>) -> AnyElement {
