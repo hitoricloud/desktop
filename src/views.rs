@@ -1019,6 +1019,7 @@ impl Hitori {
             Conn::Off => "Unprotected",
         };
         let error = self.s.error.clone().filter(|_| self.s.conn == Conn::Off);
+        let failed = error.is_some();
         let where_: Option<String> = match self.s.conn {
             Conn::On if s.ip.is_empty() => Some(format!("{}, {}", s.city, s.country)),
             Conn::On => Some(format!("{} · {}, {}", s.ip, s.city, s.country)),
@@ -1048,6 +1049,15 @@ impl Hitori {
                         (None, None) => div().h(px(16.)).child(skeleton("status-skeleton", 144., 16., &t)).into_any_element(),
                     }),
             )
+            .when(failed, |d| {
+                d.child(
+                    button("view-log", Variant::Outline, Size::Xs, true, &t)
+                        .tooltip(tip("The full error and the core's output", &t))
+                        .child(icon("scroll-text", 12., t.foreground))
+                        .child("View log")
+                        .on_click(cx.listener(|this, _, _, cx| this.open_panel(Panel::Log, cx))),
+                )
+            })
     }
 
     fn field(&self, id: &'static str, t: &Theme) -> Fx {

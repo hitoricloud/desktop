@@ -406,6 +406,10 @@ impl Log {
         }
     }
 
+    pub fn lines(&self) -> Vec<String> {
+        self.tail.lock().unwrap().clone()
+    }
+
     pub fn take(&self) -> Vec<String> {
         std::mem::take(&mut *self.fresh.lock().unwrap())
     }
@@ -438,13 +442,12 @@ pub struct Core {
 }
 
 impl Core {
-    /// Start and wait until it serves; TUN mode may wait for the administrator's password.
-    pub fn start(plan: &Plan) -> Result<Core, String> {
+    /// Start and wait until it serves, writing its output to `log`; TUN mode may wait for the administrator's password.
+    pub fn start(plan: &Plan, log: Log) -> Result<Core, String> {
         let xray = xray_path().ok_or("The Xray core is missing — run scripts/fetch-xray.sh")?;
         let ports = Ports { probe: free_port(), metrics: free_port(), ping: free_port() };
         let path = crate::store::runtime_dir().join("core.json");
         let config = config(plan, ports)?;
-        let log = Log::default();
         if plan.tun {
             let helper = crate::helper::Link::start(&xray, &path, &config, plan.kill_switch, &log)?;
             return Ok(Core { child: None, helper: Some(helper), ports, tun: true, system_proxy: None, log, path });
@@ -491,7 +494,7 @@ impl Core {
         self.stop_child();
         // The system proxy stays in place for the core that replaces this one.
         let proxy = self.system_proxy.take();
-        let mut fresh = Core::start(&Plan { system_proxy: false, ..plan.clone() })?;
+        let mut fresh = Core::start(&Plan { system_proxy: false, ..plan.clone() }, self.log.clone())?;
         fresh.system_proxy = proxy;
         std::mem::swap(self, &mut fresh);
         Ok(())
@@ -858,7 +861,7 @@ mod tests {
         let mut p = plan();
         (p.exit, p.servers, p.default_route) = (up, vec![up, down], RuleMode::Vpn);
         assert!(!p.tun, "proxy mode: never the system-wide helper in tests");
-        let mut core = Core::start(&p).unwrap();
+        let mut core = Core::start(&p, Log::default()).unwrap();
         let through = |core: &Core| {
             let proxy = ureq::Proxy::new(format!("http://127.0.0.1:{}", core.ports.probe)).unwrap();
             ureq::AgentBuilder::new().proxy(proxy).timeout(Duration::from_secs(5)).build().get(&format!("http://{target}/")).call().map(|r| r.status())
@@ -989,7 +992,7 @@ mod tests {
             assert!(out.status.success(), "tun={tun} entry={} route={route:?}: {}", entry.is_some(), String::from_utf8_lossy(&out.stdout));
         }
         plan.apps.clear();
-        let core = Core::start(&plan).unwrap();
+        let core = Core::start(&plan, Log::default()).unwrap();
         let ip = exit_ip(core.ports.probe).expect("exit ip through the tunnel");
         eprintln!("exit ip via {}: {ip}", ee.id);
         let trace = |args: &[&str]| {
@@ -1076,7 +1079,7 @@ mod tests {
             base_rules: Arc::new(sub.base_rules),
             dns: Arc::new(sub.dns),
         };
-        let mut core = Core::start(&plan).unwrap();
+        let mut core = Core::start(&plan, Log::default()).unwrap();
         assert!(rules() >= 5, "policy rules installed");
         assert_eq!(loc(3), want, "plain curl goes through the tunnel");
         assert_eq!(format!("loc={}", country()), want, "names resolve and connect through the tunnel");

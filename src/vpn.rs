@@ -182,6 +182,8 @@ pub struct Vpn {
     reload: Option<Task<()>>,
     pinger: Option<Task<()>>,
     tester: Option<Task<()>>,
+    /// Output of the cores started this session, kept after one stops or fails for the log sheet.
+    log: xray::Log,
     login: Option<String>,
     auth: Arc<auth::Client>,
     /// Set to stop the Telegram sign-in in progress.
@@ -268,6 +270,7 @@ impl Vpn {
             ticker: None,
             reload: None,
             pinger: None,
+            log: xray::Log::default(),
             tester: None,
             login,
             auth,
@@ -891,6 +894,7 @@ impl Vpn {
         let plan = self.plan();
         let routing = self.s.routing();
         let previous = self.core.take();
+        let log = self.log.clone();
         self.starting = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -901,7 +905,7 @@ impl Vpn {
                         }
                         core.stop();
                     }
-                    Core::start(&plan)
+                    Core::start(&plan, log)
                 })
                 .await;
             this.update(cx, |this, cx| this.started(attempt, routing, result, cx)).ok();
@@ -932,6 +936,10 @@ impl Vpn {
                 cx.notify();
             }
         }
+    }
+
+    pub fn log_lines(&self) -> Vec<String> {
+        self.log.lines()
     }
 
     /// Connected now: the session clock and the 1 s metrics ticker start. (Also used without a core for screenshots.)
