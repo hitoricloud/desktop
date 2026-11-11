@@ -150,7 +150,7 @@ pub fn config(plan: &Plan, ports: Ports) -> Result<Value, String> {
         None => tagged(exit.variant(plan.protocol).ok_or("This server has no usable transport")?.1.clone(), "proxy"),
     };
     out.list.insert(0, main);
-    let routed: Vec<_> = plan.servers.iter().filter_map(|s| Some((s.id, out.route(s, None, plan.protocol)?))).collect();
+    let routed = ping_routes(&mut out, &plan.servers);
     let (ping_in, ping_rules) = ping_in(&routed, ports.ping);
 
     let mut rules = vec![];
@@ -299,7 +299,32 @@ pub fn selftest_config(metrics: u16) -> Value {
 
 const PING_PASS: &str = "ping";
 
-/// The `ping-in` inbound (one proxy user per server) and the rules sending each user out through its server only.
+/// `ping-in` user for one server over one transport: `ee-1-Hy2`.
+fn ping_user(id: &str, p: Protocol) -> &'static str {
+    crate::data::intern(&format!("{id}-{p:?}"))
+}
+
+/// A `ping-in` user and its outbound for every transport of every server.
+fn ping_routes(out: &mut Outbounds, servers: &[&'static Server]) -> Vec<(&'static str, String)> {
+    let mut routed = vec![];
+    for s in servers {
+        for (p, _) in &s.variants {
+            if let Some(tag) = out.route(s, None, *p) {
+                routed.push((ping_user(s.id, *p), tag));
+            }
+        }
+    }
+    routed
+}
+
+/// The server's `ping-in` users, the transport a connection would use first.
+fn ping_users(s: &Server, protocol: Protocol) -> Vec<&'static str> {
+    let first = s.variant(protocol).map(|(p, _)| p);
+    first.into_iter().chain(s.variants.iter().map(|(p, _)| *p).filter(|p| Some(*p) != first)).map(|p| ping_user(s.id, p)).collect()
+}
+
+/// The `ping-in` inbound (one proxy user per server and transport) and the rules sending each user out through its
+/// route only.
 fn ping_in(routed: &[(&'static str, String)], port: u16) -> (Value, Vec<Value>) {
     let accounts: Vec<Value> = routed.iter().map(|(id, _)| json!({"user": id, "pass": PING_PASS})).collect();
     let mut rules: Vec<Value> = routed.iter().map(|(id, tag)| field(json!({"inboundTag": ["ping-in"], "user": [id]}), tag)).collect();
@@ -310,7 +335,7 @@ fn ping_in(routed: &[(&'static str, String)], port: u16) -> (Value, Vec<Value>) 
 /// One-off core that only measures servers (used while disconnected).
 pub fn probe_config(servers: &[&'static Server], protocol: Protocol, ping: u16) -> Value {
     let mut out = Outbounds { list: vec![], protocol };
-    let routed: Vec<_> = servers.iter().filter_map(|s| Some((s.id, out.route(s, None, protocol)?))).collect();
+    let routed = ping_routes(&mut out, servers);
     let (inbound, rules) = ping_in(&routed, ping);
     out.list.push(json!({"tag": "block", "protocol": "blackhole"}));
     json!({"log": {"loglevel": "error"}, "inbounds": [inbound], "outbounds": out.list, "routing": {"rules": rules}})
@@ -586,6 +611,26 @@ fn ping_server(port: u16, id: &'static str, target: &'static str) -> Option<u32>
     None
 }
 
+/// Every transport of a server at once: the first one's round trip when it answers, else the fastest other's, so a
+/// server is not offline just because the chosen transport is blocked to it.
+fn ping_any(port: u16, users: &[&'static str], target: &'static str) -> Option<u32> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    for (i, user) in users.iter().copied().enumerate() {
+        let tx = tx.clone();
+        std::thread::spawn(move || tx.send((i, ping_server(port, user, target))));
+    }
+    drop(tx);
+    let mut others = vec![];
+    for (i, ms) in rx {
+        match (i, ms) {
+            (0, Some(_)) => return ms,
+            (_, Some(ms)) => others.push(ms),
+            _ => {}
+        }
+    }
+    others.into_iter().min()
+}
+
 pub type Pinged = Result<(&'static str, Option<u32>), String>;
 
 /// Latency test of every server at once, each result sent as it comes. Through the running core's `ping-in` when
@@ -610,7 +655,7 @@ fn ping(servers: Vec<&'static Server>, protocol: Protocol, running: Option<u16>,
         std::thread::scope(|scope| {
             for s in &servers {
                 let tx = tx.clone();
-                scope.spawn(move || tx.send_blocking(Ok((s.id, ping_server(port, s.id, target)))));
+                scope.spawn(move || tx.send_blocking(Ok((s.id, ping_any(port, &ping_users(s, protocol), target)))));
             }
         });
         if let Some((mut child, path)) = own {
@@ -714,7 +759,7 @@ mod tests {
         assert_eq!(rule_for(&c, "domain", "domain:blocked.example").unwrap()["outboundTag"], "proxy");
         assert_eq!(rule_for(&c, "protocol", "bittorrent").unwrap()["outboundTag"], "direct");
         let tags: Vec<_> = c["outbounds"].as_array().unwrap().iter().map(|o| o["tag"].as_str().unwrap().to_owned()).collect();
-        assert_eq!(tags, ["proxy", "p-aa-1", "p-bb-2-Grpc", "direct", "block"]);
+        assert_eq!(tags, ["proxy", "p-aa-1", "p-aa-1-Hy2", "p-bb-2-Grpc", "direct", "block"]);
         assert!(c["inbounds"].as_array().unwrap().iter().any(|i| i["port"] == SOCKS_PORT));
     }
 
@@ -724,10 +769,13 @@ mod tests {
         let ping = c["inbounds"].as_array().unwrap().iter().find(|i| i["tag"] == "ping-in").unwrap();
         assert_eq!((ping["port"].as_u64(), ping["listen"].as_str()), (Some(3), Some("127.0.0.1")));
         let users: Vec<_> = ping["settings"]["accounts"].as_array().unwrap().iter().map(|a| a["user"].as_str().unwrap()).collect();
-        assert_eq!(users, ["aa-1", "bb-2"]);
+        assert_eq!(users, ["aa-1-Tls", "aa-1-Hy2", "bb-2-Grpc"]);
         let rules = c["routing"]["rules"].as_array().unwrap();
         let to = |user: &str| rule_for(&c, "user", user).map(|r| r["outboundTag"].as_str().unwrap().to_owned());
-        assert_eq!((to("aa-1").as_deref(), to("bb-2").as_deref()), (Some("p-aa-1"), Some("p-bb-2-Grpc")));
+        assert_eq!(["aa-1-Tls", "aa-1-Hy2", "bb-2-Grpc"].map(to).map(Option::unwrap), ["p-aa-1", "p-aa-1-Hy2", "p-bb-2-Grpc"]);
+        let p = plan();
+        assert_eq!(ping_users(p.servers[0], Protocol::Hy2), ["aa-1-Hy2", "aa-1-Tls"], "the chosen transport first");
+        assert_eq!(ping_users(p.servers[1], Protocol::Tls), ["bb-2-Grpc"]);
         let last_ping = rules.iter().rposition(|r| r["inboundTag"][0] == "ping-in").unwrap();
         assert_eq!(rules[last_ping]["outboundTag"], "block", "an unknown user never leaves through another route");
         assert!(last_ping < position(&c, "ip", "10.0.0.0/8").unwrap(), "before the LAN and default rules");
@@ -736,9 +784,9 @@ mod tests {
         let p = plan();
         let probe = probe_config(&p.servers, Protocol::Tls, 4);
         assert_eq!(probe["inbounds"][0]["port"], 4);
-        assert_eq!(rule_for(&probe, "user", "bb-2").unwrap()["outboundTag"], "p-bb-2-Grpc");
+        assert_eq!(rule_for(&probe, "user", "bb-2-Grpc").unwrap()["outboundTag"], "p-bb-2-Grpc");
         let tags: Vec<_> = probe["outbounds"].as_array().unwrap().iter().map(|o| o["tag"].as_str().unwrap()).collect();
-        assert_eq!(tags, ["p-aa-1", "p-bb-2-Grpc", "block"]);
+        assert_eq!(tags, ["p-aa-1", "p-aa-1-Hy2", "p-bb-2-Grpc", "block"]);
     }
 
     const UUID: &str = "5783a3e7-e373-51cd-8642-c83782b807c5";
@@ -795,9 +843,13 @@ mod tests {
         let Some(xray) = xray_path() else { return eprintln!("skipped: no Xray core (scripts/fetch-xray.sh)") };
         let (_server, port, target) = fixture(&xray);
         let (up, down) = (local("up-1", port), local("down-2", free_port()));
-        let got = results(ping(vec![up, down], Protocol::Tls, None, target));
+        let other = local("other-3", port);
+        let dead = local("other-3", free_port()).variants[0].1.clone();
+        let other: &'static Server = Box::leak(Box::new(Server { variants: vec![(Protocol::Tls, dead), (Protocol::Grpc, other.variants[0].1.clone())], ..other.clone() }));
+        let got = results(ping(vec![up, down, other], Protocol::Tls, None, target));
         assert!(got["up-1"].is_some_and(|ms| ms < 5000), "{got:?}");
         assert_eq!(got["down-2"], None, "a dead server is a timeout, not another route");
+        assert!(got["other-3"].is_some(), "another transport answers for a blocked one: {got:?}");
         assert!(!std::fs::read_dir(crate::store::runtime_dir()).unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with("probe-")), "throwaway config removed");
 
         if TcpListener::bind(("127.0.0.1", SOCKS_PORT)).is_err() {
