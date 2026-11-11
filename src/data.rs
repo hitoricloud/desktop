@@ -36,6 +36,7 @@ impl Protocol {
     }
 }
 
+#[derive(Clone)]
 pub struct Server {
     pub id: &'static str,
     pub country: &'static str,
@@ -57,6 +58,12 @@ impl Server {
         pick(want).or_else(|| Protocol::ALL.iter().find_map(|p| pick(*p)))
     }
 
+    /// `EE-4821`: the country and a number no other server in the list has.
+    pub fn tag(&self) -> String {
+        let n = NUMBERS.read().unwrap().get(self.id).copied().unwrap_or_else(|| (fnv(self.id) % 10_000) as u16);
+        format!("{}-{n:04}", self.code)
+    }
+
     /// Transports that can carry another hop (no UDP-only ones).
     pub fn chainable(&self, want: Protocol) -> Option<(Protocol, &serde_json::Value)> {
         match self.variant(want) {
@@ -69,14 +76,39 @@ impl Server {
 static NONE: LazyLock<Server> =
     LazyLock::new(|| Server { id: "none", country: "No servers", code: "", city: "Sign in to connect", ip: "", lat: 52., lon: 30., variants: vec![] });
 static SERVERS: RwLock<Vec<&'static Server>> = RwLock::new(Vec::new());
-static PINGS: LazyLock<RwLock<HashMap<&'static str, u32>>> = LazyLock::new(Default::default);
+static NUMBERS: LazyLock<RwLock<HashMap<&'static str, u16>>> = LazyLock::new(Default::default);
+/// Last latency test result per server; `None` when it timed out.
+static PINGS: LazyLock<RwLock<HashMap<&'static str, Option<u32>>>> = LazyLock::new(Default::default);
 
 pub fn servers() -> Vec<&'static Server> {
     SERVERS.read().unwrap().clone()
 }
 
 pub fn set_servers(list: Vec<Server>) {
+    *NUMBERS.write().unwrap() = numbers(&list.iter().map(|s| s.id).collect::<Vec<_>>());
     *SERVERS.write().unwrap() = list.into_iter().map(|s| &*Box::leak(Box::new(s))).collect();
+}
+
+/// FNV-1a: the same on every run and Rust version, unlike the std hasher.
+fn fnv(s: &str) -> u32 {
+    s.bytes().fold(0x811c_9dc5, |h, b| (h ^ b as u32).wrapping_mul(0x0100_0193))
+}
+
+/// Server numbers from their subscription ids, so they stay put between launches; a clash takes the next free number.
+fn numbers(ids: &[&'static str]) -> HashMap<&'static str, u16> {
+    let mut sorted = ids.to_vec();
+    sorted.sort_unstable();
+    let mut taken = HashSet::new();
+    sorted
+        .into_iter()
+        .map(|id| {
+            let mut n = (fnv(id) % 10_000) as u16;
+            while !taken.insert(n) {
+                n = (n + 1) % 10_000;
+            }
+            (id, n)
+        })
+        .collect()
 }
 
 pub fn server(id: &str) -> &'static Server {
@@ -101,25 +133,59 @@ pub fn learn_exit(id: &str, ip: &str, city: Option<&str>, lat: f64, lon: f64) {
     }
 }
 
-/// Measured round trip through the server (the core's HTTP probe), if any.
+/// Measured round trip through the server (the latency test), if it answered.
 pub fn ping(id: &str) -> Option<u32> {
-    PINGS.read().unwrap().get(id).copied()
+    PINGS.read().unwrap().get(id).copied().flatten()
+}
+
+static LOADS: LazyLock<RwLock<HashMap<&'static str, u8>>> = LazyLock::new(Default::default);
+
+/// How busy the server is, 0–100 %, when the provider reports it.
+pub fn load(id: &str) -> Option<u8> {
+    LOADS.read().unwrap().get(id).copied()
+}
+
+pub fn set_loads(loads: impl IntoIterator<Item = (&'static str, u8)>) {
+    LOADS.write().unwrap().extend(loads.into_iter().map(|(id, l)| (id, l.min(100))));
+}
+
+/// The last latency test got no answer from this server.
+pub fn timed_out(id: &str) -> bool {
+    PINGS.read().unwrap().get(id).is_some_and(Option::is_none)
 }
 
 pub fn set_pings(pings: impl IntoIterator<Item = (&'static str, Option<u32>)>) {
-    let mut all = PINGS.write().unwrap();
-    for (id, ms) in pings {
-        match ms {
-            Some(ms) => all.insert(id, ms),
-            None => all.remove(id),
-        };
-    }
+    PINGS.write().unwrap().extend(pings);
+}
+
+/// Fastest first, then timeouts, then servers never measured; otherwise in subscription order.
+pub fn by_latency(list: &mut [&'static Server]) {
+    let pings = PINGS.read().unwrap();
+    list.sort_by_key(|s| match pings.get(s.id) {
+        Some(Some(ms)) => (0, *ms),
+        Some(None) => (1, 0),
+        None => (2, 0),
+    });
 }
 
 /// Lowest measured ping; the first server until something is measured.
 pub fn fastest() -> &'static Server {
     let all = servers();
     all.iter().filter_map(|s| ping(s.id).map(|p| (p, *s))).min_by_key(|(p, _)| *p).map(|(_, s)| s).or_else(|| all.first().copied()).unwrap_or(&NONE)
+}
+
+/// A country's best server: lowest measured ping, then lowest load among the ones that did not time out.
+pub fn best_in(code: &str) -> &'static str {
+    let pings = PINGS.read().unwrap();
+    let loads = LOADS.read().unwrap();
+    let all: Vec<_> = servers().into_iter().filter(|s| s.code == code).collect();
+    all.iter()
+        .min_by_key(|s| match pings.get(s.id) {
+            Some(Some(ms)) => (0, *ms, loads.get(s.id).copied().unwrap_or(100)),
+            None => (1, 0, loads.get(s.id).copied().unwrap_or(100)),
+            Some(None) => (2, 0, 0),
+        })
+        .map_or(NONE.id, |s| s.id)
 }
 
 /// English name and capital of the countries nodes are likely to be in, for the list and the map before an exit is seen.
@@ -505,6 +571,33 @@ mod tests {
         assert_eq!(app_id(".foot-wrapped"), "foot");
         let steam = processes("steam");
         assert!(steam.contains(&"steamwebhelper".to_owned()) && steam.contains(&".steam-wrapped".to_owned()));
+    }
+
+    #[test]
+    fn latency_order_and_timeouts() {
+        let node = |id: &'static str| &*Box::leak(Box::new(Server { id, country: "", code: "", city: "", ip: "", lat: 0., lon: 0., variants: vec![] }));
+        let mut list = vec![node("t-never"), node("t-dead"), node("t-slow"), node("t-fast")];
+        set_pings([("t-dead", None), ("t-slow", Some(300)), ("t-fast", Some(40))]);
+        by_latency(&mut list);
+        assert_eq!(list.iter().map(|s| s.id).collect::<Vec<_>>(), ["t-fast", "t-slow", "t-dead", "t-never"]);
+        assert!(timed_out("t-dead") && !timed_out("t-never") && !timed_out("t-fast"));
+        assert_eq!((ping("t-dead"), ping("t-fast")), (None, Some(40)));
+        set_pings([("t-dead", Some(90))]);
+        assert!(!timed_out("t-dead"), "a later answer replaces the timeout");
+    }
+
+    #[test]
+    fn server_numbers_are_unique_and_stable() {
+        let ids: Vec<&'static str> = (0..3000).map(|i| intern(&format!("x{}-{}", i % 40, i / 40))).collect();
+        let got = numbers(&ids);
+        let distinct: HashSet<u16> = got.values().copied().collect();
+        assert_eq!(distinct.len(), ids.len(), "every server its own number, clashes included");
+        let mut reversed = ids.clone();
+        reversed.reverse();
+        assert_eq!(numbers(&reversed), got, "subscription order does not matter");
+        let pair = numbers(&["fi-2", "de-2"]);
+        assert_ne!(pair["fi-2"], pair["de-2"]);
+        assert_eq!(pair["fi-2"], (fnv("fi-2") % 10_000) as u16, "same number every launch");
     }
 
     #[test]

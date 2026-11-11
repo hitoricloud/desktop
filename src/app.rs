@@ -2,7 +2,7 @@
 use std::time::Duration;
 
 use gpui::{
-    App, AppContext, Context, Entity, FocusHandle, Focusable, KeyBinding, Render, Subscription, Window, actions, div, prelude::*,
+    App, AppContext, Context, Element, Entity, FocusHandle, Focusable, KeyBinding, Refineable, Render, Subscription, Window, actions, div, prelude::*,
 };
 
 use crate::data::{self, AppRule, RuleMode};
@@ -91,16 +91,17 @@ pub struct Ring {
 /// Window root: the cached app view plus the ping-ring layer, whose 100 Hz frames redraw only the ring.
 pub struct Shell {
     pub hitori: Entity<Hitori>,
-    /// Tray popover: the window is a transparent overlay of the work area and the card sits at this point.
-    pub card: Option<(f32, f32)>,
+    /// Tray popover: the window is a transparent overlay (of the work area, or just the card) and the card sits in it.
+    pub card: Option<crate::tray::Card>,
 }
 
 impl Render for Shell {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let t = theme(cx);
-        let ring = self.hitori.read(cx).ring.get();
-        if let Some((x, y)) = self.card {
-            let (w, h) = crate::tray::POPUP;
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(card) = self.card {
+            // Placed in the window the compositor actually gave us, which can differ from the one asked for.
+            let vp = window.viewport_size();
+            let (x, y, w, h) = card.place((f32::from(vp.width), f32::from(vp.height)));
+            self.hitori.read(cx).frame.set(Some(gpui::size(gpui::px(w), gpui::px(h))));
             // Clicks outside the card close the popover (the overlay covers everything but the bar).
             return div()
                 .size_full()
@@ -121,21 +122,85 @@ impl Render for Shell {
             .size_full()
             .relative()
             .child(gpui::AnyView::from(self.hitori.clone()).cached(gpui::StyleRefinement::default().size_full()))
-            .children(ring.map(|r| {
-                let (x, y, w, h) = r.clip;
-                div().absolute().left(gpui::px(x)).top(gpui::px(y)).w(gpui::px(w)).h(gpui::px(h)).overflow_hidden().child(
-                    div()
-                        .absolute()
-                        .left(gpui::px(r.at.0 - x - 12.))
-                        .top(gpui::px(r.at.1 - y - 12.))
-                        .size(gpui::px(24.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(crate::map::ping_ring(r.on, &t))
-                        .child(crate::map::selected_dot(r.on, &t)),
-                )
-            }))
+            .child(RingLayer(self.hitori.clone()))
+    }
+}
+
+/// The isolated ping ring, built in prepaint after the cached app view has placed it, so it never trails the map by a frame.
+struct RingLayer(Entity<Hitori>);
+
+impl IntoElement for RingLayer {
+    type Element = Self;
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for RingLayer {
+    type RequestLayoutState = ();
+    type PrepaintState = Option<gpui::AnyElement>;
+
+    fn id(&self) -> Option<gpui::ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(&mut self, _: Option<&gpui::GlobalElementId>, _: Option<&gpui::InspectorElementId>, window: &mut Window, cx: &mut App) -> (gpui::LayoutId, ()) {
+        let mut style = gpui::Style::default();
+        style.refine(&gpui::StyleRefinement::default().absolute().inset_0());
+        (window.request_layout(style, None, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        bounds: gpui::Bounds<gpui::Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<gpui::AnyElement> {
+        let r = self.0.read(cx).ring.get()?;
+        let t = theme(cx);
+        let (x, y, w, h) = r.clip;
+        let mut ring = div()
+            .w(gpui::px(w))
+            .h(gpui::px(h))
+            .overflow_hidden()
+            .child(
+                div()
+                    .absolute()
+                    .left(gpui::px(r.at.0 - x - 12.))
+                    .top(gpui::px(r.at.1 - y - 12.))
+                    .size(gpui::px(24.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(crate::map::ping_ring(r.on, &t))
+                    .child(crate::map::selected_dot(r.on, &t)),
+            )
+            .into_any_element();
+        ring.layout_as_root(bounds.size.into(), window, cx);
+        ring.prepaint_at(bounds.origin + gpui::point(gpui::px(x), gpui::px(y)), window, cx);
+        Some(ring)
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        _: gpui::Bounds<gpui::Pixels>,
+        _: &mut (),
+        ring: &mut Option<gpui::AnyElement>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        if let Some(ring) = ring {
+            ring.paint(window, cx);
+        }
     }
 }
 
@@ -146,6 +211,8 @@ pub struct Hitori {
     pub variant: Variant,
     /// Shown as the tray icon's popover card (no backdrop, transparent corners).
     pub popover: bool,
+    /// The popover card's size: what the layout fills instead of the window.
+    pub frame: std::cell::Cell<Option<gpui::Size<gpui::Pixels>>>,
     /// This window's copy of the shared state; edits are pushed to `vpn` after each render.
     pub s: Shared,
     published: Shared,
@@ -154,12 +221,19 @@ pub struct Hitori {
     pub panel: Option<Panel>,
     pub palette: Option<Mode>,
     pub palette_index: usize,
+    palette_query: gpui::SharedString,
     pub search: Entity<TextInput>,
     /// Subscription link field on the Account sheet.
     pub link: Entity<TextInput>,
+    /// The sign-in screen shows the subscription link field instead of only Telegram.
+    pub paste_link: bool,
     /// New website rule on the rules page and sheet.
     pub site_input: Entity<TextInput>,
     pub page: Page,
+    /// The inspector's server list is ordered by the last latency test.
+    pub sort_ping: bool,
+    /// Countries opened in that list (flag codes).
+    pub open_countries: Vec<&'static str>,
     pub menu: Option<Menu>,
     pub map: MapState,
     pub ring: std::cell::Cell<Option<Ring>>,
@@ -182,9 +256,14 @@ impl Hitori {
         let link = cx.new(|cx| TextInput::new("https://…/sub/…", t.muted_fg, t.foreground, cx));
         let site_input = cx.new(|cx| TextInput::new("Add a website, e.g. youtube.com", t.muted_fg, t.foreground, cx));
         let site_changes = cx.observe(&site_input, |_, _, cx| cx.notify());
-        let changes = cx.observe(&search, |this, _, cx| {
-            this.palette_index = 0;
-            cx.notify();
+        // The caret blink notifies too; only an edit moves the selection back to the top.
+        let changes = cx.observe(&search, |this, search, cx| {
+            let query = search.read(cx).content.clone();
+            if query != this.palette_query {
+                this.palette_query = query;
+                this.palette_index = 0;
+                cx.notify();
+            }
         });
         let focus = cx.focus_handle();
         window.focus(&focus);
@@ -207,6 +286,7 @@ impl Hitori {
             focus,
             variant,
             popover: false,
+            frame: Default::default(),
             s: shared.clone(),
             published: shared,
             vpn,
@@ -214,10 +294,14 @@ impl Hitori {
             panel: None,
             palette: None,
             palette_index: 0,
+            palette_query: Default::default(),
             search,
             link,
+            paste_link: false,
             site_input,
             page: Page::Map,
+            sort_ping: false,
+            open_countries: vec![],
             menu: None,
             map: MapState::new(),
             ring: Default::default(),
@@ -264,6 +348,14 @@ impl Hitori {
                 "entry" => self.s.entry_id = Some(data::server(value).id),
                 "on" => self.with_vpn(cx, |v, cx| v.connected(cx)),
                 "connecting" => self.connect(cx),
+                "ping" => self.test_pings(cx),
+                "sort" => self.sort_ping = true,
+                "open" => self.open_countries.push(data::intern(&value.to_uppercase())),
+                "load" => {
+                    if let Some((id, pct)) = value.split_once('=') {
+                        data::set_loads([(data::intern(id), pct.parse().unwrap_or(0))]);
+                    }
+                }
                 "tray" => self.variant = Variant::Tray,
                 "light" => self.set_dark(false, cx),
                 "small" => self.s.rules_big = false,
@@ -271,7 +363,26 @@ impl Hitori {
                 "page" => self.page = if value == "rules" { Page::Rules } else { Page::Map },
                 "siterule" => self.open_palette(Mode::Site(data::intern(value)), window, cx),
                 "collapsed" => self.sidebar_open = false,
+                // A synthetic pointer move, to capture hover states.
+                "mouse" => {
+                    let (x, y) = value.split_once('x').map_or((0., 0.), |(x, y)| (x.parse().unwrap_or(0.), y.parse().unwrap_or(0.)));
+                    let event = gpui::MouseMoveEvent { position: gpui::point(gpui::px(x), gpui::px(y)), ..Default::default() };
+                    window.defer(cx, move |window, cx| {
+                        window.dispatch_event(gpui::PlatformInput::MouseMove(event), cx);
+                    });
+                }
+                "zoom" | "pan" => self.map.script(key, value),
                 "snooze" => self.s.snoozed.push(leak(value)),
+                // Sign-in screen: `signin` (signed out), `waiting`, `paste`, `error:<text>`, `nosub:<name>`.
+                "signin" => self.s.signed_in = false,
+                "waiting" => self.s.telegram = crate::vpn::Telegram::Browser("https://oauth.telegram.org/auth".into()),
+                "paste" => self.paste_link = true,
+                "error" => self.s.error = Some(value.to_owned()),
+                "nosub" => {
+                    self.s.signed_in = true;
+                    self.s.no_subscription = true;
+                    self.s.user = Some(crate::auth::User { name: value.to_owned(), username: Some(value.to_lowercase()), has_avatar: false });
+                }
                 "panel" => {
                     self.panel = Some(match value {
                         "account" => Panel::Account,
@@ -302,6 +413,11 @@ impl Hitori {
         theme(cx)
     }
 
+    /// The area this view lays out in: the popover card, else the window.
+    pub fn viewport(&self, window: &Window) -> gpui::Size<gpui::Pixels> {
+        self.frame.get().unwrap_or_else(|| window.viewport_size())
+    }
+
     /// Send local edits to the model, which tells the other windows and the tray.
     pub fn push(&mut self, cx: &mut Context<Self>) {
         if self.s != self.published {
@@ -315,7 +431,7 @@ impl Hitori {
     }
 
     /// Run a model operation on the current state and take its result back.
-    fn with_vpn(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Vpn, &mut Context<Vpn>)) {
+    pub fn with_vpn(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Vpn, &mut Context<Vpn>)) {
         self.push(cx);
         self.vpn.update(cx, f);
         self.s = self.vpn.read(cx).s.clone();
@@ -325,6 +441,10 @@ impl Hitori {
 
     pub fn connect(&mut self, cx: &mut Context<Self>) {
         self.with_vpn(cx, |v, cx| v.connect(cx));
+    }
+
+    pub fn test_pings(&mut self, cx: &mut Context<Self>) {
+        self.with_vpn(cx, |v, cx| v.test_pings(cx));
     }
 
     /// Power button: without an account it opens sign-in instead.
@@ -345,8 +465,16 @@ impl Hitori {
         self.with_vpn(cx, |v, cx| v.sign_in(link, cx));
     }
 
+    /// Detect the location again and reload its blocked lists; `self.s.region` has the result (Settings, onboarding).
+    pub fn recheck_region(&mut self, cx: &mut Context<Self>) {
+        self.with_vpn(cx, |v, cx| v.recheck_region(cx));
+    }
+
     pub fn sign_out(&mut self, cx: &mut Context<Self>) {
         self.menu = None;
+        self.panel = None;
+        self.palette = None;
+        self.paste_link = false;
         self.link.update(cx, |input, _| input.reset());
         self.with_vpn(cx, |v, cx| v.sign_out(cx));
     }
@@ -456,6 +584,7 @@ impl Hitori {
         self.menu = None;
         self.palette = Some(mode);
         self.palette_index = 0;
+        self.palette_query = Default::default();
         let placeholder = match mode {
             Mode::Entry => "Route through…".to_owned(),
             Mode::Rule(a) => format!("Search {} settings", data::app(a).name),
@@ -515,6 +644,9 @@ impl Hitori {
     }
 
     fn on_toggle_palette(&mut self, _: &TogglePalette, window: &mut Window, cx: &mut Context<Self>) {
+        if self.gated() {
+            return;
+        }
         if self.palette.is_some() { self.close_palette(window, cx) } else { self.open_palette(Mode::Exit, window, cx) }
     }
 
@@ -531,6 +663,10 @@ impl Hitori {
     }
 
     fn on_variant(&mut self, variant: Variant, cx: &mut Context<Self>) {
+        // The cockpit is laid out for a whole window, not the popover's card.
+        if self.popover {
+            return;
+        }
         self.variant = variant;
         self.menu = None;
         self.map.refit();
@@ -565,6 +701,22 @@ impl Render for Hitori {
             cx.defer_in(window, |this, _, cx| this.push(cx));
         }
         self.ring.set(None);
+        // Signed out (or without a subscription) every window shows only the sign-in screen.
+        if self.gated() {
+            (self.menu, self.panel, self.palette) = (None, None, None);
+            return div()
+                .key_context("Hitori")
+                .track_focus(&self.focus)
+                .on_action(cx.listener(Self::on_dismiss))
+                .size_full()
+                .font_family("Google Sans")
+                .tnum()
+                .text_size(gpui::px(16.))
+                .line_height(gpui::px(24.))
+                .text_color(t.foreground)
+                .child(self.onboarding(window, cx))
+                .into_any_element();
+        }
         let open = self.menu.is_some() || self.menu_fx.shown(150.).is_some() || self.panel_fx.shown(300.).is_some() || self.palette_fx.shown(200.).is_some();
         self.ring_isolated.set(!open);
         let body = match self.variant {
@@ -593,5 +745,6 @@ impl Render for Hitori {
             .children(self.menu.map(|_| self.menu_catcher(cx)))
             .children(self.panel_fx.shown(300.).map(|panel| self.sheet(panel, window, cx)))
             .children(self.palette_fx.shown(200.).map(|mode| self.palette_dialog(mode, window, cx)))
+            .into_any_element()
     }
 }

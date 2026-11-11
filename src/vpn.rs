@@ -1,14 +1,18 @@
 //! The VPN model every window and the tray mirror: account, servers, the running core and its numbers.
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use gpui::{Context, Task};
+use gpui::{Context, RenderImage, Task};
 use serde_json::Value;
 
 use crate::app::Conn;
+use crate::auth;
 use crate::data::{self, Account, AppRule, Protocol, RuleMode, Scope, Suggestion};
+use crate::live;
 use crate::net::{self, Geo};
+use crate::region::{self, Location};
 use crate::store::{self, Login, Rule, Settings};
 use crate::sub;
 use crate::suggest::Tracker;
@@ -28,8 +32,16 @@ pub struct Stats {
     pub up: f64,
     /// Probe round trip through the whole route, ms.
     pub latency: Option<u32>,
-    /// Bytes this session.
-    pub total: u64,
+}
+
+/// Telegram sign-in progress.
+#[derive(Clone, PartialEq)]
+pub enum Telegram {
+    Idle,
+    /// Asking the backend for the Telegram page.
+    Starting,
+    /// The browser is at this page; waiting for it to come back.
+    Browser(String),
 }
 
 /// VPN state every window shows: the main window and the tray popup mirror one `Vpn` model.
@@ -46,6 +58,7 @@ pub struct Shared {
     pub kill_switch: bool,
     pub default_route: RuleMode,
     pub system_wide: bool,
+    pub tun: bool,
     pub app_routes: Vec<(&'static str, AppRule)>,
     pub sites: Vec<(&'static str, AppRule)>,
     pub suggestions: Vec<Suggestion>,
@@ -54,6 +67,12 @@ pub struct Shared {
     pub rules_big: bool,
     pub dark: bool,
     pub signed_in: bool,
+    /// Signed in with Telegram: name and avatar.
+    pub user: Option<auth::User>,
+    pub avatar: Option<Arc<RenderImage>>,
+    pub telegram: Telegram,
+    /// Signed in with Telegram, but the account has no subscription.
+    pub no_subscription: bool,
     pub account: Option<Account>,
     /// Signing in or refreshing the subscription.
     pub busy: bool,
@@ -61,9 +80,21 @@ pub struct Shared {
     pub stats: Stats,
     /// Bumped when the server list, pings or exits change.
     pub servers_gen: u32,
+    /// A latency test is running; these servers have not answered yet.
+    pub testing: bool,
+    pub pending: Vec<&'static str>,
+    /// When the last latency test finished.
+    pub tested_at: Option<Instant>,
+    /// Detected country and its blocked lists, from launch on (also before signing in).
+    pub region: region::Summary,
 }
 
 impl Shared {
+    /// System-wide through a TUN device: always on Linux, by choice on Windows and macOS.
+    pub fn uses_tun(&self) -> bool {
+        self.system_wide && (self.tun || !crate::os::SYSTEM_PROXY)
+    }
+
     /// Fields only the model changes; a window adopts them even while it has edits of its own to push.
     pub fn adopt(&mut self, model: &Shared) {
         self.conn = model.conn;
@@ -71,11 +102,19 @@ impl Shared {
         self.me = model.me.clone();
         self.recents = model.recents.clone();
         self.signed_in = model.signed_in;
+        self.user = model.user.clone();
+        self.avatar = model.avatar.clone();
+        self.telegram = model.telegram.clone();
+        self.no_subscription = model.no_subscription;
         self.account = model.account.clone();
         self.busy = model.busy;
         self.error = model.error.clone();
         self.stats = model.stats.clone();
         self.servers_gen = model.servers_gen;
+        self.testing = model.testing;
+        self.pending = model.pending.clone();
+        self.tested_at = model.tested_at;
+        self.region = model.region.clone();
         if !data::has_server(self.server_id) {
             self.server_id = model.server_id;
         }
@@ -91,6 +130,7 @@ impl Shared {
             kill_switch: self.kill_switch,
             route: self.default_route.key().into(),
             system_wide: self.system_wide,
+            tun: self.tun,
             dark: self.dark,
             rules_big: self.rules_big,
             apps: self.app_routes.iter().map(|(a, r)| Rule::from_app(a, r)).collect(),
@@ -141,19 +181,35 @@ pub struct Vpn {
     ticker: Option<Task<()>>,
     reload: Option<Task<()>>,
     pinger: Option<Task<()>>,
-    probing: bool,
+    tester: Option<Task<()>>,
     login: Option<String>,
+    auth: Arc<auth::Client>,
+    /// Set to stop the Telegram sign-in in progress.
+    cancel: Option<Arc<AtomicBool>>,
     lists: Lists,
     saved: Settings,
     /// Routing the running core was started with.
     applied: Option<Routing>,
     bytes: Option<(Instant, u64, u64)>,
-    first_bytes: u64,
     failures: u32,
     exits: HashMap<String, Exit>,
     autoconnect_done: bool,
     tracker: Tracker,
     _scanner: Task<()>,
+    location: Option<Location>,
+    /// The region's lists as tunnel rules, merged after the subscription's.
+    region_rules: Arc<Vec<Value>>,
+    checking: Option<Task<()>>,
+    last_check: Option<Instant>,
+    net_addr: Option<std::net::IpAddr>,
+    _region_watch: Task<()>,
+    /// Live updates while signed in with Telegram, and the server list they last loaded.
+    live: Option<(live::Live, Task<()>)>,
+    revs: live::Revs,
+    /// The app's own requests go through the TUN; a change reconnects the live socket.
+    tunneled: bool,
+    /// Servers gone from the subscription that the running tunnel still uses, listed offline until it leaves them.
+    gone: Vec<&'static str>,
 }
 
 impl Vpn {
@@ -161,6 +217,9 @@ impl Vpn {
         let saved: Settings = store::load(&Settings::path()).unwrap_or_default();
         let login = store::load::<Login>(&Login::path()).map(|l| l.url).or_else(|| std::env::var("HITORI_SUB").ok());
         let exits: HashMap<String, Exit> = store::load(&exits_path()).unwrap_or_default();
+        let location: Option<Location> = store::load(&Location::path());
+        let auth = Arc::new(auth::Client::new(auth::api(), auth::session_path()));
+        let session = auth.session();
         let i = data::intern;
         let s = Shared {
             conn: Conn::Off,
@@ -168,12 +227,13 @@ impl Vpn {
             server_id: saved.server.as_deref().map(i).unwrap_or("none"),
             entry_id: saved.entry.as_deref().map(i),
             recents: saved.recents.iter().map(|r| i(r)).collect(),
-            me: None,
+            me: location.as_ref().map(|l| Me { ip: l.ip.clone(), geo: Some(l.geo()) }),
             protocol: saved.protocol.into(),
             auto_connect: saved.auto_connect,
             kill_switch: saved.kill_switch,
             default_route: RuleMode::parse(&saved.route),
             system_wide: saved.system_wide,
+            tun: saved.tun,
             app_routes: saved.apps.iter().map(Rule::to_app).collect(),
             sites: saved.sites(),
             suggestions: vec![],
@@ -181,12 +241,24 @@ impl Vpn {
             dismissed: saved.dismissed.clone(),
             rules_big: saved.rules_big,
             dark: saved.dark,
-            signed_in: login.is_some(),
+            signed_in: login.is_some() || session.is_some(),
+            user: session.as_ref().map(|s| s.user.clone()),
+            avatar: None,
+            telegram: Telegram::Idle,
+            no_subscription: false,
             account: None,
             busy: false,
             error: None,
             stats: Stats::default(),
             servers_gen: 0,
+            testing: false,
+            pending: vec![],
+            tested_at: None,
+            region: region::Summary {
+                country: location.as_ref().map(|l| l.country.clone()),
+                name: location.as_ref().and_then(|l| l.name.clone()),
+                ..Default::default()
+            },
         };
         let mut this = Self {
             s,
@@ -196,26 +268,42 @@ impl Vpn {
             ticker: None,
             reload: None,
             pinger: None,
-            probing: false,
+            tester: None,
             login,
+            auth,
+            cancel: None,
             lists: Lists::default(),
             saved,
             applied: None,
             bytes: None,
-            first_bytes: 0,
             failures: 0,
             exits,
             autoconnect_done: false,
             tracker: Tracker::new(),
             _scanner: Self::scanner(cx),
+            location,
+            region_rules: Arc::default(),
+            checking: None,
+            last_check: None,
+            net_addr: region::local_addr(),
+            _region_watch: Self::region_watch(cx),
+            live: None,
+            revs: live::Revs::default(),
+            tunneled: false,
+            gone: vec![],
         };
-        if this.login.is_some()
+        if this.s.signed_in
             && let Ok(body) = std::fs::read(subscription_path())
         {
             let _ = this.load_subscription(&body, cx);
         }
-        this.refresh(None, cx);
-        this.load_me(cx);
+        if session.is_some() {
+            this.cached_avatar(cx);
+            this.sync(cx);
+        } else {
+            this.refresh(None, cx);
+        }
+        this.check_region(false, cx);
         cx.observe_self(|this, cx| this.changed(cx)).detach();
         cx.on_app_quit(|this, _| {
             let core = this.core.take();
@@ -295,42 +383,117 @@ impl Vpn {
         .detach();
     }
 
-    fn load_me(&mut self, cx: &mut Context<Self>) {
+    // ---------- region ----------
+
+    /// The app's own requests skip the tunnel: while disconnected, and in proxy mode (the app itself is not proxied).
+    fn direct(&self) -> bool {
+        self.s.conn == Conn::Off || !self.core.as_ref().map_or(self.s.uses_tun(), |c| c.tun)
+    }
+
+    /// Detect the country again and download its lists now (Settings, the onboarding screen).
+    pub fn recheck_region(&mut self, cx: &mut Context<Self>) {
+        self.check_region(true, cx);
+    }
+
+    /// Public IP → country → lists. Through the tunnel only the lists of the known country are refreshed.
+    fn check_region(&mut self, force: bool, cx: &mut Context<Self>) {
+        if self.checking.is_some() {
+            return;
+        }
+        let lookup = self.direct();
+        let cached = self.location.clone();
+        // Before the network answers: the cached lists, so routing has them from the start.
+        let offline = cached.as_ref().filter(|_| self.region_rules.is_empty()).map(|l| l.country.clone());
+        let exits: Vec<String> =
+            self.exits.values().map(|e| e.ip.clone()).chain(data::servers().iter().map(|s| s.ip.to_owned())).filter(|ip| !ip.is_empty()).collect();
+        let attempt = self.attempt;
+        self.last_check = Some(Instant::now());
+        self.s.region.status = region::Status::Computing;
+        cx.notify();
+        self.checking = Some(cx.spawn(async move |this, cx| {
+            if let Some(country) = offline {
+                let (lists, _) = cx.background_executor().spawn(async move { region::load(&country, region::Fetch::Never) }).await;
+                this.update(cx, |this, cx| this.set_region_lists(&lists, cx)).ok();
+            }
+            let got = cx.background_executor().spawn(async move { region::check(cached, lookup, force, &exits) }).await;
+            this.update(cx, |this, cx| this.region_checked(lookup && attempt != this.attempt, got, cx)).ok();
+        }));
+    }
+
+    fn region_checked(&mut self, raced: bool, got: Result<Option<region::Found>, String>, cx: &mut Context<Self>) {
+        self.checking = None;
+        // A connection started meanwhile: in system-wide mode the lookup may have gone through it.
+        let raced = raced && self.s.uses_tun();
+        self.s.region.status = match got {
+            Ok(Some(found)) if !raced => {
+                let l = found.location;
+                (self.s.region.country, self.s.region.name) = (Some(l.country.clone()), l.name.clone());
+                self.s.me = Some(Me { ip: l.ip.clone(), geo: Some(l.geo()) });
+                store::save(&Location::path(), &l, false);
+                self.location = Some(l);
+                self.set_region_lists(&found.lists, cx);
+                if found.missing { region::Status::Failed(format!("Cannot download the lists for {}", self.s.region.place())) } else { region::Status::Ready }
+            }
+            Ok(_) => region::Status::Ready,
+            Err(e) => region::Status::Failed(e),
+        };
+        cx.notify();
+    }
+
+    fn set_region_lists(&mut self, lists: &region::Lists, cx: &mut Context<Self>) {
+        (self.s.region.domains, self.s.region.subnets) = (lists.domains.len(), lists.subnets.len());
+        let rules = lists.rules();
+        if *self.region_rules != rules {
+            self.region_rules = Arc::new(rules);
+            // A running core picks the new lists up like a rules edit.
+            if self.s.conn == Conn::On {
+                self.applied = None;
+            }
+        }
+        cx.notify();
+    }
+
+    /// Every 30 s: a new local network, or an old check, means another look at the public IP.
+    fn region_watch(cx: &mut Context<Self>) -> Task<()> {
         cx.spawn(async move |this, cx| {
-            let Some(ip) = cx.background_executor().spawn(async { net::my_ip() }).await else { return };
-            let ip2 = ip.clone();
-            this.update(cx, |this, cx| {
-                this.s.me = Some(Me { ip: ip.clone(), geo: None });
-                cx.notify();
-            })
-            .ok();
-            let geo = cx.background_executor().spawn(async move { net::locate(&ip2) }).await;
-            this.update(cx, |this, cx| {
-                this.s.me = Some(Me { ip, geo });
-                cx.notify();
-            })
-            .ok();
+            loop {
+                cx.background_executor().timer(Duration::from_secs(30)).await;
+                let addr = cx.background_executor().spawn(async { region::local_addr() }).await;
+                let alive = this.update(cx, |this, cx| {
+                    let changed = std::mem::replace(&mut this.net_addr, addr) != addr;
+                    if changed {
+                        this.kick_live();
+                    }
+                    let backoff = this.last_check.is_some_and(|t| t.elapsed() < Duration::from_secs(120));
+                    if this.direct() && (changed || !backoff) && region::due(this.location.as_ref(), region::now(), changed) {
+                        this.check_region(false, cx);
+                    }
+                });
+                if alive.is_err() {
+                    break;
+                }
+            }
         })
-        .detach();
     }
 
     // ---------- account ----------
 
     /// Parse and adopt a subscription body; servers, lists and remembered exits.
     fn load_subscription(&mut self, body: &[u8], cx: &mut Context<Self>) -> Result<(), String> {
-        let parsed = sub::parse(body)?;
+        let mut parsed = sub::parse(body)?;
+        let on = self.s.conn != Conn::Off;
+        self.gone = [Some(self.s.server_id), self.s.entry_id]
+            .into_iter()
+            .flatten()
+            .filter(|id| on && data::has_server(id) && parsed.servers.iter().all(|s| s.id != *id))
+            .collect();
+        parsed.servers.extend(self.gone.iter().map(|id| data::server(id).clone()));
         data::set_servers(parsed.servers);
+        data::set_pings(self.gone.iter().map(|id| (*id, None)));
         for (id, e) in &self.exits {
             data::learn_exit(id, &e.ip, e.city.as_deref(), e.lat, e.lon);
         }
         self.lists = Lists { tunnel: Arc::new(parsed.tunnel_rules), base: Arc::new(parsed.base_rules), dns: Arc::new(parsed.dns) };
-        if self.lists.tunnel.is_empty() {
-            cx.spawn(async move |this, cx| {
-                let list = cx.background_executor().spawn(async { sub::community_list() }).await;
-                this.update(cx, |this, _| this.lists.tunnel = Arc::new(list)).ok();
-            })
-            .detach();
-        }
         if !data::has_server(self.s.server_id) {
             self.s.server_id = data::fastest().id;
         }
@@ -379,6 +542,9 @@ impl Vpn {
                         let _ = store::write(&subscription_path(), &body, true);
                         this.s.error = this.load_subscription(&body, cx).err();
                         this.s.account = account.or(this.s.account.take());
+                        if this.revs.loaded() {
+                            this.sync(cx);
+                        }
                         if this.s.auto_connect && !this.autoconnect_done && this.s.conn == Conn::Off {
                             this.connect(cx);
                         }
@@ -395,23 +561,280 @@ impl Vpn {
     }
 
     pub fn sign_in(&mut self, link: String, cx: &mut Context<Self>) {
+        self.cancel_sign_in(cx);
         self.s.error = None;
         self.refresh(Some(link), cx);
     }
 
+    /// Telegram sign-in: the browser opens at the backend's Telegram page and comes back to a loopback port.
+    pub fn telegram_sign_in(&mut self, cx: &mut Context<Self>) {
+        if self.s.telegram != Telegram::Idle {
+            return;
+        }
+        let flag = Arc::new(AtomicBool::new(false));
+        self.cancel = Some(flag.clone());
+        self.s.telegram = Telegram::Starting;
+        self.s.error = None;
+        cx.notify();
+        let api = self.auth.api.clone();
+        cx.spawn(async move |this, cx| {
+            let begun = cx.background_executor().spawn({
+                let api = api.clone();
+                async move { auth::begin(&api) }
+            });
+            let pending = match begun.await {
+                Ok(p) => p,
+                Err(e) => {
+                    this.update(cx, |this, cx| this.signed_in_with(&flag, Err(e), cx)).ok();
+                    return;
+                }
+            };
+            let url = pending.auth_url.clone();
+            let live = this.update(cx, |this, cx| {
+                let live = this.current(&flag);
+                if live {
+                    this.s.telegram = Telegram::Browser(url.clone());
+                    cx.notify();
+                }
+                live
+            });
+            if !live.unwrap_or(false) {
+                return;
+            }
+            let stop = flag.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    crate::os::open_url(&url);
+                    pending.finish(&api, &stop)
+                })
+                .await;
+            this.update(cx, |this, cx| this.signed_in_with(&flag, result, cx)).ok();
+        })
+        .detach();
+    }
+
+    /// The sign-in `flag` belongs to is still the one on screen.
+    fn current(&self, flag: &Arc<AtomicBool>) -> bool {
+        self.cancel.as_ref().is_some_and(|c| Arc::ptr_eq(c, flag)) && !flag.load(Ordering::Relaxed)
+    }
+
+    fn signed_in_with(&mut self, flag: &Arc<AtomicBool>, result: Result<auth::Session, auth::Error>, cx: &mut Context<Self>) {
+        if !self.current(flag) {
+            return;
+        }
+        self.cancel = None;
+        self.s.telegram = Telegram::Idle;
+        match result {
+            Ok(session) => {
+                // The Telegram account replaces a pasted link.
+                let _ = std::fs::remove_file(Login::path());
+                self.login = None;
+                self.s.user = Some(session.user.clone());
+                self.s.signed_in = true;
+                self.auth.set(Some(session));
+                self.sync(cx);
+            }
+            Err(auth::Error::Cancelled) => {}
+            Err(e) => self.s.error = Some(e.to_string()),
+        }
+        cx.notify();
+    }
+
+    pub fn cancel_sign_in(&mut self, cx: &mut Context<Self>) {
+        if let Some(flag) = self.cancel.take() {
+            flag.store(true, Ordering::Relaxed);
+        }
+        if self.s.telegram != Telegram::Idle {
+            self.s.telegram = Telegram::Idle;
+            cx.notify();
+        }
+    }
+
+    /// Profile and subscription from the backend; the subscription link then loads servers like a pasted one.
+    pub fn sync(&mut self, cx: &mut Context<Self>) {
+        let client = self.auth.clone();
+        self.s.busy = true;
+        self.s.error = None;
+        self.revs.fetching();
+        self.go_live(cx);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let me = cx.background_executor().spawn(async move { client.me() }).await;
+            this.update(cx, |this, cx| {
+                this.s.busy = false;
+                if this.auth.session().is_none() {
+                    return;
+                }
+                match me {
+                    Ok(me) => this.adopt_me(me, cx),
+                    Err(auth::Error::Unauthorized) => {
+                        this.sign_out(cx);
+                        this.s.error = Some(auth::Error::Unauthorized.to_string());
+                    }
+                    // Keep working from the saved subscription.
+                    Err(e) => this.s.error = Some(e.to_string()),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn adopt_me(&mut self, me: auth::Me, cx: &mut Context<Self>) {
+        let had_avatar = self.s.user.as_ref().is_some_and(|u| u.has_avatar);
+        self.s.no_subscription = me.plan.is_none();
+        if me.user.has_avatar {
+            self.fetch_avatar(cx);
+        } else if had_avatar || self.s.avatar.is_some() {
+            self.s.avatar = None;
+            let _ = std::fs::remove_file(auth::avatar_path());
+        }
+        self.s.user = Some(me.user);
+        match me.plan {
+            Some(plan) => {
+                self.s.account = Some(plan.account);
+                self.login = Some(plan.url);
+                self.refresh(None, cx);
+            }
+            // The saved subscription stays: the backend also answers null when it cannot reach the panel.
+            None => {
+                self.disconnect(cx);
+                self.login = None;
+                self.s.account = None;
+                data::set_servers(vec![]);
+                self.s.servers_gen += 1;
+                self.pinger = None;
+                if self.revs.loaded() {
+                    self.sync(cx);
+                }
+            }
+        }
+    }
+
+    /// Live updates while signed in with Telegram (not with a pasted link).
+    fn go_live(&mut self, cx: &mut Context<Self>) {
+        if self.live.is_some() || self.auth.session().is_none() {
+            return;
+        }
+        let (live, rx) = live::Live::start(self.auth.clone());
+        let task = cx.spawn(async move |this, cx| {
+            while let Ok(ev) = rx.recv().await {
+                if this.update(cx, |this, cx| this.live_event(ev, cx)).is_err() {
+                    break;
+                }
+            }
+        });
+        self.live = Some((live, task));
+    }
+
+    fn kick_live(&self) {
+        if let Some((live, _)) = &self.live {
+            live.kick();
+        }
+    }
+
+    fn live_event(&mut self, ev: live::Event, cx: &mut Context<Self>) {
+        match ev {
+            // Refetched like a manual refresh; a running tunnel stays up.
+            live::Event::Servers(rev) => {
+                if self.revs.seen(rev, self.s.busy) {
+                    self.sync(cx);
+                }
+            }
+            live::Event::Subscription(a) => {
+                // Before the profile arrives `sync` brings the same numbers.
+                let Some(old) = self.s.account.take() else { return };
+                self.s.account = Some(Account { name: old.name, title: old.title, support: old.support, ..a });
+                cx.notify();
+            }
+            live::Event::SignedOut => {
+                self.sign_out(cx);
+                self.s.error = Some(auth::Error::Unauthorized.to_string());
+                cx.notify();
+            }
+        }
+    }
+
+    /// The tunnel left servers that are no longer in the subscription: back to the saved list.
+    fn forget_gone(&mut self, cx: &mut Context<Self>) {
+        if let Ok(body) = std::fs::read(subscription_path()) {
+            let _ = self.load_subscription(&body, cx);
+        }
+    }
+
+    /// The avatar saved last time, until the backend's arrives.
+    fn cached_avatar(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let pic = cx.background_executor().spawn(async { std::fs::read(auth::avatar_path()).ok().and_then(|b| auth::picture(&b)) }).await;
+            this.update(cx, |this, cx| {
+                if this.s.avatar.is_none() && this.s.user.is_some() {
+                    this.s.avatar = pic;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn fetch_avatar(&mut self, cx: &mut Context<Self>) {
+        let client = self.auth.clone();
+        cx.spawn(async move |this, cx| {
+            let got = cx
+                .background_executor()
+                .spawn(async move {
+                    let bytes = client.avatar().ok()?;
+                    let Some(bytes) = bytes else { return Some(None) };
+                    let pic = auth::picture(&bytes)?;
+                    let _ = store::write(&auth::avatar_path(), &bytes, true);
+                    Some(Some(pic))
+                })
+                .await;
+            // A failed download keeps the cached picture.
+            let Some(pic) = got else { return };
+            this.update(cx, |this, cx| {
+                if this.s.user.is_some() {
+                    if pic.is_none() {
+                        let _ = std::fs::remove_file(auth::avatar_path());
+                    }
+                    this.s.avatar = pic;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     pub fn sign_out(&mut self, cx: &mut Context<Self>) {
+        self.cancel_sign_in(cx);
         self.disconnect(cx);
+        self.live = None;
+        self.revs = live::Revs::default();
+        if let Some(session) = self.auth.take() {
+            cx.background_executor().spawn(async move { auth::revoke(&session) }).detach();
+        }
+        let _ = std::fs::remove_file(auth::avatar_path());
         let _ = std::fs::remove_file(Login::path());
         let _ = std::fs::remove_file(subscription_path());
         self.login = None;
         data::set_servers(vec![]);
         self.s.signed_in = false;
+        self.s.user = None;
+        self.s.avatar = None;
+        self.s.no_subscription = false;
+        self.s.error = None;
         self.s.account = None;
         self.s.server_id = "none";
         self.s.entry_id = None;
         self.s.recents.clear();
         self.s.servers_gen += 1;
         self.pinger = None;
+        self.tester = None;
+        self.s.testing = false;
+        self.s.pending.clear();
         cx.notify();
     }
 
@@ -423,12 +846,17 @@ impl Vpn {
             entry: self.s.entry_id.map(data::server),
             protocol: self.s.protocol,
             default_route: self.s.default_route,
-            tun: self.s.system_wide,
+            tun: self.s.uses_tun(),
+            system_proxy: self.s.system_wide && !self.s.tun && crate::os::SYSTEM_PROXY,
             kill_switch: self.s.kill_switch,
             apps: self.s.app_routes.clone(),
             sites: self.s.sites.clone(),
             servers: data::servers(),
-            tunnel_rules: self.lists.tunnel.clone(),
+            tunnel_rules: if self.region_rules.is_empty() {
+                self.lists.tunnel.clone()
+            } else {
+                Arc::new(self.lists.tunnel.iter().chain(self.region_rules.iter()).cloned().collect())
+            },
             base_rules: self.lists.base.clone(),
             dns: self.lists.dns.clone(),
         }
@@ -447,6 +875,9 @@ impl Vpn {
             self.s.error = Some(if self.s.signed_in { "No server to connect to".into() } else { "Sign in to connect".into() });
             cx.notify();
             return;
+        }
+        if !self.gone.is_empty() && [Some(self.s.server_id), self.s.entry_id].iter().flatten().all(|id| !self.gone.contains(id)) {
+            self.forget_gone(cx);
         }
         self.remember();
         self.attempt += 1;
@@ -565,23 +996,15 @@ impl Vpn {
                 let dt = now.duration_since(t).as_secs_f64().max(0.1);
                 (m.down.saturating_sub(d) as f64 * 8. / 1e6 / dt, m.up.saturating_sub(u) as f64 * 8. / 1e6 / dt)
             }
-            None => {
-                self.first_bytes = m.down + m.up;
-                (0., 0.)
-            }
+            None => (0., 0.),
         };
         self.bytes = Some((now, m.down, m.up));
         let latency = m.delays.get("proxy").copied().flatten().or(self.s.stats.latency);
         if latency.is_some() {
             self.failures = 0;
         }
-        self.s.stats = Stats { down, up, latency, total: (m.down + m.up).saturating_sub(self.first_bytes) };
+        self.s.stats = Stats { down, up, latency };
         self.suggest(cx);
-        let pings: Vec<_> = m.delays.iter().filter_map(|(tag, d)| tag.strip_prefix("p-").filter(|id| data::has_server(id)).map(|id| (data::intern(id), *d))).collect();
-        if pings.iter().any(|(id, d)| data::ping(id) != *d) {
-            data::set_pings(pings);
-            self.s.servers_gen += 1;
-        }
         cx.notify();
     }
 
@@ -623,13 +1046,21 @@ impl Vpn {
         self.ticker = None;
         self.reload = None;
         self.failures = 0;
-        if let Some(core) = self.core.take() {
-            cx.background_executor().spawn(async move { core.stop() }).detach();
-        }
+        let stopped = self.core.take().map(|core| cx.background_executor().spawn(async move { core.stop() }));
+        // Off the tunnel now: has the network changed meanwhile? (Once the core is down, so the lookup is direct.)
+        cx.spawn(async move |this, cx| {
+            if let Some(stopped) = stopped {
+                stopped.await;
+            }
+            this.update(cx, |this, cx| this.check_region(false, cx)).ok();
+        })
+        .detach();
         self.s.conn = Conn::Off;
         self.s.connected_at = None;
         self.s.stats = Stats::default();
-        self.start_pinger(cx);
+        if !self.gone.is_empty() {
+            self.forget_gone(cx);
+        }
         cx.notify();
     }
 
@@ -658,6 +1089,11 @@ impl Vpn {
             }
             store::save(&Settings::path(), &settings, false);
             self.saved = settings;
+        }
+        // Tunnel up or down: the live socket's route changed under it.
+        let tunneled = self.s.conn == Conn::On && self.core.as_ref().is_some_and(|c| c.tun);
+        if std::mem::replace(&mut self.tunneled, tunneled) != tunneled {
+            self.kick_live();
         }
         if self.s.conn == Conn::On && self.core.is_some() && self.applied.as_ref() != Some(&self.s.routing()) && self.reload.is_none() {
             // Debounced: several quick edits restart the core once.
@@ -703,44 +1139,70 @@ impl Vpn {
         .detach();
     }
 
-    // ---------- latency while disconnected ----------
+    // ---------- latency ----------
 
-    /// Measure every server with a throwaway core now and every 5 minutes while disconnected.
+    /// A latency test now and every 5 minutes, connected or not.
     fn start_pinger(&mut self, cx: &mut Context<Self>) {
         if self.pinger.is_some() || data::servers().is_empty() {
             return;
         }
         self.pinger = Some(cx.spawn(async move |this, cx| {
-            loop {
-                let job = this.update(cx, |this, _| {
-                    let idle = this.s.conn == Conn::Off && !this.probing;
-                    if idle {
-                        this.probing = true;
-                    }
-                    idle.then(|| (data::servers(), this.s.protocol))
-                });
-                let Ok(job) = job else { break };
-                if let Some((servers, protocol)) = job {
-                    let result = cx.background_executor().spawn(async move { xray::probe(&servers, protocol) }).await;
-                    let gone = this
-                        .update(cx, |this, cx| {
-                            this.probing = false;
-                            if let Ok(pings) = result {
-                                data::set_pings(pings);
-                                if this.s.conn == Conn::Off && this.s.recents.is_empty() && this.s.entry_id.is_none() {
-                                    this.s.server_id = data::fastest().id;
-                                }
-                                this.s.servers_gen += 1;
-                                cx.notify();
-                            }
-                        })
-                        .is_err();
-                    if gone {
-                        break;
-                    }
-                }
+            while this.update(cx, |this, cx| this.test_pings(cx)).is_ok() {
                 cx.background_executor().timer(Duration::from_secs(300)).await;
             }
         }));
+    }
+
+    /// Measure every server with a real handshake, unless a test is already running. Connected, the running core
+    /// does it beside the tunnel; otherwise a throwaway core.
+    pub fn test_pings(&mut self, cx: &mut Context<Self>) {
+        let servers: Vec<_> = data::servers().into_iter().filter(|s| !self.gone.contains(&s.id)).collect();
+        if self.s.testing || servers.is_empty() {
+            return;
+        }
+        let via = self.core.as_ref().map(|c| c.ports.ping);
+        let rx = xray::ping_all(servers.clone(), self.s.protocol, via);
+        self.s.testing = true;
+        self.s.pending = servers.iter().map(|s| s.id).collect();
+        self.tester = Some(cx.spawn(async move |this, cx| {
+            while let Ok(got) = rx.recv().await {
+                if this.update(cx, |this, cx| this.pinged(got, via, cx)).is_err() {
+                    return;
+                }
+            }
+            this.update(cx, |this, cx| this.tested(cx)).ok();
+        }));
+        cx.notify();
+    }
+
+    fn pinged(&mut self, got: xray::Pinged, via: Option<u16>, cx: &mut Context<Self>) {
+        match got {
+            Ok((id, ms)) => {
+                self.s.pending.retain(|p| *p != id);
+                // A failure only counts if the core it went through is still the one running.
+                let gone = via.is_some() && self.core.as_ref().map(|c| c.ports.ping) != via;
+                if ms.is_some() || !gone {
+                    data::set_pings([(id, ms)]);
+                }
+            }
+            Err(e) => self.s.error = Some(e),
+        }
+        self.s.servers_gen += 1;
+        cx.notify();
+    }
+
+    fn tested(&mut self, cx: &mut Context<Self>) {
+        self.tester = None;
+        self.s.testing = false;
+        // Every server reported (the test core started).
+        if self.s.pending.is_empty() {
+            self.s.tested_at = Some(Instant::now());
+        }
+        self.s.pending.clear();
+        if self.s.conn == Conn::Off && self.s.recents.is_empty() && self.s.entry_id.is_none() {
+            self.s.server_id = data::fastest().id;
+        }
+        self.s.servers_gen += 1;
+        cx.notify();
     }
 }

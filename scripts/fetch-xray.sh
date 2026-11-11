@@ -5,10 +5,13 @@
 #   scripts/fetch-xray.sh [tag]        the pinned release (XRAY_TAG) -> bin/xray
 #   XRAY_TARGETS="linux-amd64 windows-amd64 darwin-arm64 darwin-amd64" scripts/fetch-xray.sh
 #                                      several cores -> bin/xray-<target>[.exe] (CI packaging)
+# windows-amd64 also fetches the signed wintun.dll (TUN mode) from wintun.net -> bin/wintun.dll, checked against WINTUN_SHA256.
 set -euo pipefail
 
 repo="${XRAY_REPO:-hitoricloud/Xray-core}"
 tag="${1:-${XRAY_TAG:-v26.6.1-hitori.1}}"
+wintun_version=0.14.1
+wintun_sha256=07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51
 root="$(cd "$(dirname "$0")/.." && pwd)"
 out="$root/bin"
 
@@ -49,6 +52,15 @@ for target in ${XRAY_TARGETS:-linux-amd64}; do
   install -m 755 "$tmp/$target/xray$ext" "$dest"
   [[ "$target" == linux-amd64 ]] && linux="$dest"
   cores="$(jq --arg t "$target" --arg sha256 "$got" '. + {($t): {zip: $sha256}}' <<<"$cores")"
+  if [[ "$target" == windows-amd64 ]]; then
+    # Wintun ships only as this signed DLL; it must sit next to xray.exe.
+    curl -fsSL --retry 3 -o "$tmp/wintun.zip" "https://www.wintun.net/builds/wintun-$wintun_version.zip"
+    got="$(sha256 "$tmp/wintun.zip")"
+    [[ "$got" == "$wintun_sha256" ]] || { echo "fetch-xray: wintun-$wintun_version.zip checksum mismatch (got '$got')" >&2; exit 1; }
+    unzip -q -o "$tmp/wintun.zip" wintun/bin/amd64/wintun.dll -d "$tmp"
+    install -m 644 "$tmp/wintun/bin/amd64/wintun.dll" "$out/wintun.dll"
+    cores="$(jq --arg v "$wintun_version" --arg sha256 "$got" '. + {wintun: {version: $v, zip: $sha256}}' <<<"$cores")"
+  fi
 done
 
 version=""

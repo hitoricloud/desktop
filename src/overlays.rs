@@ -52,11 +52,11 @@ impl Hitori {
 
     pub fn sheet(&self, panel: Panel, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = self.theme(cx);
-        let vp = window.viewport_size();
+        let vp = self.viewport(window);
         let w = if f32::from(vp.width) >= 640. { 448. } else { f32::from(vp.width) };
         let (title, desc) = match panel {
             Panel::Account => match &self.s.account {
-                Some(a) if self.s.signed_in => ("Account", format!("Signed in as {}", a.name)),
+                Some(_) if self.s.signed_in => ("Account", format!("Signed in as {}", self.account_name())),
                 _ if self.s.signed_in => ("Account", "Loading your subscription…".into()),
                 _ => ("Sign in", "Paste the subscription link from the Hitori bot.".into()),
             },
@@ -148,6 +148,7 @@ impl Hitori {
         }
         let dark = t.dark;
         let toggle_w = 8. + Protocol::ALL.iter().map(|p| crate::ui::text_width(p.label(), 14., gpui::FontWeight::MEDIUM, window) + 24.).sum::<f32>();
+        let mode = (crate::os::SYSTEM_PROXY && self.s.system_wide).then(|| self.mode_row(window, cx));
         div()
             .flex()
             .flex_col()
@@ -161,10 +162,10 @@ impl Hitori {
                         "System-wide",
                         Some(if !self.s.system_wide {
                             "Only apps set to use the proxy: SOCKS5 127.0.0.1:10808, HTTP 10809."
-                        } else if crate::os::TUN {
-                            "Every app goes through Hitori. Asks for your password to connect."
+                        } else if crate::os::SYSTEM_PROXY {
+                            "Browsers and most apps, or every app in TUN mode, go through Hitori."
                         } else {
-                            "Sets the system proxy: browsers and most apps go through Hitori."
+                            "Every app goes through Hitori. Asks for your password to connect."
                         }),
                         hint_room(32.),
                         switch("system-wide", self.s.system_wide, &t).on_click(cx.listener(|this, _, _, cx| {
@@ -174,7 +175,10 @@ impl Hitori {
                         &t,
                         window,
                     ),
-                    row(
+                ]
+                .into_iter()
+                .chain(mode)
+                .chain([row(
                         "Connect on startup",
                         None,
                         hint_room(32.),
@@ -187,12 +191,12 @@ impl Hitori {
                     ),
                     row(
                         "Kill switch",
-                        Some(if !crate::os::TUN {
-                            "Only on Linux for now."
-                        } else if self.s.system_wide {
-                            "Block all traffic while the tunnel is down."
-                        } else {
+                        Some(if !self.s.system_wide {
                             "Needs system-wide mode."
+                        } else if crate::os::SYSTEM_PROXY && !self.s.tun {
+                            "Needs TUN mode."
+                        } else {
+                            "Block all traffic while the tunnel is down."
                         }),
                         hint_room(32.),
                         switch("kill-switch", self.s.kill_switch, &t).on_click(cx.listener(|this, _, _, cx| {
@@ -202,8 +206,10 @@ impl Hitori {
                         &t,
                         window,
                     ),
-                ],
+                ])
+                .collect(),
             ))
+            .child(section("Location".into(), &t, vec![self.region_row(window, cx)]))
             .child(section(
                 "Appearance".into(),
                 &t,
@@ -212,7 +218,69 @@ impl Hitori {
             .into_any_element()
     }
 
-    fn sign_in_body(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// Detected country, how much of it is routed through the VPN, and a recheck button.
+    fn region_row(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let t = self.theme(cx);
+        let r = &self.s.region;
+        let busy = r.status == crate::region::Status::Computing;
+        let hint = match (&r.country, &r.status) {
+            (Some(_), crate::region::Status::Failed(e)) if r.domains + r.subnets > 0 => format!("{} · {e}. The saved lists still apply.", r.place()),
+            (Some(_), crate::region::Status::Failed(e)) => format!("{} · {e}.", r.place()),
+            (Some(_), _) => format!("{} · {}", r.place(), r.line()),
+            (None, _) => r.line(),
+        };
+        let label = if busy { "Checking…" } else { "Recheck" };
+        let w = 2. + 24. + 16. + 8. + crate::ui::text_width(label, 14., gpui::FontWeight::MEDIUM, window);
+        let button = button("region-recheck", Variant::Outline, Size::Sm, true, &t)
+            .when(busy, |b| b.opacity(0.5))
+            .child(if busy { crate::ui::spinner("region-spin", 16., t.foreground).into_any_element() } else { icon("refresh-cw", 16., t.foreground).into_any_element() })
+            .child(label)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if !busy {
+                    this.recheck_region(cx);
+                }
+            }));
+        row("Detected location", Some(&hint), hint_room(w), button, &t, window)
+    }
+
+    /// Windows and macOS: how system-wide mode works, the system proxy or a TUN.
+    fn mode_row(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let t = self.theme(cx);
+        let modes = [(false, "System proxy"), (true, "TUN")];
+        let mut group = div().flex().bg(t.background).rounded(px(MD)).p(px(4.));
+        for (i, (tun, label)) in modes.into_iter().enumerate() {
+            let (muted, muted_fg) = (t.muted, t.muted_fg);
+            group = group.child(
+                div()
+                    .id(SharedString::from(format!("mode-{label}")))
+                    .h(px(32.))
+                    .px(px(12.))
+                    .flex()
+                    .items_center()
+                    .sm()
+                    .medium()
+                    .cursor_pointer()
+                    .when(i == 0, |d| d.rounded_l(px(MD)))
+                    .when(i == 1, |d| d.rounded_r(px(MD)))
+                    .when(self.s.tun == tun, |d| d.bg(t.accent))
+                    .when(self.s.tun != tun, |d| d.hover(move |s| s.bg(muted).text_color(muted_fg)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.s.tun = tun;
+                        cx.notify();
+                    }))
+                    .child(label),
+            );
+        }
+        let w = 8. + modes.iter().map(|(_, l)| crate::ui::text_width(l, 14., gpui::FontWeight::MEDIUM, window) + 24.).sum::<f32>();
+        let hint = match (self.s.tun, cfg!(windows)) {
+            (false, _) => "Browsers and most apps, no administrator rights.",
+            (true, true) => "Every app and DNS. Asks for administrator rights.",
+            (true, false) => "Every app and DNS. Asks for your password.",
+        };
+        row("Mode", Some(hint), hint_room(w), group, &t, window)
+    }
+
+    pub fn sign_in_body(&self, cx: &mut Context<Self>) -> AnyElement {
         let t = self.theme(cx);
         let focus = self.link.read(cx).focus_handle(cx);
         let busy = self.s.busy;
@@ -260,6 +328,26 @@ impl Hitori {
         let fill = if a.limit > 0 { 1. - (a.used as f32 / a.limit as f32).min(1.) } else { a.days_left.map_or(0., |d| (d as f32 / 30.).min(1.)) };
         let traffic = if a.limit > 0 { format!("{} of {} used", data::bytes(a.used), data::bytes(a.limit)) } else { format!("{} used · no traffic limit", data::bytes(a.used)) };
         let support = a.support.clone();
+        let profile = self.s.user.as_ref().map(|u| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(16.))
+                .p(px(16.))
+                .rounded(px(XL))
+                .bg(t.muted.opacity(0.5))
+                .child(crate::ui::avatar(&self.initial(), self.s.avatar.clone(), 48., &t))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(div().base().semibold().truncate().child(u.name.clone()))
+                        .child(div().sm().text_color(t.muted_fg).truncate().child(u.username.as_ref().map_or("Telegram account".into(), |n| format!("@{n}")))),
+                )
+                .child(badge_secondary("Telegram", &t))
+        });
         let card = div()
             .flex()
             .flex_col()
@@ -298,6 +386,7 @@ impl Hitori {
             .flex()
             .flex_col()
             .gap(px(24.))
+            .children(profile)
             .child(card)
             .child(section("Devices".into(), &t, vec![device]))
             .child(section(
@@ -305,7 +394,11 @@ impl Hitori {
                 &t,
                 vec![row(
                     "Sign out",
-                    Some("Forgets the subscription link on this computer; the tunnel stops."),
+                    Some(if self.s.user.is_some() {
+                        "Signs this computer out of your Telegram account; the tunnel stops."
+                    } else {
+                        "Forgets the subscription link on this computer; the tunnel stops."
+                    }),
                     hint_room(2. + 24. + 16. + 8. + crate::ui::text_width("Sign out", 14., gpui::FontWeight::MEDIUM, window)),
                     button("signout", Variant::Outline, Size::Sm, true, &t)
                         .child(icon("log-out", 16., t.foreground))

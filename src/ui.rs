@@ -2,8 +2,8 @@
 use std::time::Duration;
 
 use gpui::{
-    Animation, AnimationExt, AnyElement, Context, Div, ElementId, FontFeatures, FontWeight, Hsla, ImageSource, Img, IntoElement, ParentElement, Render,
-    Resource, SharedString, Stateful, Styled, Svg, Transformation, Window, div, img, percentage, prelude::*, px, svg,
+    Animation, AnimationExt, AnyElement, Context, Div, ElementId, FontFeatures, FontWeight, Hsla, ImageSource, Img, IntoElement, ParentElement, PathBuilder,
+    Render, Resource, SharedString, Stateful, Styled, Svg, Transformation, Window, canvas, div, img, percentage, point, prelude::*, px, svg,
 };
 
 use crate::fx::{Fx, fx};
@@ -89,6 +89,37 @@ pub fn flag(code: &str, big: bool, window: &Window) -> Img {
 /// `inset-ring`: a 1px outline drawn over the box, taking no layout. Parent must be `relative`.
 pub fn ring(color: Hsla, radius: f32) -> Div {
     div().absolute().inset_0().rounded(px(radius)).border_1().border_color(color)
+}
+
+/// Load ring: a track with the filled share drawn clockwise from the top.
+pub fn meter(fraction: f32, size: f32, width: f32, fill: Hsla, track: Hsla) -> impl IntoElement {
+    canvas(
+        |_, _, _| {},
+        move |b, _, window, _| {
+            let c = b.center();
+            let r = (size - width) / 2.;
+            let at = |a: f32| point(c.x + px(r * a.sin()), c.y - px(r * a.cos()));
+            let mut arc = |from: f32, to: f32, color: Hsla| {
+                if to - from < 1e-3 {
+                    return;
+                }
+                let mut p = PathBuilder::stroke(px(width));
+                p.move_to(at(from));
+                let steps = ((to - from) / std::f32::consts::FRAC_PI_2).ceil();
+                for i in 1..=steps as usize {
+                    p.arc_to(point(px(r), px(r)), px(0.), false, true, at(from + (to - from) * i as f32 / steps));
+                }
+                if let Ok(path) = p.build() {
+                    window.paint_path(path, color);
+                }
+            };
+            let end = std::f32::consts::TAU * fraction.clamp(0., 1.);
+            arc(end, std::f32::consts::TAU, track);
+            arc(0., end, fill);
+        },
+    )
+    .size(px(size))
+    .flex_none()
 }
 
 /// `animate-pulse`: opacity 1 → .5 → 1 over 2s.
@@ -203,8 +234,13 @@ impl gpui::RenderOnce for Switch {
     }
 }
 
-pub fn avatar(letter: &str, t: &Theme) -> Div {
-    div().flex_none().size(px(32.)).rounded_full().overflow_hidden().bg(t.muted).flex().items_center().justify_center().sm().text_color(t.muted_fg).child(letter.to_owned())
+/// Round profile picture, or the initial on a muted circle.
+pub fn avatar(letter: &str, picture: Option<std::sync::Arc<gpui::RenderImage>>, size: f32, t: &Theme) -> Div {
+    let d = div().flex_none().size(px(size)).rounded_full().overflow_hidden().bg(t.muted).flex().items_center().justify_center().text_px(size * 0.4375, size * 0.625).text_color(t.muted_fg);
+    match picture {
+        Some(p) => d.child(img(ImageSource::Render(p)).size(px(size)).rounded_full()),
+        None => d.child(letter.to_owned()),
+    }
 }
 
 pub fn skeleton(id: impl Into<ElementId>, w: f32, h: f32, t: &Theme) -> impl IntoElement {

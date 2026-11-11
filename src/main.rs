@@ -1,19 +1,31 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 mod app;
 mod apps;
+mod auth;
 mod data;
+#[cfg(not(target_os = "linux"))]
+mod elevated;
+// The macOS helper's text handling, tested everywhere.
+#[cfg(all(test, not(target_os = "macos")))]
+#[path = "elevated/darwin.rs"]
+mod darwin;
+mod helper;
 mod store;
 mod sub;
 mod xray;
 mod fx;
 mod input;
+mod live;
 mod map;
 mod net;
+mod onboarding;
 mod overlays;
 mod palette;
+mod region;
 mod score;
 mod suggest;
 mod os;
+mod sysproxy;
 mod theme;
 mod tray;
 #[cfg(target_os = "linux")]
@@ -80,20 +92,26 @@ fn skip_software_vulkan() {
 
 /// `--tray`: only the tray popup window (screenshots). `--background`: start with just the tray icon.
 /// `--smoke`: open the main window, draw for a few seconds and exit 0 (CI on real Windows and macOS machines).
+/// `--tun-selftest` (Windows, macOS; already elevated in CI): TUN mode end to end, see `helper::selftest`.
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    #[cfg(target_os = "linux")]
-    {
-        if args.get(1).map(String::as_str) == Some("--tun-helper") {
-            std::process::exit(tun::helper(&args[2..]));
-        }
-        skip_software_vulkan();
+    if args.get(1).map(String::as_str) == Some("--tun-helper") {
+        #[cfg(target_os = "linux")]
+        std::process::exit(tun::helper(&args[2..]));
+        #[cfg(not(target_os = "linux"))]
+        std::process::exit(elevated::helper(&args[2..]));
     }
+    #[cfg(not(target_os = "linux"))]
+    if args.get(1).map(String::as_str) == Some("--tun-selftest") {
+        std::process::exit(helper::selftest());
+    }
+    #[cfg(target_os = "linux")]
+    skip_software_vulkan();
     let tray_only = args.iter().any(|a| a == "--tray");
     let background = args.iter().any(|a| a == "--background");
     let smoke = args.iter().any(|a| a == "--smoke");
     // A previous run that crashed may have left the system proxy pointing at it, or (macOS) its core running.
-    os::sysproxy::restore();
+    sysproxy::restore();
     os::reap_orphans();
     Application::new().with_assets(Assets).run(move |cx: &mut App| {
         let fonts = ["Regular", "Medium", "SemiBold", "Bold"]

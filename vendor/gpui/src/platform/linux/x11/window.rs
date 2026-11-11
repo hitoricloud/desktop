@@ -490,10 +490,20 @@ impl X11WindowState {
                 ),
             )?;
 
-            if let Some(size) = params.window_min_size {
+            if params.window_min_size.is_some() || !params.is_resizable {
                 let mut size_hints = WmSizeHints::new();
-                let min_size = (size.width.0 as i32, size.height.0 as i32);
-                size_hints.min_size = Some(min_size);
+                // The window is created in device pixels, so are its hints; a fixed-size window has min == max.
+                let min_size = if params.is_resizable {
+                    params
+                        .window_min_size
+                        .map(|size| size.scale(scale_factor))
+                        .map(|size| (size.width.0.round() as i32, size.height.0.round() as i32))
+                } else {
+                    let fixed = (bounds.size.width.0, bounds.size.height.0);
+                    size_hints.max_size = Some(fixed);
+                    Some(fixed)
+                };
+                size_hints.min_size = min_size;
                 check_reply(
                     || {
                         format!(
