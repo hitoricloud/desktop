@@ -173,6 +173,20 @@ pub fn fastest() -> &'static Server {
     all.iter().filter_map(|s| ping(s.id).map(|p| (p, *s))).min_by_key(|(p, _)| *p).map(|(_, s)| s).or_else(|| all.first().copied()).unwrap_or(&NONE)
 }
 
+/// A country's best server: lowest measured ping, then lowest load among the ones that did not time out.
+pub fn best_in(code: &str) -> &'static str {
+    let pings = PINGS.read().unwrap();
+    let loads = LOADS.read().unwrap();
+    let all: Vec<_> = servers().into_iter().filter(|s| s.code == code).collect();
+    all.iter()
+        .min_by_key(|s| match pings.get(s.id) {
+            Some(Some(ms)) => (0, *ms, loads.get(s.id).copied().unwrap_or(100)),
+            None => (1, 0, loads.get(s.id).copied().unwrap_or(100)),
+            Some(None) => (2, 0, 0),
+        })
+        .map_or(NONE.id, |s| s.id)
+}
+
 /// English name and capital of the countries nodes are likely to be in, for the list and the map before an exit is seen.
 pub fn country(code: &str) -> Option<(&'static str, f64, f64)> {
     Some(match code {

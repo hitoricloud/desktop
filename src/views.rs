@@ -141,9 +141,19 @@ impl Hitori {
                 })),
         );
         let trigger = trigger.child(self.page_switch(cx));
+        // The Rules page has no sidebar: just the account avatar where the sidebar keeps it.
         if self.page == Page::Rules {
-            let page = self.rules_page(trigger, wide, map_w - 48., window, cx);
-            return div().flex().size_full().bg(t.background).children(sidebar).child(page).children(inspector).into_any_element();
+            let page_w = w - if wide { INSPECTOR } else { 0. };
+            let page = self.rules_page(div().flex().items_center().child(self.page_switch(cx)), wide, page_w - 48., window, cx);
+            return div()
+                .relative()
+                .flex()
+                .size_full()
+                .bg(t.background)
+                .child(page)
+                .children(inspector)
+                .child(div().absolute().left(px(8.)).bottom(px(8.)).child(self.nav_avatar(cx)))
+                .into_any_element();
         }
         self.ring_clip.set((side_w, 0., map_w, h));
         {
@@ -299,27 +309,49 @@ impl Hitori {
                     .child(div().text_px(12., 16.).text_color(t.muted_fg).truncate().child(self.account_line())),
             )
             .child(icon("chevrons-up-down", 16., t.foreground));
-        let popup = self.menu_phase(Menu::NavUser).map(|ph| {
+        let _ = window;
+        div().relative().w_full().child(trigger).children(self.nav_menu(&t, cx))
+    }
+
+    /// The account avatar alone, at the same size and place as in the sidebar's user button.
+    fn nav_avatar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = self.theme(cx);
+        let open = self.menu == Some(Menu::NavUser);
+        let accent = t.accent;
+        let trigger = div()
+            .id("nav-avatar")
+            .size(px(48.))
+            .p(px(8.))
+            .rounded(px(MD))
+            .cursor_pointer()
+            .hover(move |s| s.bg(accent))
+            .when(open, |d| d.bg(accent))
+            .tooltip(tip(self.account_name(), &t))
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_menu(Menu::NavUser, cx)))
+            .child(avatar(&self.initial(), self.s.avatar.clone(), 32., &t));
+        div().relative().child(trigger).children(self.nav_menu(&t, cx))
+    }
+
+    fn nav_menu(&self, t: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        self.menu_phase(Menu::NavUser).map(|ph| {
             popover(
                 Placement::AboveStart,
                 ph,
-                menu(SIDEBAR - 16., &t, {
+                menu(SIDEBAR - 16., t, {
                     let mut items = vec![
-                        menu_label(&t)
+                        menu_label(t)
                             .flex()
                             .flex_col()
                             .child(self.account_name())
                             .child(div().xs().normal().text_color(t.muted_fg).child(self.renews()))
                             .into_any_element(),
-                        menu_separator(&t).into_any_element(),
+                        menu_separator(t).into_any_element(),
                     ];
-                    items.extend(self.account_items(&t, cx));
+                    items.extend(self.account_items(t, cx));
                     items
                 }),
             )
-        });
-        let _ = window;
-        div().relative().w_full().child(trigger).children(popup)
+        })
     }
 
     fn account_items(&self, t: &Theme, cx: &mut Context<Self>) -> Vec<AnyElement> {
@@ -552,7 +584,8 @@ impl Hitori {
                     .flex_col()
                     .gap(px(28.))
                     .p(px(16.))
-                    .pb(px(32.))
+                    // Clear of the account avatar in the bottom-left corner.
+                    .pb(px(72.))
                     .child(trigger)
                     .children(narrow)
                     .child(
@@ -972,6 +1005,7 @@ impl Hitori {
                     .child(self.power_button(cx))
                     .child(self.metrics(cx)),
             )
+            .child(div().flex_none().h(px(1.)).bg(t.border))
             .child(self.server_list(window, cx))
     }
 
@@ -1228,11 +1262,12 @@ impl Hitori {
             .flex_col()
             .child(
                 div()
-                    .h(px(32.))
+                    .h(px(40.))
                     .flex_none()
                     .flex()
                     .items_center()
                     .gap(px(4.))
+                    .pt(px(8.))
                     .pl(px(16.))
                     .pr(px(12.))
                     .child(
@@ -1255,6 +1290,9 @@ impl Hitori {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
                     .px(px(8.))
                     .pb(px(8.))
                     .when(n == 0, |d| d.child(div().px(px(8.)).py(px(8.)).sm().text_color(t.muted_fg).child("Sign in to see your servers.")))
@@ -1325,13 +1363,22 @@ impl Hitori {
             )
             .when(live, |d| d.child(div().size(px(6.)).rounded_full().bg(t.primary)))
             .when(current.is_some() && self.s.conn == Conn::Connecting, |d| d.child(spinner(SharedString::from(format!("country-spin-{code}")), 14., t.muted_fg)))
-            .child(icon(if open { "chevron-up" } else { "chevron-down" }, 16., t.muted_fg))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                match this.open_countries.iter().position(|c| *c == code) {
-                    Some(i) => _ = this.open_countries.remove(i),
-                    None => this.open_countries.push(code),
-                }
-                cx.notify();
+            .child(
+                button(SharedString::from(format!("country-open-{code}")), Variant::Ghost, Size::IconSm, true, &t)
+                    .tooltip(tip(if open { "Hide servers" } else { "Show servers" }, &t))
+                    .child(icon(if open { "chevron-up" } else { "chevron-down" }, 16., t.muted_fg))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        match this.open_countries.iter().position(|c| *c == code) {
+                            Some(i) => _ = this.open_countries.remove(i),
+                            None => this.open_countries.push(code),
+                        }
+                        cx.notify();
+                    })),
+            )
+            .on_click(cx.listener(move |this, _, window, cx| {
+                let best = data::best_in(code);
+                this.go(best, window, cx);
             }))
     }
 
