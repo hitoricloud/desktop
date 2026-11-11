@@ -15,6 +15,7 @@ mod sub;
 mod xray;
 mod fx;
 mod input;
+mod live;
 mod map;
 mod net;
 mod onboarding;

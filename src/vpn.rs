@@ -10,6 +10,7 @@ use serde_json::Value;
 use crate::app::Conn;
 use crate::auth;
 use crate::data::{self, Account, AppRule, Protocol, RuleMode, Scope, Suggestion};
+use crate::live;
 use crate::net::{self, Geo};
 use crate::region::{self, Location};
 use crate::store::{self, Login, Rule, Settings};
@@ -202,6 +203,13 @@ pub struct Vpn {
     last_check: Option<Instant>,
     net_addr: Option<std::net::IpAddr>,
     _region_watch: Task<()>,
+    /// Live updates while signed in with Telegram, and the server list they last loaded.
+    live: Option<(live::Live, Task<()>)>,
+    revs: live::Revs,
+    /// The app's own requests go through the TUN; a change reconnects the live socket.
+    tunneled: bool,
+    /// Servers gone from the subscription that the running tunnel still uses, listed offline until it leaves them.
+    gone: Vec<&'static str>,
 }
 
 impl Vpn {
@@ -279,6 +287,10 @@ impl Vpn {
             last_check: None,
             net_addr: region::local_addr(),
             _region_watch: Self::region_watch(cx),
+            live: None,
+            revs: live::Revs::default(),
+            tunneled: false,
+            gone: vec![],
         };
         if this.s.signed_in
             && let Ok(body) = std::fs::read(subscription_path())
@@ -449,6 +461,9 @@ impl Vpn {
                 let addr = cx.background_executor().spawn(async { region::local_addr() }).await;
                 let alive = this.update(cx, |this, cx| {
                     let changed = std::mem::replace(&mut this.net_addr, addr) != addr;
+                    if changed {
+                        this.kick_live();
+                    }
                     let backoff = this.last_check.is_some_and(|t| t.elapsed() < Duration::from_secs(120));
                     if this.direct() && (changed || !backoff) && region::due(this.location.as_ref(), region::now(), changed) {
                         this.check_region(false, cx);
@@ -465,8 +480,16 @@ impl Vpn {
 
     /// Parse and adopt a subscription body; servers, lists and remembered exits.
     fn load_subscription(&mut self, body: &[u8], cx: &mut Context<Self>) -> Result<(), String> {
-        let parsed = sub::parse(body)?;
+        let mut parsed = sub::parse(body)?;
+        let on = self.s.conn != Conn::Off;
+        self.gone = [Some(self.s.server_id), self.s.entry_id]
+            .into_iter()
+            .flatten()
+            .filter(|id| on && data::has_server(id) && parsed.servers.iter().all(|s| s.id != *id))
+            .collect();
+        parsed.servers.extend(self.gone.iter().map(|id| data::server(id).clone()));
         data::set_servers(parsed.servers);
+        data::set_pings(self.gone.iter().map(|id| (*id, None)));
         for (id, e) in &self.exits {
             data::learn_exit(id, &e.ip, e.city.as_deref(), e.lat, e.lon);
         }
@@ -519,6 +542,9 @@ impl Vpn {
                         let _ = store::write(&subscription_path(), &body, true);
                         this.s.error = this.load_subscription(&body, cx).err();
                         this.s.account = account.or(this.s.account.take());
+                        if this.revs.loaded() {
+                            this.sync(cx);
+                        }
                         if this.s.auto_connect && !this.autoconnect_done && this.s.conn == Conn::Off {
                             this.connect(cx);
                         }
@@ -630,6 +656,8 @@ impl Vpn {
         let client = self.auth.clone();
         self.s.busy = true;
         self.s.error = None;
+        self.revs.fetching();
+        self.go_live(cx);
         cx.notify();
         cx.spawn(async move |this, cx| {
             let me = cx.background_executor().spawn(async move { client.me() }).await;
@@ -678,7 +706,61 @@ impl Vpn {
                 data::set_servers(vec![]);
                 self.s.servers_gen += 1;
                 self.pinger = None;
+                if self.revs.loaded() {
+                    self.sync(cx);
+                }
             }
+        }
+    }
+
+    /// Live updates while signed in with Telegram (not with a pasted link).
+    fn go_live(&mut self, cx: &mut Context<Self>) {
+        if self.live.is_some() || self.auth.session().is_none() {
+            return;
+        }
+        let (live, rx) = live::Live::start(self.auth.clone());
+        let task = cx.spawn(async move |this, cx| {
+            while let Ok(ev) = rx.recv().await {
+                if this.update(cx, |this, cx| this.live_event(ev, cx)).is_err() {
+                    break;
+                }
+            }
+        });
+        self.live = Some((live, task));
+    }
+
+    fn kick_live(&self) {
+        if let Some((live, _)) = &self.live {
+            live.kick();
+        }
+    }
+
+    fn live_event(&mut self, ev: live::Event, cx: &mut Context<Self>) {
+        match ev {
+            // Refetched like a manual refresh; a running tunnel stays up.
+            live::Event::Servers(rev) => {
+                if self.revs.seen(rev, self.s.busy) {
+                    self.sync(cx);
+                }
+            }
+            live::Event::Subscription(a) => {
+                // Before the profile arrives `sync` brings the same numbers.
+                let Some(old) = self.s.account.take() else { return };
+                self.s.account = Some(Account { name: old.name, title: old.title, support: old.support, ..a });
+                cx.notify();
+            }
+            live::Event::SignedOut => {
+                self.sign_out(cx);
+                self.s.error = Some(auth::Error::Unauthorized.to_string());
+                cx.notify();
+            }
+        }
+    }
+
+    /// The tunnel left servers that are no longer in the subscription: back to the saved list.
+    fn forget_gone(&mut self, cx: &mut Context<Self>) {
+        if let Ok(body) = std::fs::read(subscription_path()) {
+            let _ = self.load_subscription(&body, cx);
         }
     }
 
@@ -729,6 +811,8 @@ impl Vpn {
     pub fn sign_out(&mut self, cx: &mut Context<Self>) {
         self.cancel_sign_in(cx);
         self.disconnect(cx);
+        self.live = None;
+        self.revs = live::Revs::default();
         if let Some(session) = self.auth.take() {
             cx.background_executor().spawn(async move { auth::revoke(&session) }).detach();
         }
@@ -791,6 +875,9 @@ impl Vpn {
             self.s.error = Some(if self.s.signed_in { "No server to connect to".into() } else { "Sign in to connect".into() });
             cx.notify();
             return;
+        }
+        if !self.gone.is_empty() && [Some(self.s.server_id), self.s.entry_id].iter().flatten().all(|id| !self.gone.contains(id)) {
+            self.forget_gone(cx);
         }
         self.remember();
         self.attempt += 1;
@@ -971,6 +1058,9 @@ impl Vpn {
         self.s.conn = Conn::Off;
         self.s.connected_at = None;
         self.s.stats = Stats::default();
+        if !self.gone.is_empty() {
+            self.forget_gone(cx);
+        }
         cx.notify();
     }
 
@@ -999,6 +1089,11 @@ impl Vpn {
             }
             store::save(&Settings::path(), &settings, false);
             self.saved = settings;
+        }
+        // Tunnel up or down: the live socket's route changed under it.
+        let tunneled = self.s.conn == Conn::On && self.core.as_ref().is_some_and(|c| c.tun);
+        if std::mem::replace(&mut self.tunneled, tunneled) != tunneled {
+            self.kick_live();
         }
         if self.s.conn == Conn::On && self.core.is_some() && self.applied.as_ref() != Some(&self.s.routing()) && self.reload.is_none() {
             // Debounced: several quick edits restart the core once.
@@ -1061,7 +1156,7 @@ impl Vpn {
     /// Measure every server with a real handshake, unless a test is already running. Connected, the running core
     /// does it beside the tunnel; otherwise a throwaway core.
     pub fn test_pings(&mut self, cx: &mut Context<Self>) {
-        let servers = data::servers();
+        let servers: Vec<_> = data::servers().into_iter().filter(|s| !self.gone.contains(&s.id)).collect();
         if self.s.testing || servers.is_empty() {
             return;
         }

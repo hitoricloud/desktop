@@ -36,6 +36,7 @@ impl Protocol {
     }
 }
 
+#[derive(Clone)]
 pub struct Server {
     pub id: &'static str,
     pub country: &'static str,
