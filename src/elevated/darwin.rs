@@ -1,14 +1,25 @@
 //! What the macOS helper says to and reads from system tools; plain text, so it is tested on every platform.
 
-/// The interface of the default IPv4 route in `netstat -rn -f inet`, leaving out interface-scoped routes and `exclude`.
-pub fn default_interface(netstat: &str, exclude: &str) -> Option<String> {
+/// The interface and gateway of the default IPv4 route in `netstat -rn -f inet`, leaving out interface-scoped routes and
+/// `exclude`. The gateway is `link#N` for a route straight onto the interface.
+pub fn default_route(netstat: &str, exclude: &str) -> Option<(String, String)> {
     let mut lines = netstat.lines().skip_while(|l| !l.starts_with("Destination"));
     let header: Vec<&str> = lines.next()?.split_whitespace().collect();
     let (flags, netif) = (header.iter().position(|h| *h == "Flags")?, header.iter().position(|h| *h == "Netif")?);
     lines.take_while(|l| !l.trim().is_empty()).find_map(|l| {
         let f: Vec<&str> = l.split_whitespace().collect();
-        (f.first() == Some(&"default") && !f.get(flags)?.contains('I') && *f.get(netif)? != exclude).then(|| f[netif].to_owned())
+        if f.first() != Some(&"default") || f.get(flags)?.contains('I') || *f.get(netif)? == exclude {
+            return None;
+        }
+        Some((f[netif].to_owned(), f.get(1)?.to_string()))
     })
+}
+
+/// `route` arguments for a default route scoped to the uplink, so the core's sockets bound to it (IP_BOUND_IF) find a
+/// route there instead of our 0/1 and 128/1 into the utun.
+pub fn scoped_default(iface: &str, gateway: &str) -> Vec<String> {
+    let via = if gateway.starts_with("link#") { vec!["-interface".to_owned(), iface.to_owned()] } else { vec![gateway.to_owned()] };
+    [vec!["-n".into(), "add".into(), "-inet".into(), "default".into()], via, vec!["-ifscope".into(), iface.to_owned()]].concat()
 }
 
 /// `pfctl -E` prints `Token : <n>`, needed to release our reference on pf again.
@@ -62,12 +73,19 @@ default            10.0.0.1           UGScIg                en7
 ";
 
     #[test]
-    fn default_interface_skips_scoped_routes_and_ours() {
-        assert_eq!(default_interface(NETSTAT, "utun9").as_deref(), Some("utun4"), "another VPN's default is the uplink");
-        assert_eq!(default_interface(NETSTAT, "utun4").as_deref(), Some("en0"));
+    fn default_route_skips_scoped_routes_and_ours() {
+        let r = |s: &str, ex: &str| default_route(s, ex).map(|(i, g)| format!("{i} {g}"));
+        assert_eq!(r(NETSTAT, "utun9").as_deref(), Some("utun4 link#22"), "another VPN's default is the uplink");
+        assert_eq!(r(NETSTAT, "utun4").as_deref(), Some("en0 192.168.1.1"));
         let old = "Internet:\nDestination        Gateway            Flags        Refs      Use   Netif Expire\ndefault            192.168.1.1        UGSc           12        0     en1\n";
-        assert_eq!(default_interface(old, "utun9").as_deref(), Some("en1"), "older netstat with Refs/Use columns");
-        assert_eq!(default_interface("Internet:\nDestination Gateway Flags Netif Expire\n", "x"), None);
+        assert_eq!(r(old, "utun9").as_deref(), Some("en1 192.168.1.1"), "older netstat with Refs/Use columns");
+        assert_eq!(r("Internet:\nDestination Gateway Flags Netif Expire\n", "x"), None);
+    }
+
+    #[test]
+    fn scoped_default_route_args() {
+        assert_eq!(scoped_default("en0", "192.168.1.1").join(" "), "-n add -inet default 192.168.1.1 -ifscope en0");
+        assert_eq!(scoped_default("utun4", "link#22").join(" "), "-n add -inet default -interface utun4 -ifscope utun4");
     }
 
     #[test]

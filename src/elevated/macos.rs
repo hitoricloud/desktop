@@ -58,6 +58,9 @@ struct State {
     /// Network services and their DNS servers before ours (empty: from DHCP).
     dns: Vec<(String, Vec<String>)>,
     pf_token: Option<String>,
+    /// The uplink whose scoped default route we added.
+    #[serde(default)]
+    scoped: Option<String>,
 }
 
 fn run(tool: &str, args: &[&str]) -> Result<String, String> {
@@ -72,6 +75,9 @@ fn flush_dns() {
 }
 
 fn undo(state: &State) {
+    if let Some(iface) = &state.scoped {
+        let _ = run("/sbin/route", &["-n", "delete", "-inet", "default", "-ifscope", iface]);
+    }
     for (svc, servers) in &state.dns {
         let servers: Vec<&str> = if servers.is_empty() { vec!["Empty"] } else { servers.iter().map(String::as_str).collect() };
         if let Err(e) = networksetup_run(&[&["-setdnsservers", svc.as_str()][..], &servers].concat()) {
@@ -108,15 +114,15 @@ pub fn cleanup(peer: &Peer) {
 pub struct Net {
     utun: OwnedFd,
     name: String,
-    uplink: Option<String>,
+    uplink: Option<(String, String)>,
     kill: bool,
     state: State,
     peer_uid: u32,
     dir: PathBuf,
 }
 
-fn uplink(exclude: &str) -> Option<String> {
-    text::default_interface(&run("/usr/sbin/netstat", &["-rn", "-f", "inet"]).ok()?, exclude)
+fn uplink(exclude: &str) -> Option<(String, String)> {
+    text::default_route(&run("/usr/sbin/netstat", &["-rn", "-f", "inet"]).ok()?, exclude)
 }
 
 /// A new utun device (the kernel picks the unit) and its name.
@@ -160,6 +166,7 @@ impl Net {
         let (utun, name) = open_utun()?;
         let mut net = Net { uplink: uplink(&name), utun, name, kill, state: State::default(), peer_uid: peer.uid, dir: peer.dir.clone() };
         net.save()?;
+        net.scope_uplink()?;
         let (local, remote, mask) = text::p2p(TUN_ADDRS[0]).ok_or("bad TUN address")?;
         run("/sbin/ifconfig", &[&net.name, "inet", &local, &remote, "netmask", &mask, "mtu", "1500", "up"])?;
         let _ = run("/sbin/ifconfig", &[&net.name, "inet6", TUN_ADDRS[1].split('/').next().unwrap(), "prefixlen", "126"]);
@@ -174,6 +181,21 @@ impl Net {
         net.set_dns()?;
         net.load_pf()?;
         Ok(net)
+    }
+
+    /// A default route scoped to the uplink, unless the system already has one (then it is not ours to remove).
+    fn scope_uplink(&mut self) -> Result<(), String> {
+        if let Some(old) = self.state.scoped.take() {
+            let _ = run("/sbin/route", &["-n", "delete", "-inet", "default", "-ifscope", &old]);
+        }
+        let Some((iface, gateway)) = &self.uplink else { return self.save() };
+        let args = text::scoped_default(iface, gateway);
+        match run("/sbin/route", &args.iter().map(String::as_str).collect::<Vec<_>>()) {
+            Ok(_) => self.state.scoped = Some(iface.clone()),
+            Err(e) if e.contains("File exists") => {}
+            Err(e) => eprintln!("tun helper: {e}"),
+        }
+        self.save()
     }
 
     fn save(&self) -> Result<(), String> {
@@ -223,7 +245,7 @@ impl Net {
     }
 
     pub fn configure(&self, settings: &mut Value) {
-        if let Some(uplink) = &self.uplink {
+        if let Some((uplink, _)) = &self.uplink {
             settings["autoOutboundsInterface"] = json!(uplink);
         }
     }
@@ -255,9 +277,14 @@ impl Net {
         let now = uplink(&self.name);
         let changed = now.is_some() && now != self.uplink;
         if changed {
+            let iface_changed = now.as_ref().map(|u| &u.0) != self.uplink.as_ref().map(|u| &u.0);
             self.uplink = now;
+            if let Err(e) = self.scope_uplink() {
+                eprintln!("tun helper: {e}");
+            }
+            return iface_changed;
         }
-        changed
+        false
     }
 }
 
