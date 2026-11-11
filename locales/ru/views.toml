@@ -1,109 +1,111 @@
-via = "via"
+via = "через"
 
 [route]
-exit = "Exit {country}"
-always_vpn = "Always VPN"
-blocked = "Blocked"
+exit = "Выход: {country}"
+always_vpn = "Всегда VPN"
+blocked = "Заблокировано"
 
 [reason]
-timed_out = "Timed out directly"
-reset = "Reset directly"
-refused = "Refused directly"
-blocked = "Blocked directly"
+timed_out = "Напрямую: таймаут"
+reset = "Напрямую: сброс"
+refused = "Напрямую: отказ"
+blocked = "Напрямую: блокировка"
 
 [suggestion]
-worked_via = "worked via {server}"
-hits = "{count}× today"
-in_app = "in {app}"
-needs_vpn = "{subject} needs VPN"
-keep_auto = "Keep auto"
+worked_via = "через VPN ({server}) работает"
+hits = "{count}× сегодня"
+in_app = "в {app}"
+needs_vpn = "{subject}: нужен VPN"
+keep_auto = "Оставить авто"
 
 [review]
-button = "Review"
-need_vpn = { one = "{n} needs VPN", few = "{n} need VPN", many = "{n} need VPN" }
-more = "{count} more · Review"
+button = "Проверить"
+need_vpn = { one = "{n} требует VPN", few = "{n} требуют VPN", many = "{n} требуют VPN" }
+more = "Ещё {count} · Проверить"
 
 [rules]
-active = "Active rules · {count}"
-idle = "{count} idle"
-apps_idle = "Apps · {apps} · {idle} idle"
-websites = "Websites · {count}"
-no_apps = "No app rules yet. Add a running app with +, or accept a suggestion."
-intro = "Apps and websites without a rule follow the default route."
-manage = "Manage rules"
-compact = "Compact list"
-cards = "Cards"
+active = "Активных: {count}"
+idle = "Неактивных: {count}"
+apps_idle = "Приложения · {apps} · неактивных: {idle}"
+websites = "Сайты · {count}"
+no_apps = "Правил для приложений пока нет. Добавьте запущенное приложение через +, или примите предложение."
+intro = "Приложения и сайты без правила идут по маршруту по умолчанию."
+manage = "Настроить правила"
+compact = "Компактный список"
+cards = "Карточки"
 
 [page]
-map = "Map"
-rules = "Rules"
+map = "Карта"
+rules = "Правила"
 
 [default_route]
-title = "Default route"
+title = "По умолчанию"
 
 [dest]
-bypass = "Bypasses VPN"
-via = " via {country}"
-auto = "Auto · {country}"
+bypass = "В обход VPN"
+via = " · вход: {country}"
+auto = "Авто · {country}"
 
 [glyph]
-blocked = "All traffic blocked"
-direct = "Uses your real connection"
-exit = "Own exit, separate from the main route"
-cascade = "Cascaded through two servers"
-encrypted = "Encrypted"
-waiting = "Waiting for the tunnel"
+blocked = "Весь трафик заблокирован"
+direct = "Использует ваше настоящее подключение"
+exit = "Свой выход, отдельно от основного маршрута"
+cascade = "Каскадом через два сервера"
+encrypted = "Зашифровано"
+waiting = "Ожидание туннеля"
 
 [site]
-website = "website"
-add = "Add"
+website = "сайт"
+add = "Добавить"
 
 [add_app]
-running = "Running apps"
+running = "Запущенные приложения"
 
 [status]
-protected = "Protected"
-connecting = "Connecting…"
+protected = "Защищено"
+connecting = "Подключение…"
 
 [field]
-connected_to = "Connected to"
-connecting_to = "Connecting to"
-fastest = "Fastest location"
-add_entry = "Route through another server"
-go_direct = "Go direct"
+connected_to = "Подключено"
+connecting_to = "Подключаемся"
+fastest = "Самый быстрый"
+add_entry = "Через другой сервер"
+go_direct = "Сразу на выход"
 
 [power]
-cancel = "Cancel"
+cancel = "Отменить"
 
 [metrics]
-latency_on = "Latency through the tunnel"
-latency_off = "Latency to this server, from the last test"
-download = "Download"
-upload = "Upload"
+latency_on = "Задержка через туннель"
+latency_off = "Задержка до этого сервера по последнему тесту"
+download = "Загрузка"
+upload = "Отдача"
+ms = "мс"
+mbits = "Мбит/с"
 
 [kill]
-on_blocks = "Kill switch on · traffic is blocked while the tunnel is down"
-on_tun = "Kill switch on · takes effect in TUN mode"
-on_system_wide = "Kill switch on · takes effect in system-wide mode"
-off = "Kill switch off · block traffic while the tunnel is down"
+on_blocks = "Kill switch включён · трафик блокируется, пока туннель не работает"
+on_tun = "Kill switch включён · работает в режиме TUN"
+on_system_wide = "Kill switch включён · работает в режиме для всей системы"
+off = "Kill switch выключен · блокировать трафик, пока туннель не работает"
 
 [servers]
-title = "Servers"
-tested_now = "tested just now"
-tested_ago = "tested {ago} ago"
-sort = "Sort by latency"
-sorted = "Sorted by latency"
-measure = "Measure every server through its own protocol"
-measuring = "Measuring every server…"
-test = "Test"
-sign_in = "Sign in to see your servers."
-load = "Server load {pct}%"
-offline = "offline"
-show = "Show servers"
-hide = "Hide servers"
+title = "Серверы"
+tested_now = "проверено только что"
+tested_ago = "проверено {ago} назад"
+sort = "Сортировать по задержке"
+sorted = "Сортировка по задержке"
+measure = "Измерить каждый сервер через его протокол"
+measuring = "Измеряем каждый сервер…"
+test = "Тест"
+sign_in = "Войдите, чтобы увидеть свои серверы."
+load = "Загрузка сервера {pct}%"
+offline = "нет ответа"
+show = "Показать серверы"
+hide = "Скрыть серверы"
 
 [account]
-not_signed_in = "Not signed in"
-loading = "Loading…"
-paste_link = "Paste your subscription link"
-renews = "renews {date}"
+not_signed_in = "Вход не выполнен"
+loading = "Загружаем подписку…"
+paste_link = "Вставьте ссылку на подписку"
+renews = "продлевается {date}"

@@ -1,3 +1,5 @@
+thousands_separator = ","
+
 [error]
 offline = "You seem to be offline"
 cannot_tell_country = "Cannot tell which country this is"

@@ -686,8 +686,9 @@ impl Hitori {
                     .flex()
                     .items_baseline()
                     .justify_between()
-                    .child(div().sm().medium().child(t!("views.default_route.title")))
-                    .child(div().xs().text_color(t.muted_fg).child(current.default_hint())),
+                    .gap(px(8.))
+                    .child(div().flex_none().sm().medium().child(t!("views.default_route.title")))
+                    .child(div().min_w_0().truncate().xs().text_color(t.muted_fg).child(current.default_hint())),
             )
             .child(seg)
     }
@@ -1103,7 +1104,7 @@ impl Hitori {
                             .flex_1()
                             .min_w_0()
                             .on_click(cx.listener(|this, _, window, cx| this.open_palette(Mode::Entry, window, cx)))
-                            .child(div().w(px(24.)).flex_none().flex().justify_center().xs().text_color(t.muted_fg).child(t!("views.via")))
+                            .child(div().min_w(px(24.)).flex_none().flex().justify_center().xs().text_color(t.muted_fg).child(t!("views.via")))
                             .child(
                                 div()
                                     .flex()
@@ -1195,11 +1196,11 @@ impl Hitori {
                 "m-latency",
                 "activity",
                 latency.map_or("—".into(), |ms| ms.to_string()),
-                "ms",
+                t!("views.metrics.ms"),
                 if on { t!("views.metrics.latency_on") } else { t!("views.metrics.latency_off") },
             ))
-            .child(cell("m-down", "arrow-down", speed(st.down), "Mbit/s", t!("views.metrics.download")))
-            .child(cell("m-up", "arrow-up", speed(st.up), "Mbit/s", t!("views.metrics.upload")))
+            .child(cell("m-down", "arrow-down", speed(st.down), t!("views.metrics.mbits"), t!("views.metrics.download")))
+            .child(cell("m-up", "arrow-up", speed(st.up), t!("views.metrics.mbits"), t!("views.metrics.upload")))
     }
 
     /// Kill switch as an icon toggle, blue while on; the full switch and its explanation live in Settings.

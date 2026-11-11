@@ -1,16 +1,18 @@
+thousands_separator = "\u00A0"
+
 [error]
-offline = "You seem to be offline"
-cannot_tell_country = "Cannot tell which country this is"
-checked_while_off = "Your location is checked while the VPN is off"
+offline = "Нет подключения к интернету"
+cannot_tell_country = "Не удаётся определить страну"
+checked_while_off = "Регион проверяется только при выключенном VPN"
 
 [place]
-unknown = "Unknown"
+unknown = "Неизвестно"
 
 [summary]
-checking = "Checking where you are…"
-no_list = "No ready-made list for {place}; your provider's rules apply."
-loading = "Loading the lists of blocked sites…"
-cannot_download = "Cannot download the lists for {place}."
-line = "{sites} and {subnets} go through the VPN."
-sites = { one = "{count} blocked site", few = "{count} blocked sites", many = "{count} blocked sites" }
-subnets = { one = "{count} subnet", few = "{count} subnets", many = "{count} subnets" }
+checking = "Определяем ваш регион…"
+no_list = "Для региона «{place}» нет готового списка; действуют правила провайдера."
+loading = "Загружаем списки заблокированных сайтов…"
+cannot_download = "Не удалось загрузить списки для региона «{place}»."
+line = "{sites} и {subnets} идут через VPN."
+sites = { one = "{count} заблокированный сайт", few = "{count} заблокированных сайта", many = "{count} заблокированных сайтов" }
+subnets = { one = "{count} подсеть", few = "{count} подсети", many = "{count} подсетей" }

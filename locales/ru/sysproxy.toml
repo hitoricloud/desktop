@@ -1,2 +1,2 @@
 [error]
-linux_is_tun = "system-wide mode is a TUN on Linux"
+linux_is_tun = "режим для всей системы на Linux — это TUN"

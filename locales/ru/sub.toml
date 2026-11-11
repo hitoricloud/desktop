@@ -1,12 +1,12 @@
 [error]
-paste_full_link = "Paste the full subscription link (https://…)"
-not_found = "Subscription not found — check the link"
-refused_device = "The panel refused this device (device limit?)"
-server_answered = "Subscription server answered {code}"
-cannot_reach = "Cannot reach the subscription server ({kind})"
-no_profiles = "This subscription has no Xray JSON profiles"
-no_servers = "The subscription has no servers you can use"
+paste_full_link = "Вставьте полную ссылку на подписку (https://…)"
+not_found = "Подписка не найдена — проверьте ссылку"
+refused_device = "Панель отклонила это устройство (лимит устройств?)"
+server_answered = "Сервер подписки ответил {code}"
+cannot_reach = "Не удаётся связаться с сервером подписки ({kind})"
+no_profiles = "В этой подписке нет профилей Xray JSON"
+no_servers = "В подписке нет серверов, доступных вам"
 
 [label]
-server = "Server"
-server_number = "Server #{n}"
+server = "Сервер"
+server_number = "Сервер №{n}"

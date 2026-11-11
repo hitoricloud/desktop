@@ -73,8 +73,18 @@ impl Server {
     }
 }
 
-static NONE: LazyLock<Server> =
-    LazyLock::new(|| Server { id: "none", country: t!("data.none.country"), code: "", city: t!("data.none.city"), ip: "", lat: 52., lon: 30., variants: vec![] });
+/// Stand-in while there are no servers, in the current language.
+fn none() -> &'static Server {
+    static ALL: Mutex<Vec<&'static Server>> = Mutex::new(Vec::new());
+    let (country, city) = (t!("data.none.country"), t!("data.none.city"));
+    let mut all = ALL.lock().unwrap();
+    if let Some(s) = all.iter().find(|s| s.country == country && s.city == city) {
+        return s;
+    }
+    let s: &'static Server = Box::leak(Box::new(Server { id: "none", country, code: "", city, ip: "", lat: 52., lon: 30., variants: vec![] }));
+    all.push(s);
+    s
+}
 static SERVERS: RwLock<Vec<&'static Server>> = RwLock::new(Vec::new());
 static NUMBERS: LazyLock<RwLock<HashMap<&'static str, u16>>> = LazyLock::new(Default::default);
 /// Last latency test result per server; `None` when it timed out.
@@ -113,7 +123,7 @@ fn numbers(ids: &[&'static str]) -> HashMap<&'static str, u16> {
 
 pub fn server(id: &str) -> &'static Server {
     let all = SERVERS.read().unwrap();
-    all.iter().find(|s| s.id == id).copied().or_else(|| all.first().copied()).unwrap_or(&NONE)
+    all.iter().find(|s| s.id == id).copied().or_else(|| all.first().copied()).unwrap_or_else(none)
 }
 
 pub fn has_server(id: &str) -> bool {
@@ -184,7 +194,7 @@ pub fn by_latency(list: &mut [&'static Server]) {
 /// Lowest measured ping; the first server until something is measured.
 pub fn fastest() -> &'static Server {
     let all = servers();
-    all.iter().filter_map(|s| ping(s.id).map(|p| (p, *s))).min_by_key(|(p, _)| *p).map(|(_, s)| s).or_else(|| all.first().copied()).unwrap_or(&NONE)
+    all.iter().filter_map(|s| ping(s.id).map(|p| (p, *s))).min_by_key(|(p, _)| *p).map(|(_, s)| s).or_else(|| all.first().copied()).unwrap_or_else(none)
 }
 
 /// A country's best server: lowest measured ping, then lowest load among the ones that did not time out.
@@ -198,7 +208,7 @@ pub fn best_in(code: &str) -> &'static str {
             None => (1, 0, loads.get(s.id).copied().unwrap_or(100)),
             Some(None) => (2, 0, 0),
         })
-        .map_or(NONE.id, |s| s.id)
+        .map_or("none", |s| s.id)
 }
 
 /// Name and capital of the countries nodes are likely to be in, for the list and the map before an exit is seen.

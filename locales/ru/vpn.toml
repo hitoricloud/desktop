@@ -1,8 +1,8 @@
 [error]
-no_server = "No server to connect to"
-sign_in_to_connect = "Sign in to connect"
-connection_lost = "Connection lost"
-connection_lost_why = "Connection lost: {why}"
+no_server = "Нет сервера для подключения"
+sign_in_to_connect = "Войдите, чтобы подключиться"
+connection_lost = "Соединение потеряно"
+connection_lost_why = "Соединение потеряно: {why}"
 
 [region]
-cannot_download = "Cannot download the lists for {place}"
+cannot_download = "Не удалось загрузить списки для региона «{place}»"

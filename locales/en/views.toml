@@ -80,6 +80,8 @@ latency_on = "Latency through the tunnel"
 latency_off = "Latency to this server, from the last test"
 download = "Download"
 upload = "Upload"
+ms = "ms"
+mbits = "Mbit/s"
 
 [kill]
 on_blocks = "Kill switch on · traffic is blocked while the tunnel is down"

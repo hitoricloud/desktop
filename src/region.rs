@@ -310,7 +310,7 @@ fn thousands(n: usize) -> String {
     let mut out = String::new();
     for (i, c) in s.chars().enumerate() {
         if i > 0 && (s.len() - i) % 3 == 0 {
-            out.push(',');
+            out.push_str(t!("region.thousands_separator"));
         }
         out.push(c);
     }

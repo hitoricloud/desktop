@@ -1,2 +1,2 @@
-you = "You"
-via = "via {city}"
+you = "Вы"
+via = "вход: {city}"
