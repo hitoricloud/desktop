@@ -255,14 +255,22 @@ pub fn selftest() -> i32 {
     let run = || -> Result<u64, String> {
         let xray = crate::xray::xray_path().ok_or("the Xray core is missing")?;
         let metrics = crate::xray::free_port();
-        let link = Link::start(&xray, &PathBuf::new(), &crate::xray::selftest_config(metrics), true, &log)?;
+        #[allow(unused_mut)]
+        let mut link = Link::start(&xray, &PathBuf::new(), &crate::xray::selftest_config(metrics), true, &log)?;
         println!("tun selftest: up");
         if let Err(e) = fetch("https://1.1.1.1/cdn-cgi/trace") {
             #[cfg(target_os = "macos")]
-            for args in [&["/usr/sbin/netstat", "-rn", "-f", "inet"][..], &["/sbin/route", "-n", "get", "1.1.1.1"], &["/sbin/route", "-n", "get", "-ifscope", "en0", "1.1.1.1"], &["/sbin/ifconfig", "en0"], &["/sbin/pfctl", "-a", "com.apple/hitori", "-sr"]] {
+            for args in [&["/usr/sbin/netstat", "-rn", "-f", "inet"][..], &["/sbin/route", "-n", "get", "1.1.1.1"], &["/sbin/route", "-n", "get", "-ifscope", "en0", "1.1.1.1"], &["/sbin/ifconfig", "en0"], &["/sbin/pfctl", "-a", "com.apple/hitori", "-vsr"], &["/bin/ps", "-axo", "pid,uid,gid,rgid,comm"]] {
                 let out = std::process::Command::new(args[0]).args(&args[1..]).output();
                 let text = out.map(|o| format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))).unwrap_or_else(|e| e.to_string());
+                let text = if args[0] == "/bin/ps" { text.lines().filter(|l| l.contains("xray") || l.contains("PID")).collect::<Vec<_>>().join("\n") } else { text };
                 eprintln!("--- {}\n{text}", args.join(" "));
+            }
+            #[cfg(target_os = "macos")]
+            {
+                let _ = link.send("kill 0");
+                std::thread::sleep(Duration::from_secs(1));
+                eprintln!("--- without the kill switch: {:?}", fetch("https://1.1.1.1/cdn-cgi/trace").map(|_| "ok"));
             }
             return Err(e);
         }
