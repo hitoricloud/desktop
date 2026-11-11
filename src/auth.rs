@@ -346,26 +346,28 @@ fn unix_date(secs: i64) -> String {
     format!("{day} {} {year}", MONTHS[mp as usize])
 }
 
+/// The subscription of `/me`, also sent live over the socket.
+pub fn account(s: &Value, name: String) -> Account {
+    let status = s["status"].as_str().unwrap_or_default().to_owned();
+    let num = |k: &str| s[k].as_f64().unwrap_or(0.).max(0.);
+    Account {
+        name,
+        title: String::new(),
+        active: status.eq_ignore_ascii_case("active"),
+        status,
+        days_left: s["days_left"].as_f64().map(|d| d.max(0.) as u32),
+        expires: s["expires_at"].as_str().and_then(data::date).or_else(|| s["expires_at"].as_i64().map(unix_date)),
+        used: num("traffic_used") as u64,
+        limit: num("traffic_limit") as u64,
+        support: None,
+    }
+}
+
 fn me_from(v: Value) -> Result<Me, Error> {
     let user: User = serde_json::from_value(v["user"].clone()).map_err(|_| unexpected())?;
     let s = &v["subscription"];
     let plan = match s["url"].as_str() {
-        Some(url) => {
-            let status = s["status"].as_str().unwrap_or_default().to_owned();
-            let num = |k: &str| s[k].as_f64().unwrap_or(0.).max(0.);
-            let account = Account {
-                name: user.name.clone(),
-                title: String::new(),
-                active: status.eq_ignore_ascii_case("active"),
-                status,
-                days_left: s["days_left"].as_f64().map(|d| d.max(0.) as u32),
-                expires: s["expires_at"].as_str().and_then(data::date).or_else(|| s["expires_at"].as_i64().map(unix_date)),
-                used: num("traffic_used") as u64,
-                limit: num("traffic_limit") as u64,
-                support: None,
-            };
-            Some(Plan { url: url.to_owned(), account })
-        }
+        Some(url) => Some(Plan { url: url.to_owned(), account: account(s, user.name.clone()) }),
         None if s.is_null() => None,
         None => return Err(unexpected()),
     };
@@ -427,7 +429,7 @@ impl Client {
     }
 
     /// New tokens, unless another request already replaced `stale`. A refused refresh signs out; a network error doesn't.
-    fn refresh(&self, stale: &str) -> Result<String, Error> {
+    pub fn refresh(&self, stale: &str) -> Result<String, Error> {
         let mut slot = self.session.lock().unwrap();
         let Some(s) = slot.clone() else { return Err(Error::Unauthorized) };
         if s.access_token != stale {
