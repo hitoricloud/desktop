@@ -253,7 +253,19 @@ impl Net {
     /// The core as the user, in its own group, with the utun as fd `XRAY_TUN_FD`.
     pub fn command(&self, xray: &Path) -> Command {
         let mut cmd = Command::new(xray);
-        cmd.uid(self.peer_uid).gid(CORE_GID).env("XRAY_TUN_FD", self.utun.as_raw_fd().to_string()).current_dir("/");
+        cmd.env("XRAY_TUN_FD", self.utun.as_raw_fd().to_string()).current_dir("/");
+        let uid = self.peer_uid;
+        // pf matches the socket's effective group; set real and effective ids explicitly, groups first.
+        // SAFETY: only async-signal-safe libc calls between fork and exec.
+        unsafe {
+            cmd.pre_exec(move || {
+                let gid = CORE_GID as libc::gid_t;
+                if libc::setgroups(1, &gid) != 0 || libc::setregid(gid, gid) != 0 || libc::setreuid(uid, uid) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
         cmd
     }
 
