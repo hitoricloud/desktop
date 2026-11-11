@@ -1,23 +1,41 @@
 //! Local control channel: line-delimited JSON over a Unix socket in the private runtime dir (Linux, macOS) or a named
-//! pipe (Windows). The first instance listens; a second launch asks it to show its window and exits.
+//! pipe (Windows). The first instance listens; a second launch asks it to show its window and exits, and
+//! `hitori status|connect|…` are clients of it. Protocol: docs/ipc.md.
+use std::cell::RefCell;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::time::Duration;
+use std::rc::Rc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_channel::Sender;
-use gpui::App;
+use gpui::{App, Context, Entity};
 use serde_json::{Value, json};
+
+use crate::app::{Conn, Vpn};
+use crate::data::{self, Server};
 
 pub use sys::Listener;
 
 #[derive(Debug, PartialEq)]
 pub enum Request {
     Show,
+    Status,
+    Connect,
+    Disconnect,
+    Servers,
+    Select(String),
+    Subscribe,
 }
 
 pub fn parse(line: &str) -> Result<Request, String> {
     let v: Value = serde_json::from_str(line).map_err(|e| format!("bad request: {e}"))?;
     match v["cmd"].as_str() {
         Some("show") => Ok(Request::Show),
+        Some("status") => Ok(Request::Status),
+        Some("connect") => Ok(Request::Connect),
+        Some("disconnect") => Ok(Request::Disconnect),
+        Some("servers") => Ok(Request::Servers),
+        Some("select") => v["id"].as_str().map(|id| Request::Select(id.to_owned())).ok_or_else(|| "select needs a server \"id\"".into()),
+        Some("subscribe") => Ok(Request::Subscribe),
         Some(cmd) => Err(format!("unknown command: {cmd}")),
         None => Err("missing \"cmd\"".into()),
     }
@@ -62,13 +80,76 @@ fn hand_over() -> bool {
     BufReader::new(&stream).read_line(&mut String::new()).is_ok_and(|n| n > 0)
 }
 
+const USAGE: &str = "usage: hitori status|connect|disconnect|servers|select <id>|watch";
+
+/// `hitori status|connect|disconnect|servers|select <id>|watch`: the exit code, or `None` for any other launch.
+pub fn cli(args: &[String]) -> Option<i32> {
+    let cmd = args.first()?.as_str();
+    let request = match (cmd, &args[1..]) {
+        ("status" | "connect" | "disconnect" | "servers", []) => json!({ "cmd": cmd }),
+        ("select", [id]) => json!({ "cmd": "select", "id": id }),
+        ("watch", []) => json!({ "cmd": "subscribe" }),
+        ("status" | "connect" | "disconnect" | "servers" | "select" | "watch", _) => {
+            eprintln!("{USAGE}");
+            return Some(2);
+        }
+        _ => return None,
+    };
+    Some(ask(&request))
+}
+
+/// Print the answer (every event for `subscribe`): 0 when it says ok, 1 when not, 2 when nothing answers.
+fn ask(request: &Value) -> i32 {
+    // SAFETY: plain call. Windows release builds have no console of their own: print to the one they started from.
+    #[cfg(windows)]
+    unsafe {
+        let _ = windows::Win32::System::Console::AttachConsole(windows::Win32::System::Console::ATTACH_PARENT_PROCESS);
+    }
+    let watch = request["cmd"] == "subscribe";
+    let mut out = std::io::stdout().lock();
+    let Ok(stream) = sys::connect() else {
+        let _ = writeln!(out, "{}", json!({ "ok": false, "error": "Hitori is not running" }));
+        return 2;
+    };
+    if (&stream).write_all(format!("{request}\n").as_bytes()).is_err() {
+        return 2;
+    }
+    for line in BufReader::new(&stream).lines() {
+        let Ok(line) = line else { break };
+        // The reader went away (`hitori watch | head -1`).
+        if writeln!(out, "{line}").and_then(|_| out.flush()).is_err() {
+            return 0;
+        }
+        if !watch {
+            return if serde_json::from_str::<Value>(&line).is_ok_and(|v| v["ok"] == true) { 0 } else { 1 };
+        }
+    }
+    if watch { 1 } else { 2 }
+}
+
+type Watchers = Rc<RefCell<Vec<Sender<String>>>>;
+
 /// Answer requests on the GPUI main thread; connections are served on their own threads.
-pub fn serve(listener: Listener, cx: &mut App) {
+pub fn serve(listener: Listener, vpn: &Entity<Vpn>, cx: &mut App) {
     let (calls, rx) = async_channel::unbounded::<Call>();
     std::thread::spawn(move || accept(listener, calls));
+    let watchers = Watchers::default();
+    let mut last = String::new();
+    cx.observe(vpn, {
+        let watchers = watchers.clone();
+        move |vpn, cx| {
+            let line = event(vpn.read(cx));
+            if line != last {
+                watchers.borrow_mut().retain(|w| w.try_send(line.clone()).is_ok());
+                last = line;
+            }
+        }
+    })
+    .detach();
+    let vpn = vpn.clone();
     cx.spawn(async move |cx| {
         while let Ok(call) = rx.recv().await {
-            if cx.update(|cx| answer(call, cx)).is_err() {
+            if cx.update(|cx| answer(call, &vpn, &watchers, cx)).is_err() {
                 break;
             }
         }
@@ -76,15 +157,96 @@ pub fn serve(listener: Listener, cx: &mut App) {
     .detach();
 }
 
-fn answer(call: Call, cx: &mut App) {
+fn answer(call: Call, vpn: &Entity<Vpn>, watchers: &Watchers, cx: &mut App) {
     let reply = match call.request {
         Request::Show => {
             crate::tray::handle(crate::tray::Msg::OpenMain, cx);
             cx.activate(true);
             json!({ "ok": true })
         }
+        Request::Status => ok(status(vpn.read(cx)), true),
+        Request::Servers => {
+            let selected = vpn.read(cx).s.server_id;
+            let list: Vec<Value> = data::servers()
+                .into_iter()
+                .map(|s| {
+                    let mut j = server(s);
+                    j["ping_ms"] = data::ping(s.id).into();
+                    j["selected"] = (s.id == selected).into();
+                    j
+                })
+                .collect();
+            json!({ "ok": true, "servers": list })
+        }
+        Request::Connect => act(vpn, true, cx, |v, cx| {
+            if v.s.conn == Conn::Off {
+                v.connect(cx);
+            }
+        }),
+        Request::Disconnect => act(vpn, false, cx, |v, cx| {
+            if v.s.conn != Conn::Off {
+                v.disconnect(cx);
+            }
+        }),
+        // Like picking a location in the app: connects there, or moves the running connection.
+        Request::Select(id) if data::has_server(&id) => {
+            let id = data::server(&id).id;
+            act(vpn, true, cx, |v, cx| v.go(id, cx))
+        }
+        Request::Select(id) => json!({ "ok": false, "error": format!("unknown server: {id}") }),
+        Request::Subscribe => {
+            if call.reply.try_send(event(vpn.read(cx))).is_ok() {
+                watchers.borrow_mut().push(call.reply);
+            }
+            return;
+        }
     };
     call.reply.try_send(reply.to_string()).ok();
+}
+
+/// Run a model action; it worked if the tunnel is then up or coming up (`on`), or down.
+fn act(vpn: &Entity<Vpn>, on: bool, cx: &mut App, f: impl FnOnce(&mut Vpn, &mut Context<Vpn>)) -> Value {
+    vpn.update(cx, f);
+    let v = vpn.read(cx);
+    ok(status(v), (v.s.conn != Conn::Off) == on)
+}
+
+fn ok(mut v: Value, ok: bool) -> Value {
+    v["ok"] = ok.into();
+    v
+}
+
+fn event(v: &Vpn) -> String {
+    let mut e = status(v);
+    e["event"] = "status".into();
+    e.to_string()
+}
+
+fn server(s: &Server) -> Value {
+    json!({ "id": s.id, "name": format!("{} · {}", s.country, s.city), "country": s.country, "code": s.code, "city": s.city })
+}
+
+fn status(v: &Vpn) -> Value {
+    let s = &v.s;
+    let since = s.connected_at.and_then(|t| SystemTime::now().checked_sub(t.elapsed())).and_then(|t| t.duration_since(UNIX_EPOCH).ok());
+    let mbps = |x: f64| (x * 100.).round() / 100.;
+    let traffic = (s.conn == Conn::On).then(|| {
+        let (rx, tx) = v.traffic().unwrap_or_default();
+        json!({ "rx_bytes": rx, "tx_bytes": tx, "down_mbps": mbps(s.stats.down), "up_mbps": mbps(s.stats.up), "latency_ms": s.stats.latency })
+    });
+    json!({
+        "state": match s.conn {
+            Conn::On => "connected",
+            Conn::Connecting => "connecting",
+            Conn::Off => "disconnected",
+        },
+        "signed_in": s.signed_in,
+        "server": data::has_server(s.server_id).then(|| server(data::server(s.server_id))),
+        "entry": s.entry_id.filter(|id| data::has_server(id)).map(|id| server(data::server(id))),
+        "connected_since": since.map(|d| d.as_secs()),
+        "traffic": traffic,
+        "error": s.error,
+    })
 }
 
 fn accept(mut listener: Listener, calls: Sender<Call>) {
@@ -258,9 +420,33 @@ mod tests {
     #[test]
     fn parses_requests() {
         assert_eq!(parse(r#"{"cmd":"show"}"#), Ok(Request::Show));
+        assert_eq!(parse(r#"{"cmd":"status"}"#), Ok(Request::Status));
+        assert_eq!(parse(r#"{"cmd":"connect"}"#), Ok(Request::Connect));
+        assert_eq!(parse(r#"{"cmd":"disconnect"}"#), Ok(Request::Disconnect));
+        assert_eq!(parse(r#"{"cmd":"servers"}"#), Ok(Request::Servers));
+        assert_eq!(parse(r#"{"cmd":"subscribe"}"#), Ok(Request::Subscribe));
+        assert_eq!(parse(r#" {"cmd":"select","id":"node-1"} "#), Ok(Request::Select("node-1".into())));
+        assert_eq!(parse(r#"{"cmd":"select"}"#), Err("select needs a server \"id\"".into()));
+        assert_eq!(parse(r#"{"cmd":"select","id":7}"#), Err("select needs a server \"id\"".into()));
         assert_eq!(parse(r#"{"cmd":"fly"}"#), Err("unknown command: fly".into()));
         assert_eq!(parse(r#"{"id":"x"}"#), Err("missing \"cmd\"".into()));
-        assert!(parse("show").is_err());
+        assert_eq!(parse(r#"["status"]"#), Err("missing \"cmd\"".into()));
+        assert!(parse("status").is_err());
+    }
+
+    #[test]
+    fn cli_subcommands() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(cli(&args(&[])), None);
+        assert_eq!(cli(&args(&["--tray"])), None);
+        assert_eq!(cli(&args(&["select"])), Some(2), "select without an id is a usage error");
+        assert_eq!(cli(&args(&["status", "extra"])), Some(2));
+    }
+
+    #[test]
+    fn server_json() {
+        let s = Server { id: "n1", country: "Estonia", code: "EE", city: "Tallinn", ip: "", lat: 0., lon: 0., variants: vec![] };
+        assert_eq!(server(&s), json!({ "id": "n1", "name": "Estonia · Tallinn", "country": "Estonia", "code": "EE", "city": "Tallinn" }));
     }
 
     #[cfg(unix)]
@@ -278,24 +464,31 @@ mod tests {
         assert!(sys::listen_in(&dir).unwrap().is_none(), "the lock keeps a second instance out");
         assert_eq!(std::fs::metadata(dir.join("ipc.sock")).unwrap().permissions().mode() & 0o777, 0o600);
 
+        // Stands in for the main thread: echoes the request, streams two events to a subscriber.
         let (calls, rx) = async_channel::unbounded::<Call>();
         std::thread::spawn(move || accept(listener, calls));
         std::thread::spawn(move || {
             while let Ok(call) = rx.recv_blocking() {
-                assert_eq!(call.request, Request::Show);
-                call.reply.try_send(json!({ "ok": true }).to_string()).unwrap();
+                match call.request {
+                    Request::Subscribe => (0..2).for_each(|n| call.reply.try_send(json!({ "event": "status", "n": n }).to_string()).unwrap()),
+                    request => call.reply.try_send(json!({ "ok": true, "got": format!("{request:?}") }).to_string()).unwrap(),
+                }
             }
         });
 
         let stream = UnixStream::connect(dir.join("ipc.sock")).unwrap();
         let mut lines = BufReader::new(&stream).lines();
-        let mut ask = |line: &str| {
-            (&stream).write_all(format!("{line}\n").as_bytes()).unwrap();
-            serde_json::from_str::<Value>(&lines.next().unwrap().unwrap()).unwrap()
-        };
-        assert_eq!(ask(r#"{"cmd":"show"}"#), json!({ "ok": true }));
-        assert_eq!(ask("nonsense")["ok"], false);
-        assert_eq!(ask(r#"{"cmd":"show"}"#), json!({ "ok": true }), "the connection stays usable");
+        let mut next = || serde_json::from_str::<Value>(&lines.next().unwrap().unwrap()).unwrap();
+        let send = |line: &str| (&stream).write_all(format!("{line}\n").as_bytes()).unwrap();
+        send(r#"{"cmd":"status"}"#);
+        assert_eq!(next(), json!({ "ok": true, "got": "Status" }));
+        send("nonsense");
+        assert_eq!(next()["ok"], false);
+        send(r#"{"cmd":"select","id":"node-1"}"#);
+        assert_eq!(next(), json!({ "ok": true, "got": "Select(\"node-1\")" }), "the connection stays usable");
+        send(r#"{"cmd":"subscribe"}"#);
+        assert_eq!(next(), json!({ "event": "status", "n": 0 }));
+        assert_eq!(next(), json!({ "event": "status", "n": 1 }));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
