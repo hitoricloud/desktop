@@ -1,2 +1,5 @@
 you = "You"
 via = "via {city}"
+connect = "Connect"
+switch = "Switch"
+cancel = "Cancel"

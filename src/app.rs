@@ -418,6 +418,7 @@ impl Hitori {
                 }
                 "server" => self.s.server_id = data::server(value).id,
                 "entry" => self.s.entry_id = Some(data::server(value).id),
+                "pick" => self.map.pick = Some(data::server(value).id),
                 "on" => self.with_vpn(cx, |v, cx| v.connected(cx)),
                 "connecting" => self.connect(cx),
                 "ping" => self.test_pings(cx),
@@ -559,6 +560,7 @@ impl Hitori {
     pub fn go(&mut self, id: &'static str, window: &mut Window, cx: &mut Context<Self>) {
         let was = (self.s.conn, self.s.server_id);
         self.s.server_id = id;
+        self.map.pick = None;
         if self.s.entry_id == Some(id) {
             self.s.entry_id = None;
         }
@@ -801,7 +803,7 @@ impl Hitori {
     }
 
     fn on_dismiss(&mut self, _: &Dismiss, window: &mut Window, cx: &mut Context<Self>) {
-        if self.menu.take().is_some() {
+        if self.menu.take().is_some() || self.map.pick.take().is_some() {
         } else if self.palette.is_some() {
             self.close_palette(window, cx);
         } else if self.panel.is_some() {
