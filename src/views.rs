@@ -1082,7 +1082,7 @@ impl Hitori {
         let label = match self.s.conn {
             Conn::On => t!("views.field.connected_to"),
             Conn::Connecting => t!("views.field.connecting_to"),
-            Conn::Off if exit.id == data::fastest().id && self.s.entry_id.is_none() => t!("views.field.fastest"),
+            Conn::Off if exit.id == data::fastest(self.s.protocol).id && self.s.entry_id.is_none() => t!("views.field.fastest"),
             Conn::Off => t!("tray.location"),
         };
         let exit_btn = self
@@ -1233,10 +1233,10 @@ impl Hitori {
             }))
     }
 
-    /// Every server; clicking one connects there. The header runs the latency test and sorts by its results.
+    /// Every server with the chosen transport; clicking one connects there. The header runs the latency test and sorts by its results.
     fn server_list(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme(cx);
-        let mut servers = data::servers();
+        let mut servers = data::offered(self.s.protocol);
         if self.sort_ping {
             data::by_latency(&mut servers);
         }
@@ -1374,7 +1374,7 @@ impl Hitori {
         let open = self.open_countries.contains(&code);
         let current = list.iter().find(|s| s.id == self.s.server_id).filter(|_| !open);
         let live = current.is_some() && self.s.conn == Conn::On;
-        let shown = current.map_or_else(|| data::best_in(code), |s| s.id);
+        let shown = current.map_or_else(|| data::best_in(code, self.s.protocol), |s| s.id);
         let latency = self.latency_el(shown, current.is_some() && self.s.conn == Conn::Connecting, format!("country-spin-{code}"), &t);
         self.row_fx(SharedString::from(format!("country-{code}")), current.is_some(), &t)
             .h(px(48.))
@@ -1404,7 +1404,7 @@ impl Hitori {
                     })),
             )
             .on_click(cx.listener(move |this, _, window, cx| {
-                let best = data::best_in(code);
+                let best = data::best_in(code, this.s.protocol);
                 this.go(best, window, cx);
             }))
     }

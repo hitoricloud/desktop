@@ -882,6 +882,7 @@ mod tests {
                     Protocol::Hy2 => json!({"protocol": "hysteria", "streamSettings": {"network": "hysteria"}}),
                     Protocol::Grpc => json!({"protocol": "vless", "settings": {"n": id}, "streamSettings": {"network": "grpc"}}),
                     Protocol::Tls => json!({"protocol": "vless", "settings": {"n": id}, "streamSettings": {"network": "tcp"}}),
+                    Protocol::Hmc => json!({"protocol": "vless", "settings": {"n": id}, "streamSettings": {"network": "tcp", "finalmask": {"tcp": [{"type": "hmc"}]}}}),
                 };
                 (*p, o)
             })
@@ -1045,6 +1046,69 @@ mod tests {
         assert!(core.alive());
         assert_eq!(through(&core).ok(), Some(204), "the tunnel still works after the test");
         core.stop();
+    }
+
+    /// An HMC server core like the panel's (VLESS, TLS, `hmc` mask, no flow) and its client outbound as the subscription has it.
+    fn hmc_fixture(xray: &PathBuf) -> (Fixture, Value) {
+        let port = free_port();
+        let dir = std::env::temp_dir().join(format!("hitori-hmc-{port}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cert = dir.join("c");
+        assert!(Command::new(xray).args(["tls", "cert", "--domain", "localhost", "--file"]).arg(&cert).output().unwrap().status.success());
+        let hash = String::from_utf8(Command::new(xray).args(["tls", "hash", "--cert"]).arg(dir.join("c.crt")).output().unwrap().stdout).unwrap();
+        let hash = hash.split_whitespace().last().unwrap().to_owned();
+        let password = "0123456789abcdef0123456789abcdef-hitori-desktop-test";
+        let tls = json!({"certificates": [{"certificateFile": dir.join("c.crt"), "keyFile": dir.join("c.key")}]});
+        let inbound = json!({"listen": "127.0.0.1", "port": port, "protocol": "vless", "settings": {"clients": [{"id": UUID}], "decryption": "none"},
+            "streamSettings": {"network": "raw", "security": "tls", "tlsSettings": tls, "finalmask": {"tcp": [{"type": "hmc", "settings": {"password": password}}]}}});
+        let freedom = json!({"protocol": "freedom", "settings": {"finalRules": [{"action": "allow", "ip": ["127.0.0.1/32"]}]}});
+        let path = dir.join("server.json");
+        crate::store::write(&path, &serde_json::to_vec(&json!({"log": {"loglevel": "error"}, "inbounds": [inbound], "outbounds": [freedom]})).unwrap(), true).unwrap();
+        let child = Fixture(Command::new(xray).args(["run", "-c"]).arg(&path).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
+        let start = Instant::now();
+        while TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], port))).is_err() && start.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        let user = json!({"id": UUID, "encryption": "none", "flow": ""});
+        let outbound = json!({"protocol": "vless", "settings": {"vnext": [{"address": "127.0.0.1", "port": port, "users": [user]}]},
+            "mux": {"enabled": true, "concurrency": 8},
+            "streamSettings": {"network": "tcp", "security": "tls", "tlsSettings": {"serverName": "localhost", "pinnedPeerCertSha256": hash},
+                "finalmask": {"tcp": [{"type": "hmc", "settings": {"hostname": "hypixel.net", "password": password}}]}}});
+        (child, outbound)
+    }
+
+    /// HMC end to end: the latency test, the tunnel itself, and HMC as the last hop of a cascade.
+    #[test]
+    fn hmc_through_real_cores() {
+        let Some(xray) = xray_path() else { return eprintln!("skipped: no Xray core (scripts/fetch-xray.sh)") };
+        let (_server, target) = {
+            let (s, _, t) = fixture(&xray);
+            (s, t)
+        };
+        let (_hmc, outbound) = hmc_fixture(&xray);
+        let dead = local("de-2", free_port()).variants[0].1.clone();
+        let de: &'static Server = Box::leak(Box::new(Server { id: "de-2", country: "X", code: "XX", city: "", ip: "", lat: 0., lon: 0., variants: vec![(Protocol::Tls, dead), (Protocol::Hmc, outbound)] }));
+        let got = results(ping(vec![de], Protocol::Hmc, None, target));
+        assert!(got["de-2"].is_some_and(|ms| ms < 5000), "HMC handshake answers: {got:?}");
+
+        let socks = LocalProxy::default().socks;
+        if TcpListener::bind(("127.0.0.1", socks)).is_err() {
+            return eprintln!("skipped the connected half: port {socks} is in use");
+        }
+        let (_entry, entry_port, _) = fixture(&xray);
+        let entry = local("aa-1", entry_port);
+        for via in [None, Some(entry)] {
+            let mut p = plan();
+            (p.exit, p.entry, p.servers, p.default_route, p.protocol) = (de, via, vec![de, entry], RuleMode::Vpn, Protocol::Hmc);
+            let core = Core::start(&p, Log::default()).unwrap();
+            let proxy = ureq::Proxy::new(format!("http://127.0.0.1:{}", core.ports.probe)).unwrap();
+            let agent = ureq::AgentBuilder::new().proxy(proxy).timeout(Duration::from_secs(10)).build();
+            for _ in 0..3 {
+                assert_eq!(agent.get(&format!("http://{target}/")).call().map(|r| r.status()).ok(), Some(204), "through HMC, entry {:?}", via.map(|v| v.id));
+            }
+            core.stop();
+        }
     }
 
     #[test]

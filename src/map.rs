@@ -350,6 +350,10 @@ impl Routes {
     }
 
     /// Who leaves the tunnel at this server.
+    fn uses(&self, id: &str) -> bool {
+        self.paths.iter().any(|p| p.hops.contains(&id))
+    }
+
     fn riders_at(&self, id: &str) -> Vec<Rider> {
         self.paths.iter().filter(|p| p.hops.last() == Some(&id)).flat_map(|p| p.riders.iter().copied()).collect()
     }
@@ -664,7 +668,9 @@ impl Hitori {
     fn markers(&self, t: &Theme, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let routes = Routes::of(self);
         // The picked server last, so its card is above the other markers.
-        let mut servers = data::servers();
+        // Servers without the chosen transport are hidden unless a route still goes through them.
+        let offered = data::offered(self.s.protocol);
+        let mut servers: Vec<_> = data::servers().into_iter().filter(|s| offered.iter().any(|o| o.id == s.id) || routes.uses(s.id)).collect();
         servers.sort_by_key(|s| self.map.pick == Some(s.id));
         let mut out: Vec<AnyElement> = servers.into_iter().map(|s| self.server_marker(s, &routes.riders_at(s.id), t, window, cx)).collect();
         if let Some(g) = self.s.me.as_ref().and_then(|m| m.geo.as_ref()) {

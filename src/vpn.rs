@@ -529,9 +529,10 @@ impl Vpn {
             data::learn_exit(id, &e.ip, e.city.as_deref(), e.lat, e.lon);
         }
         self.lists = Lists { tunnel: Arc::new(parsed.tunnel_rules), base: Arc::new(parsed.base_rules), dns: Arc::new(parsed.dns) };
-        if !data::has_server(self.s.server_id) {
-            self.s.server_id = data::fastest().id;
+        if let Some(p) = data::protocols().first().filter(|_| !data::protocols().contains(&self.s.protocol)) {
+            self.s.protocol = *p;
         }
+        self.keep_shown();
         if self.s.entry_id.is_some_and(|e| !data::has_server(e)) {
             self.s.entry_id = None;
         }
@@ -871,6 +872,17 @@ impl Vpn {
         self.s.testing = false;
         self.s.pending.clear();
         cx.notify();
+    }
+
+    /// Servers without the chosen transport are hidden, so the exit and first hop move off them.
+    pub fn keep_shown(&mut self) {
+        let p = self.s.protocol;
+        if !data::offered(p).iter().any(|s| s.id == self.s.server_id) {
+            self.s.server_id = data::fastest(p).id;
+        }
+        if self.s.entry_id.is_some_and(|e| !data::server(e).carries(p) || e == self.s.server_id) {
+            self.s.entry_id = None;
+        }
     }
 
     // ---------- connection ----------
@@ -1247,7 +1259,7 @@ impl Vpn {
         }
         self.s.pending.clear();
         if self.s.conn == Conn::Off && self.s.recents.is_empty() && self.s.entry_id.is_none() {
-            self.s.server_id = data::fastest().id;
+            self.s.server_id = data::fastest(self.s.protocol).id;
         }
         self.s.servers_gen += 1;
         cx.notify();

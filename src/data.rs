@@ -23,15 +23,18 @@ pub enum Protocol {
     Tls,
     Grpc,
     Hy2,
+    /// VLESS over TLS inside a Minecraft Java login (the `hmc` finalmask).
+    Hmc,
 }
 
 impl Protocol {
-    pub const ALL: [Protocol; 3] = [Protocol::Tls, Protocol::Grpc, Protocol::Hy2];
+    pub const ALL: [Protocol; 4] = [Protocol::Tls, Protocol::Grpc, Protocol::Hy2, Protocol::Hmc];
     pub fn label(self) -> &'static str {
         match self {
             Protocol::Tls => "TLS",
             Protocol::Grpc => "gRPC",
             Protocol::Hy2 => "Hysteria2",
+            Protocol::Hmc => "HMC",
         }
     }
 }
@@ -64,6 +67,16 @@ impl Server {
         format!("{}-{n:04}", self.code)
     }
 
+    /// Whether the subscription published this transport for this server.
+    pub fn has(&self, p: Protocol) -> bool {
+        self.variants.iter().any(|(q, _)| *q == p)
+    }
+
+    /// Whether it can be the first hop of a cascade over `p`; under Hysteria2 hops go over TLS.
+    pub fn carries(&self, p: Protocol) -> bool {
+        self.has(if p == Protocol::Hy2 { Protocol::Tls } else { p })
+    }
+
     /// Transports that can carry another hop (no UDP-only ones).
     pub fn chainable(&self, want: Protocol) -> Option<(Protocol, &serde_json::Value)> {
         match self.variant(want) {
@@ -92,6 +105,19 @@ static PINGS: LazyLock<RwLock<HashMap<&'static str, Option<u32>>>> = LazyLock::n
 
 pub fn servers() -> Vec<&'static Server> {
     SERVERS.read().unwrap().clone()
+}
+
+/// The servers shown for `p`: the ones that publish it, or all of them when none does.
+pub fn offered(p: Protocol) -> Vec<&'static Server> {
+    let all = servers();
+    let some: Vec<_> = all.iter().copied().filter(|s| s.has(p)).collect();
+    if some.is_empty() { all } else { some }
+}
+
+/// Transports at least one server publishes, in menu order.
+pub fn protocols() -> Vec<Protocol> {
+    let all = servers();
+    Protocol::ALL.into_iter().filter(|p| all.iter().any(|s| s.has(*p))).collect()
 }
 
 pub fn set_servers(list: Vec<Server>) {
@@ -191,17 +217,17 @@ pub fn by_latency(list: &mut [&'static Server]) {
     });
 }
 
-/// Lowest measured ping; the first server until something is measured.
-pub fn fastest() -> &'static Server {
-    let all = servers();
+/// Lowest measured ping among the servers shown for `p`; the first one until something is measured.
+pub fn fastest(p: Protocol) -> &'static Server {
+    let all = offered(p);
     all.iter().filter_map(|s| ping(s.id).map(|p| (p, *s))).min_by_key(|(p, _)| *p).map(|(_, s)| s).or_else(|| all.first().copied()).unwrap_or_else(none)
 }
 
 /// A country's best server: lowest measured ping, then lowest load among the ones that did not time out.
-pub fn best_in(code: &str) -> &'static str {
+pub fn best_in(code: &str, p: Protocol) -> &'static str {
+    let all: Vec<_> = offered(p).into_iter().filter(|s| s.code == code).collect();
     let pings = PINGS.read().unwrap();
     let loads = LOADS.read().unwrap();
-    let all: Vec<_> = servers().into_iter().filter(|s| s.code == code).collect();
     all.iter()
         .min_by_key(|s| match pings.get(s.id) {
             Some(Some(ms)) => (0, *ms, loads.get(s.id).copied().unwrap_or(100)),
@@ -610,6 +636,43 @@ mod tests {
         assert_eq!((ping("t-dead"), ping("t-fast")), (None, Some(40)));
         set_pings([("t-dead", Some(90))]);
         assert!(!timed_out("t-dead"), "a later answer replaces the timeout");
+    }
+
+    /// The only test that sets the global server list.
+    #[test]
+    fn servers_without_the_protocol_are_hidden() {
+        let node = |id: &str, code: &str, protos: &[Protocol]| Server {
+            id: intern(id),
+            country: "",
+            code: intern(code),
+            city: "",
+            ip: "",
+            lat: 0.,
+            lon: 0.,
+            variants: protos.iter().map(|p| (*p, serde_json::Value::Null)).collect(),
+        };
+        set_servers(vec![
+            node("o-ee-1", "EE", &[Protocol::Tls, Protocol::Grpc, Protocol::Hy2]),
+            node("o-de-2", "DE", &[Protocol::Grpc, Protocol::Hmc]),
+            node("o-de-3", "DE", &[Protocol::Tls]),
+        ]);
+        set_pings([("o-ee-1", Some(20)), ("o-de-2", Some(90)), ("o-de-3", Some(30))]);
+        let ids = |p| offered(p).iter().map(|s| s.id).collect::<Vec<_>>();
+        assert_eq!(ids(Protocol::Tls), ["o-ee-1", "o-de-3"]);
+        assert_eq!(ids(Protocol::Hmc), ["o-de-2"]);
+        assert_eq!(protocols(), Protocol::ALL, "each transport is published somewhere");
+        assert_eq!(fastest(Protocol::Hmc).id, "o-de-2", "the fastest server with the transport, not overall");
+        assert_eq!(fastest(Protocol::Tls).id, "o-ee-1");
+        assert_eq!(best_in("DE", Protocol::Tls), "o-de-3");
+        assert_eq!(best_in("DE", Protocol::Hmc), "o-de-2");
+        assert_eq!(best_in("EE", Protocol::Hmc), "none", "no such server in that country");
+        let de = server("o-de-2");
+        assert!(de.carries(Protocol::Grpc) && !de.carries(Protocol::Hy2), "under Hysteria2 a first hop needs TLS");
+
+        set_servers(vec![node("o-ee-1", "EE", &[Protocol::Tls])]);
+        assert_eq!(protocols(), [Protocol::Tls]);
+        assert_eq!(ids(Protocol::Hmc), ["o-ee-1"], "nothing publishes it: every server stays");
+        set_servers(vec![]);
     }
 
     #[test]

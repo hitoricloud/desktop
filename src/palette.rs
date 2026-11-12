@@ -80,10 +80,16 @@ impl Hitori {
         let groups = match mode {
             Mode::Exit | Mode::Entry => {
                 let act = |id| if mode == Mode::Entry { Act::Via(id) } else { Act::Go(id) };
-                let servers: Vec<&'static Server> = data::servers().into_iter().filter(|s| !(mode == Mode::Entry && s.id == self.s.server_id)).collect();
+                // Only servers with the chosen transport; a first hop needs one that carries the next.
+                let p = self.s.protocol;
+                let servers: Vec<&'static Server> = match mode {
+                    Mode::Entry => data::servers().into_iter().filter(|s| s.id != self.s.server_id && s.carries(p)).collect(),
+                    _ => data::offered(p),
+                };
+                let recents: Vec<_> = self.s.recents.iter().filter(|id| servers.iter().any(|s| s.id == **id)).collect();
                 let mut g = vec![];
-                if mode == Mode::Exit && !self.s.recents.is_empty() {
-                    let rows = self.s.recents.iter().map(|id| {
+                if mode == Mode::Exit && !recents.is_empty() {
+                    let rows = recents.into_iter().map(|id| {
                         let s = server(id);
                         Row { text: format!("recent {} {} {}", s.id, s.city, s.code), look: Look::Country { s, chosen: None }, disabled: false, act: act(s.id) }
                     });
@@ -142,12 +148,19 @@ impl Hitori {
                 }
             })
             .collect();
+        // Servers without the transport this rule uses are hidden, except the ones it already picked.
+        let p = rule.protocol.unwrap_or(self.s.protocol);
         let mut exit = vec![choice("exit same as connection", "shield-check", t!("palette.same_as_connection"), Some(main_exit.country.into()), rule.exit.is_none(), off, Act::Exit(None))];
-        exit.extend(data::servers().into_iter().map(|s| country("exit ", s, Some(rule.exit == Some(s.id)), off, Act::Exit(Some(s.id)))));
+        let offered = data::offered(p);
+        exit.extend(data::servers().into_iter().filter(|s| rule.exit == Some(s.id) || offered.iter().any(|o| o.id == s.id)).map(|s| country("exit ", s, Some(rule.exit == Some(s.id)), off, Act::Exit(Some(s.id)))));
         let mut through = vec![choice("through straight to exit", "move-right", t!("palette.straight_to_exit"), Some(server(exit_id).country.into()), rule.via.is_none(), off, Act::Through(None))];
-        through.extend(data::servers().into_iter().filter(|s| s.id != exit_id).map(|s| country("through ", s, Some(rule.via == Some(s.id)), off, Act::Through(Some(s.id)))));
+        through.extend(data::servers().into_iter().filter(|s| s.id != exit_id && (rule.via == Some(s.id) || s.carries(p))).map(|s| country("through ", s, Some(rule.via == Some(s.id)), off, Act::Through(Some(s.id)))));
         let mut proto = vec![choice("protocol same as connection", "zap", t!("palette.same_as_connection"), Some(self.s.protocol.label().into()), rule.protocol.is_none(), off, Act::Proto(None))];
-        proto.extend(Protocol::ALL.iter().map(|p| choice(&format!("protocol {}", p.label()), "zap", p.label(), None, rule.protocol == Some(*p), off, Act::Proto(Some(*p)))));
+        let mut protocols = data::protocols();
+        if let Some(r) = rule.protocol.filter(|r| !protocols.contains(r)) {
+            protocols.push(r);
+        }
+        proto.extend(protocols.iter().map(|p| choice(&format!("protocol {}", p.label()), "zap", p.label(), None, rule.protocol == Some(*p), off, Act::Proto(Some(*p)))));
         let mut options = vec![Row { text: "option remove rule".into(), look: Look::Remove, disabled: false, act: Act::Remove }];
         if let Mode::Rule(a) = target {
             let kill = Row { text: "option kill switch".into(), look: Look::Toggle { label: t!("palette.kill_switch"), sub: t!("palette.kill_switch_hint", app = app(a).name), on: rule.kill }, disabled: rule.mode == RuleMode::Block, act: Act::Kill };
