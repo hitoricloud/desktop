@@ -595,7 +595,7 @@ impl Log {
 pub struct Core {
     /// Proxy and system-proxy modes: the core itself.
     child: Option<Child>,
-    /// TUN mode: the privileged helper running the core; dropping it tears the routing down.
+    /// TUN mode: the privileged helper running the core; parked (idle, no routing) when the core stops.
     helper: Option<crate::helper::Link>,
     pub ports: Ports,
     /// Started in TUN mode.
@@ -615,7 +615,7 @@ impl Core {
         let path = crate::store::runtime_dir().join("core.json");
         let config = config(plan, ports)?;
         if plan.tun {
-            let helper = crate::helper::Link::start(&xray, &path, &config, plan.kill_switch, &log)?;
+            let helper = crate::helper::Link::open(&xray, &path, &config, plan.kill_switch, &log)?;
             return Ok(Core { child: None, helper: Some(helper), ports, tun: true, proxy: plan.proxy.clone(), system_proxy: None, log, path });
         }
         write_config(&path, &config)?;
@@ -697,7 +697,9 @@ impl Core {
     fn shutdown(&mut self) {
         // The system proxy first, so apps never point at a core that is gone.
         self.system_proxy = None;
-        self.helper = None;
+        if let Some(helper) = self.helper.take() {
+            helper.park();
+        }
         self.stop_child();
         let _ = std::fs::remove_file(&self.path);
     }
@@ -1400,6 +1402,16 @@ mod tests {
         assert!(sh("ip route show table 26869").is_empty(), "table flushed");
         assert!(sh("ip -br link show dev hitori0 2>&1").contains("does not exist"), "tun gone");
         assert_eq!(loc(3), before, "direct again");
+
+        // The idle helper serves the next connection: no second password prompt.
+        let start = Instant::now();
+        let core = Core::start(&plan, Log::default()).unwrap();
+        assert!(start.elapsed() < Duration::from_secs(15), "reconnected without asking again");
+        assert_eq!(loc(3), want, "tunneled again");
+        core.stop();
+        crate::helper::close();
+        assert_eq!(rules(), 0, "rules removed after the helper ends");
+        assert_eq!(loc(3), before, "direct after the helper ends");
     }
 }
 

@@ -1,6 +1,7 @@
 //! Root half of system-wide mode, run through pkexec as `hitori --tun-helper <xray> <config> <uid> <gid> <kill 0|1>`.
 //! It runs the core with only network capabilities and routes everything the core did not send itself into `hitori0`.
-//! Protocol with `core.rs`: stdout lines `ready`, `down <code>`, `error <message>`; stdin lines `restart`, `kill 0|1`, `stop`/EOF.
+//! Protocol with `helper.rs`: stdout lines `ready`, `down <code>`, `error <message>`, `idle`; stdin lines `restart`, `kill 0|1`,
+//! `idle` (core and routing gone, the helper waits for the next `restart`), `stop`/EOF.
 use std::io::{BufRead, Write};
 use std::os::fd::AsFd;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
@@ -88,12 +89,9 @@ fn run(args: &[String]) -> Result<(), String> {
     let setpriv = if args.uid == 0 { None } else { Some(find("setpriv")?) };
     let iptables = ["iptables", "ip6tables"].into_iter().filter_map(|t| find(t).ok()).collect();
     let commands = stdin_lines();
-    let mut session = Session { ip, setpriv, iptables, args, core: None, src_valid_mark: None };
+    let mut session = Session { ip, setpriv, iptables, args, core: None, src_valid_mark: None, up: false };
     session.teardown(); // leftovers of a helper that was killed
-    session.add_rules()?;
-    session.add_connmark();
-    session.set_kill_switch(session.args.kill_switch);
-    session.start_core()?;
+    session.restart();
     while !TERMINATED.load(Ordering::SeqCst) {
         if let Some(status) = session.core.as_mut().and_then(|c| c.try_wait().ok().flatten()) {
             session.core = None;
@@ -101,9 +99,13 @@ fn run(args: &[String]) -> Result<(), String> {
         }
         match commands.recv_timeout(Duration::from_millis(200)) {
             Ok(line) => match line.trim() {
-                "restart" => session.start_core()?,
-                "kill 1" => session.set_kill_switch(true),
-                "kill 0" => session.set_kill_switch(false),
+                "restart" => session.restart(),
+                "kill 1" => session.set_kill(true),
+                "kill 0" => session.set_kill(false),
+                "idle" => {
+                    session.teardown();
+                    say("idle");
+                }
                 "stop" => break,
                 other => eprintln!("tun helper: unknown command {other:?}"),
             },
@@ -135,6 +137,8 @@ struct Session {
     core: Option<Child>,
     /// The value before we set it, to put back on teardown.
     src_valid_mark: Option<String>,
+    /// The rules are in place.
+    up: bool,
 }
 
 impl Session {
@@ -194,6 +198,30 @@ impl Session {
         let _ = self.ip46(&["route", verb, "unreachable", "default", "metric", "4000", "table", TABLE]);
     }
 
+    fn set_kill(&mut self, on: bool) {
+        self.args.kill_switch = on;
+        if self.up {
+            self.set_kill_switch(on);
+        }
+    }
+
+    /// A new core, bringing the routing up first when idle; on failure back to idle, reported as `error`.
+    fn restart(&mut self) {
+        let result = if self.up { self.start_core() } else { self.bring_up() };
+        if let Err(e) = result {
+            self.teardown();
+            say(&format!("error {e}"));
+        }
+    }
+
+    fn bring_up(&mut self) -> Result<(), String> {
+        self.up = true;
+        self.add_rules()?;
+        self.add_connmark();
+        self.set_kill_switch(self.args.kill_switch);
+        self.start_core()
+    }
+
     fn stop_core(&mut self) {
         if let Some(mut core) = self.core.take() {
             let _ = core.kill();
@@ -246,6 +274,7 @@ impl Session {
 
     fn teardown(&mut self) {
         self.stop_core();
+        self.up = false;
         for family in ["-4", "-6"] {
             for pref in PREFS {
                 // Duplicates are possible after crashes; delete until none is left.
