@@ -113,13 +113,24 @@ fn serve(out: &Out, commands: Receiver<String>, peer: &sys::Peer) -> Result<(), 
         let mut restart = false;
         match commands.recv_timeout(Duration::from_millis(200)) {
             Ok(line) => match line.split_once(' ').unwrap_or((line.as_str(), "")) {
-                ("config", json) => config = Some(serde_json::from_str(json).map_err(|e| format!("bad config: {e}"))?),
+                ("config", json) => match serde_json::from_str(json) {
+                    Ok(c) => config = Some(c),
+                    Err(e) => {
+                        config = None;
+                        out.say(&format!("error bad config: {e}"));
+                    }
+                },
                 ("restart", _) => restart = true,
                 ("kill", on) => {
                     kill = on == "1";
                     if let Some(n) = net.as_mut() {
                         n.set_kill_switch(kill)?;
                     }
+                }
+                ("idle", _) => {
+                    drop(core.take());
+                    drop(net.take());
+                    out.say("idle");
                 }
                 ("stop", _) => break,
                 _ => eprintln!("tun helper: unknown command {line:?}"),
@@ -136,12 +147,21 @@ fn serve(out: &Out, commands: Receiver<String>, peer: &sys::Peer) -> Result<(), 
         }
         if restart {
             drop(core.take());
-            let config = config.as_ref().ok_or("no config")?;
-            let n = match net.as_mut() {
-                Some(n) => n,
-                None => net.insert(sys::Net::up(peer, &xray, kill, resolver(config))?),
-            };
-            core = Some(start(n, &xray, config, out)?);
+            let started = (|| {
+                let config = config.as_ref().ok_or("no config")?;
+                let n = match net.as_mut() {
+                    Some(n) => n,
+                    None => net.insert(sys::Net::up(peer, &xray, kill, resolver(config))?),
+                };
+                core = Some(start(n, &xray, config, out)?);
+                Ok::<(), String>(())
+            })();
+            // Back to idle: the helper stays for the next connection.
+            if let Err(e) = started {
+                drop(core.take());
+                drop(net.take());
+                out.say(&format!("error {e}"));
+            }
         }
     }
     Ok(())

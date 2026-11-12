@@ -1,14 +1,16 @@
 //! The app's side of TUN mode: starting the privileged helper and talking to it. Linux: pkexec, over the helper's
 //! stdin/stdout. Windows: UAC (`runas`), over a loopback TCP connection the helper opens with a one-time token.
 //! macOS: an administrator prompt through osascript, over a Unix socket in the user's private runtime dir.
-//! From the helper: `ready`, `down <code>`, `error <message>` and (Windows, macOS) `log <core log line>`.
-//! To it: `restart`, `kill 0|1`, `stop`, and (Windows, macOS) `config <json>`: the config of a privileged core is never
-//! a file the user could change under it.
+//! From the helper: `ready`, `down <code>`, `error <message>`, `idle` and (Windows, macOS) `log <core log line>`.
+//! To it: `restart`, `kill 0|1`, `idle`, `stop`, and (Windows, macOS) `config <json>`: the config of a privileged core is
+//! never a file the user could change under it.
+//! Between connections the helper stays idle (no core, no routing), so rights are asked once per app run.
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -26,22 +28,47 @@ type Process = elevate::Elevated;
 #[cfg(unix)]
 type Process = Child;
 
-/// A running helper; dropping it stops the core and tears the routing down.
+/// The log of the connection the helper currently serves.
+type Shared = Arc<Mutex<Log>>;
+
+/// A running helper; dropping it stops the core, tears the routing down and ends the helper.
 pub struct Link {
     input: Option<Input>,
     lines: Receiver<String>,
     /// pkexec, osascript or the elevated helper itself.
     process: Process,
-    log: Log,
+    log: Shared,
+}
+
+/// The idle helper between connections; `busy` while a connection has it, so there is never a second one.
+struct Slot {
+    spare: Option<Link>,
+    busy: bool,
+}
+
+static SLOT: Mutex<Slot> = Mutex::new(Slot { spare: None, busy: false });
+static FREED: Condvar = Condvar::new();
+
+fn release(spare: Option<Link>) {
+    let mut slot = SLOT.lock().unwrap();
+    slot.spare = spare;
+    slot.busy = false;
+    FREED.notify_all();
+}
+
+/// On quit: end the idle helper now rather than when it notices the app is gone.
+pub fn close() {
+    let spare = SLOT.lock().unwrap().spare.take();
+    drop(spare);
 }
 
 /// Lines from the helper; `log` lines go straight into the core log.
-fn read_lines(stream: impl Read + Send + 'static, log: Option<Log>) -> Receiver<String> {
+fn read_lines(stream: impl Read + Send + 'static, log: Option<Shared>) -> Receiver<String> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         for line in BufReader::new(stream).lines().map_while(Result::ok) {
             match (line.strip_prefix("log "), &log) {
-                (Some(l), Some(log)) => log.push(l.to_owned()),
+                (Some(l), Some(log)) => log.lock().unwrap().push(l.to_owned()),
                 _ => {
                     if tx.send(line).is_err() {
                         break;
@@ -54,9 +81,71 @@ fn read_lines(stream: impl Read + Send + 'static, log: Option<Log>) -> Receiver<
 }
 
 impl Link {
+    /// The core behind the TUN: under the idle helper of an earlier connection, or a new one (asking for rights).
+    /// On failure the helper is kept idle for the next attempt.
+    pub fn open(xray: &Path, path: &PathBuf, config: &Value, kill_switch: bool, log: &Log) -> Result<Link, String> {
+        let spare = {
+            let slot = SLOT.lock().unwrap();
+            let (mut slot, _) = FREED.wait_timeout_while(slot, Duration::from_secs(30), |s| s.busy).unwrap();
+            slot.busy = true;
+            slot.spare.take()
+        };
+        let (mut link, fresh) = match spare.and_then(|mut l| l.running().then_some(l)) {
+            Some(link) => (link, false),
+            None => match Link::start(xray, path, config, kill_switch, log) {
+                Ok(link) => (link, true),
+                Err(e) => {
+                    release(None);
+                    return Err(e);
+                }
+            },
+        };
+        *link.log.lock().unwrap() = log.clone();
+        let result = if fresh { link.begin(config, kill_switch) } else { link.resume(path, config, kill_switch) };
+        match result {
+            Ok(()) => Ok(link),
+            Err(e) => {
+                link.park();
+                Err(e)
+            }
+        }
+    }
+
+    /// Done with this connection: the helper goes idle and waits for the next one (or ends, if it cannot).
+    pub fn park(mut self) {
+        let idle = self.running() && self.idle().is_ok();
+        release(if idle { Some(self) } else { None });
+    }
+
+    fn idle(&mut self) -> Result<(), String> {
+        while self.lines.try_recv().is_ok() {}
+        self.send("idle")?;
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(15) {
+            match self.lines.recv_timeout(Duration::from_millis(200)) {
+                Ok(line) if line == "idle" => return Ok(()),
+                Ok(_) | Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        Err(t!("helper.error.helper_stopped").into())
+    }
+
+    /// The idle helper, back to work with a new config.
+    fn resume(&mut self, path: &PathBuf, config: &Value, kill_switch: bool) -> Result<(), String> {
+        while self.lines.try_recv().is_ok() {}
+        self.send(if kill_switch { "kill 1" } else { "kill 0" })?;
+        self.reload(path, config)
+    }
+
+    /// The helper process is still there.
+    fn running(&mut self) -> bool {
+        matches!(self.process.try_wait(), Ok(None))
+    }
+
     /// Linux: the app itself as root (`--tun-helper`, through pkexec) runs the core behind a TUN device.
     #[cfg(target_os = "linux")]
-    pub fn start(xray: &Path, path: &PathBuf, config: &Value, kill_switch: bool, log: &Log) -> Result<Link, String> {
+    fn start(xray: &Path, path: &PathBuf, config: &Value, kill_switch: bool, log: &Log) -> Result<Link, String> {
         crate::xray::write_config(path, config)?;
         // Tests run the built app as the helper.
         let exe = if cfg!(test) { PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/debug/hitori") } else { std::env::current_exe().map_err(|e| e.to_string())? };
@@ -79,16 +168,27 @@ impl Link {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         let mut child = cmd.spawn().map_err(|e| t!("helper.error.cannot_ask_rights_pkexec", error = e))?;
-        log.follow(child.stderr.take().unwrap());
+        let shared: Shared = Arc::new(Mutex::new(log.clone()));
+        let stderr = child.stderr.take().unwrap();
+        let to = shared.clone();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                to.lock().unwrap().push(line);
+            }
+        });
         let lines = read_lines(child.stdout.take().unwrap(), None);
-        let mut link = Link { input: child.stdin.take(), lines, process: child, log: log.clone() };
-        link.wait_ready(Duration::from_secs(180))?;
-        Ok(link)
+        Ok(Link { input: child.stdin.take(), lines, process: child, log: shared })
+    }
+
+    /// Linux: the helper starts the core by itself, once the password is in.
+    #[cfg(target_os = "linux")]
+    fn begin(&mut self, _config: &Value, _kill_switch: bool) -> Result<(), String> {
+        self.wait_ready(Duration::from_secs(180), true)
     }
 
     /// macOS: `hitori --tun-helper <socket>` as root through an administrator prompt; it connects back to the socket.
     #[cfg(target_os = "macos")]
-    pub fn start(_xray: &Path, _path: &PathBuf, config: &Value, kill_switch: bool, log: &Log) -> Result<Link, String> {
+    fn start(_xray: &Path, _path: &PathBuf, _config: &Value, _kill_switch: bool, log: &Log) -> Result<Link, String> {
         use std::os::unix::net::UnixListener;
         let sock = crate::store::runtime_dir().join("helper.sock");
         let _ = std::fs::remove_file(&sock);
@@ -134,15 +234,14 @@ impl Link {
         };
         let _ = std::fs::remove_file(&sock);
         stream.set_nonblocking(false).map_err(|e| e.to_string())?;
-        let lines = read_lines(stream.try_clone().map_err(|e| e.to_string())?, Some(log.clone()));
-        let mut link = Link { input: Some(stream), lines, process: child, log: log.clone() };
-        link.begin(config, kill_switch)?;
-        Ok(link)
+        let shared: Shared = Arc::new(Mutex::new(log.clone()));
+        let lines = read_lines(stream.try_clone().map_err(|e| e.to_string())?, Some(shared.clone()));
+        Ok(Link { input: Some(stream), lines, process: child, log: shared })
     }
 
     /// Windows: `hitori --tun-helper <port> <token>` elevated through UAC; it connects back to 127.0.0.1:<port>.
     #[cfg(windows)]
-    pub fn start(_xray: &Path, _path: &PathBuf, config: &Value, kill_switch: bool, log: &Log) -> Result<Link, String> {
+    fn start(_xray: &Path, _path: &PathBuf, _config: &Value, _kill_switch: bool, log: &Log) -> Result<Link, String> {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| t!("helper.error.cannot_start_helper", error = e))?;
         let port = listener.local_addr().map_err(|e| e.to_string())?.port();
         let token = elevate::token()?;
@@ -172,10 +271,9 @@ impl Link {
             }
             std::thread::sleep(Duration::from_millis(100));
         };
-        let lines = read_lines(stream.try_clone().map_err(|e| e.to_string())?, Some(log.clone()));
-        let mut link = Link { input: Some(stream), lines, process, log: log.clone() };
-        link.begin(config, kill_switch)?;
-        Ok(link)
+        let shared: Shared = Arc::new(Mutex::new(log.clone()));
+        let lines = read_lines(stream.try_clone().map_err(|e| e.to_string())?, Some(shared.clone()));
+        Ok(Link { input: Some(stream), lines, process, log: shared })
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -183,7 +281,7 @@ impl Link {
         self.send(if kill_switch { "kill 1" } else { "kill 0" })?;
         self.send(&format!("config {config}"))?;
         self.send("restart")?;
-        self.wait_ready(Duration::from_secs(60))
+        self.wait_ready(Duration::from_secs(60), false)
     }
 
     /// A new config: the helper restarts the core under the same routing (no leak in between on Linux and macOS).
@@ -193,7 +291,7 @@ impl Link {
         #[cfg(not(target_os = "linux"))]
         self.send(&format!("config {config}"))?;
         self.send("restart")?;
-        self.wait_ready(Duration::from_secs(30))
+        self.wait_ready(Duration::from_secs(30), false)
     }
 
     pub fn send(&mut self, line: &str) -> Result<(), String> {
@@ -201,30 +299,31 @@ impl Link {
         writeln!(input, "{line}").and_then(|_| input.flush()).map_err(|_| t!("helper.error.helper_stopped").to_owned())
     }
 
-    /// Helper lines until `ready`; `down`/exit means it failed.
-    fn wait_ready(&mut self, limit: Duration) -> Result<(), String> {
+    /// Helper lines until `ready`; `down`/`error`/exit means it failed. `asking`: pkexec may still wait for the password.
+    fn wait_ready(&mut self, limit: Duration, asking: bool) -> Result<(), String> {
+        let log = self.log.lock().unwrap().clone();
         let start = Instant::now();
         while start.elapsed() < limit {
             match self.lines.recv_timeout(Duration::from_millis(200)) {
                 Ok(line) if line == "ready" => return Ok(()),
                 Ok(line) if line.starts_with("error ") => return Err(line[6..].to_owned()),
-                Ok(line) if line.starts_with("down") => return Err(self.log.last_error().unwrap_or_else(|| t!("helper.error.core_stopped").into())),
+                Ok(line) if line.starts_with("down") => return Err(log.last_error().unwrap_or_else(|| t!("helper.error.core_stopped").into())),
                 Ok(_) | Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => {
                     let status = self.process.wait().ok().and_then(|s| s.code());
                     return Err(match status {
                         Some(126) | Some(127) if cfg!(target_os = "linux") => t!("helper.error.not_granted").into(),
-                        _ => self.log.last_error().unwrap_or_else(|| t!("helper.error.could_not_start").into()),
+                        _ => log.last_error().unwrap_or_else(|| t!("helper.error.could_not_start").into()),
                     });
                 }
             }
         }
-        Err(if cfg!(target_os = "linux") { t!("helper.error.timed_out_rights") } else { t!("helper.error.did_not_start_in_time") }.into())
+        Err(if asking { t!("helper.error.timed_out_rights") } else { t!("helper.error.did_not_start_in_time") }.into())
     }
 
-    /// Still running? The helper outlives a crashed core and reports it.
+    /// Still running? The helper outlives a crashed core and reports it; after `error` it is idle.
     pub fn alive(&mut self) -> bool {
-        !matches!(self.process.try_wait(), Ok(Some(_))) && !self.lines.try_iter().any(|l| l.starts_with("down"))
+        self.running() && !self.lines.try_iter().any(|l| l.starts_with("down") || l.starts_with("error"))
     }
 }
 
@@ -256,7 +355,7 @@ pub fn selftest() -> i32 {
         let xray = crate::xray::xray_path().ok_or("the Xray core is missing")?;
         let metrics = crate::xray::free_port();
         #[allow(unused_mut)]
-        let mut link = Link::start(&xray, &PathBuf::new(), &crate::xray::selftest_config(metrics), true, &log)?;
+        let mut link = Link::open(&xray, &PathBuf::new(), &crate::xray::selftest_config(metrics), true, &log)?;
         println!("tun selftest: up");
         if let Err(e) = fetch("https://1.1.1.1/cdn-cgi/trace") {
             #[cfg(target_os = "macos")]
@@ -277,11 +376,16 @@ pub fn selftest() -> i32 {
         fetch("https://one.one.one.one/cdn-cgi/trace")?;
         let vars: Value = ureq::get(&format!("http://127.0.0.1:{metrics}/debug/vars")).call().map_err(|e| e.to_string())?.into_json().map_err(|e| e.to_string())?;
         let down = vars["stats"]["outbound"]["direct"]["downlink"].as_u64().unwrap_or(0);
-        drop(link);
         if down == 0 {
             return Err("the requests did not go through the TUN".into());
         }
-        // No routes, resolver or kill switch left behind.
+        // Idle: no routes, resolver or kill switch left behind; then the same helper serves the next connection.
+        link.park();
+        fetch("https://one.one.one.one/cdn-cgi/trace").map_err(|e| format!("while idle: {e}"))?;
+        let link = Link::open(&xray, &PathBuf::new(), &crate::xray::selftest_config(metrics), true, &log)?;
+        println!("tun selftest: up again");
+        fetch("https://one.one.one.one/cdn-cgi/trace").map_err(|e| format!("after resuming: {e}"))?;
+        drop(link);
         fetch("https://one.one.one.one/cdn-cgi/trace").map_err(|e| format!("after teardown: {e}"))?;
         Ok(down)
     };

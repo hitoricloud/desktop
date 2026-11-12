@@ -15,6 +15,7 @@ use windows::Win32::NetworkManagement::IpHelper::{
 };
 use windows::Win32::NetworkManagement::Ndis::NET_LUID_LH;
 use windows::Win32::NetworkManagement::WindowsFilteringPlatform::*;
+use windows::Win32::Security::Cryptography::{BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom};
 use windows::Win32::Networking::WinSock::AF_INET;
 use windows::Win32::System::Rpc::RPC_C_AUTHN_WINNT;
 use windows::core::{GUID, PCWSTR, PWSTR};
@@ -152,7 +153,6 @@ fn uplink() -> Option<String> {
     unsafe { ConvertInterfaceLuidToAlias(&best?.1, &mut alias).is_ok() }.then(|| String::from_utf16_lossy(&alias[..alias.iter().position(|c| *c == 0).unwrap_or(0)]))
 }
 
-const SUBLAYER: GUID = GUID::from_u128(0x68697469_7475_4e00_8000_766e74756e30);
 /// Local and link-scoped destinations the kill switch leaves alone, like on Linux: (address, prefix).
 const LAN4: [(Ipv4Addr, u32); 7] = [
     (Ipv4Addr::new(10, 0, 0, 0), 8),
@@ -180,19 +180,24 @@ fn udp() -> FWPM_FILTER_CONDITION0 {
 }
 
 /// Our sublayer in a dynamic WFP session. In it the highest weight that matches decides.
-struct Wfp(HANDLE);
+/// The sublayer's key is new for every session: one of a helper that has not ended yet must not block this one.
+struct Wfp {
+    engine: HANDLE,
+    sublayer: GUID,
+}
 
 impl Wfp {
     fn open() -> Result<Wfp, String> {
         let mut name = wide("Hitori VPN");
         let display = FWPM_DISPLAY_DATA0 { name: PWSTR(name.as_mut_ptr()), description: PWSTR::null() };
         let session = FWPM_SESSION0 { displayData: display, flags: FWPM_SESSION_FLAG_DYNAMIC, ..Default::default() };
+        let sublayer = random_guid()?;
         let mut engine = HANDLE::default();
         // SAFETY: every pointer refers to locals alive across the calls; the engine is closed on drop.
         unsafe {
             check(FwpmEngineOpen0(PCWSTR::null(), RPC_C_AUTHN_WINNT, None, Some(&session), &mut engine), "open the Windows Filtering Platform")?;
-            let wfp = Wfp(engine);
-            let sublayer = FWPM_SUBLAYER0 { subLayerKey: SUBLAYER, displayData: display, weight: u16::MAX, ..Default::default() };
+            let wfp = Wfp { engine, sublayer };
+            let sublayer = FWPM_SUBLAYER0 { subLayerKey: wfp.sublayer, displayData: display, weight: u16::MAX, ..Default::default() };
             check(FwpmSubLayerAdd0(engine, &sublayer, None), "add a WFP sublayer")?;
             Ok(wfp)
         }
@@ -203,7 +208,7 @@ impl Wfp {
         let filter = FWPM_FILTER0 {
             displayData: FWPM_DISPLAY_DATA0 { name: PWSTR(name.as_mut_ptr()), description: PWSTR::null() },
             layerKey: layer,
-            subLayerKey: SUBLAYER,
+            subLayerKey: self.sublayer,
             weight: FWP_VALUE0 { r#type: FWP_UINT8, Anonymous: FWP_VALUE0_0 { uint8: weight } },
             numFilterConditions: conditions.len() as u32,
             filterCondition: if conditions.is_empty() { std::ptr::null_mut() } else { conditions.as_ptr() as *mut _ },
@@ -212,13 +217,13 @@ impl Wfp {
         };
         let mut id = 0;
         // SAFETY: the filter and what its conditions point to live across the call, which copies them.
-        check(unsafe { FwpmFilterAdd0(self.0, &filter, None, Some(&mut id)) }, "add a WFP filter")?;
+        check(unsafe { FwpmFilterAdd0(self.engine, &filter, None, Some(&mut id)) }, "add a WFP filter")?;
         Ok(id)
     }
 
     fn delete(&self, id: u64) {
         // SAFETY: an id this session added.
-        unsafe { FwpmFilterDeleteById0(self.0, id) };
+        unsafe { FwpmFilterDeleteById0(self.engine, id) };
     }
 
     /// Always in TUN mode: DNS only through the TUN (or from the core), so no resolver outside it sees queries.
@@ -275,8 +280,15 @@ impl Wfp {
 impl Drop for Wfp {
     fn drop(&mut self) {
         // SAFETY: closing the dynamic session removes every filter it added.
-        unsafe { FwpmEngineClose0(self.0) };
+        unsafe { FwpmEngineClose0(self.engine) };
     }
+}
+
+fn random_guid() -> Result<GUID, String> {
+    let mut bytes = [0u8; 16];
+    // SAFETY: fills the buffer it is given.
+    unsafe { BCryptGenRandom(None, &mut bytes, BCRYPT_USE_SYSTEM_PREFERRED_RNG) }.ok().map_err(|e| format!("cannot make a WFP key: {e}"))?;
+    Ok(GUID::from_u128(u128::from_le_bytes(bytes)))
 }
 
 /// Address `i` of TUN_ADDRS without its prefix.

@@ -6,13 +6,13 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     Animation, AnimationExt, AnyElement, Context, Hsla, ImageSource, MouseButton, Pixels, Point, RenderImage, ScrollDelta, Window, div, img,
-    prelude::*, px,
+    SharedString, prelude::*, px,
 };
 
 use crate::app::{Conn, Hitori, Ring};
 use crate::data::{self, AppRule, RuleMode, Server, server};
 use crate::theme::Theme;
-use crate::ui::{MD, Tw, flag, tip};
+use crate::ui::{MD, Size, Tw, Variant, button, button_icon, flag, icon, tip};
 use crate::views::{app_badge, site_badge};
 use crate::vtile::{self, VTile};
 
@@ -80,6 +80,8 @@ pub struct MapState {
     retired: Vec<(Arc<RenderImage>, u8)>,
     inflight: usize,
     drag: Option<(Point<Pixels>, (f64, f64))>,
+    /// The server clicked on the map: its card asks to confirm before the connection moves there.
+    pub pick: Option<&'static str>,
 }
 
 /// Web Mercator in [0, 1] world units.
@@ -192,6 +194,7 @@ impl MapState {
             retired: vec![],
             inflight: 0,
             drag: None,
+            pick: None,
         }
     }
 
@@ -410,7 +413,10 @@ impl Hitori {
             .absolute()
             .inset_0()
             .overflow_hidden()
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, e: &gpui::MouseDownEvent, _, _| {
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, e: &gpui::MouseDownEvent, _, cx| {
+                if this.map.pick.take().is_some() {
+                    cx.notify();
+                }
                 this.map.ease = None;
                 this.map.zooming = None;
                 this.map.drag = Some((e.position, this.map.center));
@@ -657,7 +663,10 @@ impl Hitori {
 
     fn markers(&self, t: &Theme, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let routes = Routes::of(self);
-        let mut out: Vec<AnyElement> = data::servers().into_iter().map(|s| self.server_marker(s, &routes.riders_at(s.id), t, window, cx)).collect();
+        // The picked server last, so its card is above the other markers.
+        let mut servers = data::servers();
+        servers.sort_by_key(|s| self.map.pick == Some(s.id));
+        let mut out: Vec<AnyElement> = servers.into_iter().map(|s| self.server_marker(s, &routes.riders_at(s.id), t, window, cx)).collect();
         if let Some(g) = self.s.me.as_ref().and_then(|m| m.geo.as_ref()) {
             let (x, y) = self.map.screen(unit(g.lat, g.lon));
             let local = |label: &str, color: Hsla, riders: &[Rider]| {
@@ -699,6 +708,7 @@ impl Hitori {
     fn server_marker(&self, s: &'static Server, riders: &[Rider], t: &Theme, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let selected = s.id == self.s.server_id;
         let entry = self.s.entry_id == Some(s.id);
+        let picked = self.map.pick == Some(s.id);
         // Exit of another route: an app or site leaves the tunnel here.
         let exit = !selected && !riders.is_empty();
         let (x, y) = self.map.screen(unit(s.lat, s.lon));
@@ -718,19 +728,19 @@ impl Hitori {
         }
         let (outer, inner, ring, fill) = if selected {
             (20., 16., t.background, if self.s.conn == Conn::On { t.primary } else { t.foreground })
-        } else if entry || exit {
+        } else if entry || exit || picked {
             (16., 12., t.foreground, t.background)
         } else {
             (16., 12., t.background, t.muted_fg)
         };
         let hover = t.foreground;
-        let plain = !selected && !entry && !exit;
+        let plain = !selected && !entry && !exit && !picked;
         dot = dot.child(
             div().size(px(outer)).rounded_full().bg(ring).flex().items_center().justify_center().child(
                 div().size(px(inner)).rounded_full().bg(fill).when(plain, |d| d.group_hover("marker", move |s| s.bg(hover))),
             ),
         );
-        let chip = (selected || entry || exit).then(|| {
+        let chip = (!picked && (selected || entry || exit)).then(|| {
             div()
                 .flex()
                 .items_center()
@@ -749,7 +759,8 @@ impl Hitori {
                 .when(!riders.is_empty(), |d| d.child(badges(riders, s.id, &t).ml(px(2.))))
         });
         let id = s.id;
-        let anchored_left = chip.is_some();
+        let card = if picked { Some(self.pick_card(s, &t, window, cx)) } else { None };
+        let anchored_left = chip.is_some() || card.is_some();
         // Labels in the right part of the map open to the left of their dot, so they stay on screen.
         let flip = anchored_left && x > self.map.size.0 * 0.6;
         div()
@@ -767,12 +778,73 @@ impl Hitori {
                     .items_center()
                     .gap(px(8.))
                     .cursor_pointer()
-                    .when(flip, |d| d.left(px(12.)).top(px(-14.)))
-                    .when(anchored_left && !flip, |d| d.left(px(-12.)).top(px(-14.)))
+                    .when(flip, |d| d.left(px(12.)).top(px(if picked { -18. } else { -14. })))
+                    .when(anchored_left && !flip, |d| d.left(px(-12.)).top(px(if picked { -18. } else { -14. })))
                     .when(!anchored_left, |d| d.left(px(-12.)).top(px(-12.)))
-                    .on_click(cx.listener(move |this, _, window, cx| this.go(id, window, cx)))
+                    // Not a drag of the map, and the card stays open.
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(move |this, _, _, cx| this.pick(id, cx)))
                     .child(dot)
-                    .children(chip),
+                    .children(chip)
+                    .children(card),
+            )
+            .into_any_element()
+    }
+}
+
+impl Hitori {
+    /// A click on a marker: the card to confirm moving there; the live exit itself needs none.
+    fn pick(&mut self, id: &'static str, cx: &mut Context<Self>) {
+        let live = id == self.s.server_id && self.s.conn != Conn::Off;
+        self.map.pick = if live || self.map.pick == Some(id) { None } else { Some(id) };
+        cx.notify();
+    }
+
+    /// Flag, city and latency of the picked server, with Connect (or Switch, while connected) and close.
+    fn pick_card(&self, s: &'static Server, t: &Theme, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let id = s.id;
+        let ping = match data::ping(id) {
+            Some(ms) => Some(format!("{ms} ms")),
+            None if data::timed_out(id) => Some(t!("views.servers.offline").to_owned()),
+            None => None,
+        };
+        let label = if self.s.conn == Conn::Off { t!("map.connect") } else { t!("map.switch") };
+        div()
+            .id(SharedString::from(format!("pick-{id}")))
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .h(px(36.))
+            .pl(px(8.))
+            .pr(px(4.))
+            .rounded(px(MD))
+            .bg(t.card)
+            .shadow(t.panel_shadow())
+            .xs()
+            .whitespace_nowrap()
+            .cursor_default()
+            .on_click(|_, _, cx| cx.stop_propagation())
+            .child(flag(s.code, false, window))
+            .child(div().medium().text_color(t.foreground).child(s.city.to_owned()))
+            .children(ping.map(|p| div().text_color(t.muted_fg).child(p)))
+            .child(
+                button(SharedString::from(format!("pick-go-{id}")), Variant::Default, Size::Xs, false, t)
+                    .ml(px(4.))
+                    .child(label)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.go(id, window, cx);
+                    })),
+            )
+            .child(
+                button(SharedString::from(format!("pick-x-{id}")), Variant::Ghost, Size::IconXs, true, t)
+                    .tooltip(tip(t!("map.cancel"), t))
+                    .child(icon("x", button_icon(Size::IconXs), t.muted_fg))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.map.pick = None;
+                        cx.notify();
+                    })),
             )
             .into_any_element()
     }

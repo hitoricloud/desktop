@@ -334,7 +334,10 @@ impl Vpn {
         cx.observe_self(|this, cx| this.changed(cx)).detach();
         cx.on_app_quit(|this, _| {
             let core = this.core.take();
-            async move { drop(core) }
+            async move {
+                drop(core);
+                crate::helper::close();
+            }
         })
         .detach();
         this
