@@ -1,7 +1,7 @@
 //! Sheet (Account, Settings, Routing rules) and the location palette.
 use gpui::{AnyElement, Context, Div, Entity, Focusable, MouseButton, SharedString, Window, div, hsla, prelude::*, px};
 
-use crate::app::{Hitori, Menu, Panel, Place, Protocol, SettingsTab};
+use crate::app::{Hitori, Menu, Panel, Place, SettingsTab};
 use crate::data;
 use crate::input::TextInput;
 use crate::theme::{Theme, shadow_lg};
@@ -361,7 +361,11 @@ impl Hitori {
 
     fn connection_sections(&self, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let t = self.theme(cx);
-        let protocols = Protocol::ALL.into_iter().map(|p| (p.label().to_owned(), self.s.protocol == p, Box::new(move |this: &mut Self, _: &mut Context<Self>| this.s.protocol = p) as Pick)).collect();
+        let mut offered = crate::data::protocols();
+        if !offered.contains(&self.s.protocol) {
+            offered.push(self.s.protocol);
+        }
+        let protocols = offered.into_iter().map(|p| (p.label().to_owned(), self.s.protocol == p, Box::new(move |this: &mut Self, cx: &mut Context<Self>| this.set_protocol(p, cx)) as Pick)).collect();
         let p = &self.s.proxy;
         let proxy_info = t!("overlays.connection.system_wide_off", host = p.host(), socks = p.socks, http = p.http);
         let system_info = if !self.s.system_wide {

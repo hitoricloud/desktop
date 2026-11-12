@@ -291,6 +291,7 @@ pub struct TrayIcon {
     tx: async_channel::Sender<Msg>,
     conn: Conn,
     server_id: &'static str,
+    protocol: data::Protocol,
     icons: [Vec<ksni::Icon>; 3],
 }
 
@@ -329,13 +330,13 @@ impl ksni::Tray for TrayIcon {
                 label: t!("tray.location").into(),
                 submenu: vec![
                     RadioGroup {
-                        selected: data::servers().iter().position(|s| s.id == self.server_id).unwrap_or(0),
+                        selected: data::offered(self.protocol).iter().position(|s| s.id == self.server_id).unwrap_or(0),
                         select: Box::new(|t: &mut Self, i| {
-                            if let Some(s) = data::servers().get(i) {
+                            if let Some(s) = data::offered(t.protocol).get(i) {
                                 drop(t.tx.send_blocking(Msg::Go(s.id)));
                             }
                         }),
-                        options: data::servers().iter().map(|s| RadioItem { label: format!("{} · {}", s.country, s.city), ..Default::default() }).collect(),
+                        options: data::offered(self.protocol).iter().map(|s| RadioItem { label: format!("{} · {}", s.country, s.city), ..Default::default() }).collect(),
                     }
                     .into(),
                 ],
@@ -359,7 +360,7 @@ impl TrayIcon {
 pub fn start(vpn: &Entity<Vpn>, cx: &mut App) -> bool {
     let (tx, rx) = async_channel::unbounded();
     let s = vpn.read(cx).s.clone();
-    let icon = TrayIcon { tx, conn: s.conn, server_id: s.server_id, icons: sni_icons() };
+    let icon = TrayIcon { tx, conn: s.conn, server_id: s.server_id, protocol: s.protocol, icons: sni_icons() };
     let tray = match icon.spawn() {
         Ok(handle) => handle,
         Err(e) => {
@@ -372,6 +373,7 @@ pub fn start(vpn: &Entity<Vpn>, cx: &mut App) -> bool {
         tray.update(|t| {
             t.conn = s.conn;
             t.server_id = s.server_id;
+            t.protocol = s.protocol;
         });
     })
     .detach();
@@ -398,12 +400,12 @@ mod native {
         icon: TrayIcon,
         icons: [Icon; 3],
         actions: HashMap<MenuId, Msg>,
-        shown: (Conn, &'static str, usize, crate::i18n::Lang),
+        shown: (Conn, &'static str, data::Protocol, usize, crate::i18n::Lang),
     }
 
     impl Global for Tray {}
 
-    fn menu(conn: Conn, server_id: &'static str) -> (Menu, HashMap<MenuId, Msg>) {
+    fn menu(conn: Conn, server_id: &'static str, protocol: data::Protocol) -> (Menu, HashMap<MenuId, Msg>) {
         let mut actions = HashMap::new();
         let menu = Menu::new();
         let item = |text: &str, msg: Option<Msg>, actions: &mut HashMap<MenuId, Msg>| {
@@ -415,7 +417,7 @@ mod native {
         };
         let _ = menu.append(&item(&status(conn, server_id), None, &mut actions));
         let _ = menu.append(&item(if conn == Conn::Off { t!("tray.connect") } else { t!("tray.disconnect") }, Some(Msg::Power), &mut actions));
-        let places: Vec<CheckMenuItem> = data::servers()
+        let places: Vec<CheckMenuItem> = data::offered(protocol)
             .into_iter()
             .map(|s| {
                 let item = CheckMenuItem::new(format!("{} · {}", s.country, s.city), true, s.id == server_id, None);
@@ -440,7 +442,7 @@ mod native {
             Icon::from_rgba(rgba, n, n).expect("tray icon")
         });
         let s = vpn.read(cx).s.clone();
-        let (m, actions) = menu(s.conn, s.server_id);
+        let (m, actions) = menu(s.conn, s.server_id, s.protocol);
         let icon = match TrayIconBuilder::new()
             .with_icon(icons[icon_index(s.conn)].clone())
             .with_tooltip(status(s.conn, s.server_id))
@@ -454,7 +456,7 @@ mod native {
                 return false;
             }
         };
-        cx.set_global(Tray { icon, icons, actions, shown: (s.conn, s.server_id, data::servers().len(), crate::i18n::current()) });
+        cx.set_global(Tray { icon, icons, actions, shown: (s.conn, s.server_id, s.protocol, data::servers().len(), crate::i18n::current()) });
 
         let (tx, rx) = async_channel::unbounded();
         let (menu_tx, menu_rx) = async_channel::unbounded::<MenuId>();
@@ -483,7 +485,7 @@ mod native {
         .detach();
         cx.observe(vpn, |vpn, cx| {
             let s = vpn.read(cx).s.clone();
-            let now = (s.conn, s.server_id, data::servers().len(), crate::i18n::current());
+            let now = (s.conn, s.server_id, s.protocol, data::servers().len(), crate::i18n::current());
             let tray = cx.global_mut::<Tray>();
             if tray.shown == now {
                 return;
@@ -492,7 +494,7 @@ mod native {
                 let _ = tray.icon.set_icon(Some(tray.icons[icon_index(s.conn)].clone()));
             }
             let _ = tray.icon.set_tooltip(Some(status(s.conn, s.server_id)));
-            let (m, actions) = menu(s.conn, s.server_id);
+            let (m, actions) = menu(s.conn, s.server_id, s.protocol);
             tray.icon.set_menu(Some(Box::new(m)));
             tray.actions = actions;
             tray.shown = now;

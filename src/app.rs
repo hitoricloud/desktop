@@ -570,6 +570,12 @@ impl Hitori {
         }
     }
 
+    /// Servers without the transport disappear from the lists, so the exit and first hop move to ones that have it.
+    pub fn set_protocol(&mut self, p: Protocol, cx: &mut Context<Self>) {
+        self.s.protocol = p;
+        self.with_vpn(cx, |v, _| v.keep_shown());
+    }
+
     pub fn via(&mut self, id: Option<&'static str>, window: &mut Window, cx: &mut Context<Self>) {
         let was = (self.s.conn, self.s.entry_id);
         self.s.entry_id = if id == Some(self.s.server_id) { None } else { id };
