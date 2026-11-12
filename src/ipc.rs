@@ -2,7 +2,7 @@
 //! pipe (Windows). The first instance listens; a second launch asks it to show its window and exits, and
 //! `hitori status|connect|…` are clients of it. Protocol: docs/ipc.md.
 use std::cell::RefCell;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::rc::Rc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -264,10 +264,7 @@ fn accept(mut listener: Listener, calls: Sender<Call>) {
     }
 }
 
-fn serve_stream<S>(stream: S, calls: Sender<Call>)
-where
-    for<'a> &'a S: Read + Write,
-{
+fn serve_stream(stream: sys::Stream, calls: Sender<Call>) {
     let mut out = &stream;
     for line in BufReader::new(&stream).lines() {
         let Ok(line) = line else { return };
@@ -306,6 +303,8 @@ mod sys {
     pub fn path() -> PathBuf {
         crate::store::runtime_dir().join("ipc.sock")
     }
+
+    pub type Stream = UnixStream;
 
     pub fn connect() -> io::Result<UnixStream> {
         UnixStream::connect(path())
@@ -374,6 +373,8 @@ mod sys {
             }
         }
     }
+
+    pub type Stream = File;
 
     /// The pipe instance the next client connects to.
     pub struct Listener {
