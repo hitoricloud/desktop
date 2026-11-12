@@ -297,6 +297,7 @@ mod tests {
         assert_eq!((ee.country, ee.code, ee.city), ("Estonia", "EE", "Server #1"));
         assert_eq!(ee.variants.iter().map(|v| v.0).collect::<Vec<_>>(), [Protocol::Tls, Protocol::Grpc, Protocol::Hy2]);
         assert!(ee.variants[0].1.get("tag").is_none());
+        assert_eq!(ee.variants[0].1["streamSettings"]["security"], "reality");
         let lv = &sub.servers[1];
         assert_eq!(lv.variant(Protocol::Hy2).unwrap().0, Protocol::Grpc);
         assert_eq!(sub.tunnel_rules, vec![json!({"type": "field", "domain": ["domain:ua"], "outboundTag": "proxy"})]);
