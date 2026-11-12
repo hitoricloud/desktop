@@ -23,15 +23,18 @@ pub enum Protocol {
     Tls,
     Grpc,
     Hy2,
+    /// VLESS over TLS inside a Minecraft Java login (the `hmc` finalmask).
+    Hmc,
 }
 
 impl Protocol {
-    pub const ALL: [Protocol; 3] = [Protocol::Tls, Protocol::Grpc, Protocol::Hy2];
+    pub const ALL: [Protocol; 4] = [Protocol::Tls, Protocol::Grpc, Protocol::Hy2, Protocol::Hmc];
     pub fn label(self) -> &'static str {
         match self {
             Protocol::Tls => "TLS",
             Protocol::Grpc => "gRPC",
             Protocol::Hy2 => "Hysteria2",
+            Protocol::Hmc => "HMC",
         }
     }
 }

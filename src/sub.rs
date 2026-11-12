@@ -194,8 +194,10 @@ fn flag_code(s: &str) -> Option<(String, &str)> {
 
 fn protocol(outbound: &Value) -> Option<Protocol> {
     let stream = &outbound["streamSettings"];
+    let hmc = stream["finalmask"]["tcp"].as_array().is_some_and(|m| m.iter().any(|m| m["type"] == "hmc"));
     match (outbound["protocol"].as_str()?, stream["network"].as_str().unwrap_or("tcp")) {
         ("hysteria", _) => Some(Protocol::Hy2),
+        ("vless", "tcp" | "raw") if hmc => Some(Protocol::Hmc),
         ("vless" | "trojan" | "vmess", "grpc") => Some(Protocol::Grpc),
         ("vless" | "trojan" | "vmess", "tcp" | "raw") => Some(Protocol::Tls),
         _ => None,
@@ -299,6 +301,24 @@ mod tests {
         assert_eq!(lv.variant(Protocol::Hy2).unwrap().0, Protocol::Grpc);
         assert_eq!(sub.tunnel_rules, vec![json!({"type": "field", "domain": ["domain:ua"], "outboundTag": "proxy"})]);
         assert_eq!(sub.base_rules[0]["protocol"][0], "bittorrent");
+    }
+
+    #[test]
+    fn hmc_host_is_its_own_variant() {
+        let tls = json!({"tag": "proxy", "protocol": "vless", "streamSettings": {"network": "tcp", "security": "reality"}});
+        let hmc = json!({"tag": "proxy", "protocol": "vless", "mux": {"enabled": true, "concurrency": 8},
+            "streamSettings": {"network": "tcp", "security": "tls", "finalmask": {"tcp": [{"type": "hmc", "settings": {"hostname": "hypixel.net"}}]}}});
+        let body = serde_json::to_vec(&json!([host("🇩🇪 Германия #2", tls), host("🇩🇪 Германия #2 - HMC (тест)", hmc.clone())])).unwrap();
+        let sub = parse(&body).unwrap();
+        assert_eq!(sub.servers.len(), 1);
+        let de = &sub.servers[0];
+        assert_eq!(de.id, "de-2");
+        assert_eq!(de.variants.iter().map(|v| v.0).collect::<Vec<_>>(), [Protocol::Tls, Protocol::Hmc]);
+        assert_eq!(de.variant(Protocol::Hmc).unwrap().1["mux"], hmc["mux"]);
+        assert_eq!(de.variant(Protocol::Grpc).unwrap().0, Protocol::Tls, "HMC is the last fallback");
+
+        let only = serde_json::to_vec(&json!([host("🇩🇪 Германия #2 - HMC (тест)", hmc)])).unwrap();
+        assert_eq!(parse(&only).unwrap().servers[0].variant(Protocol::Tls).unwrap().0, Protocol::Hmc);
     }
 
     #[test]

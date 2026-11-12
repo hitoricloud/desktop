@@ -91,6 +91,7 @@ pub enum Proto {
     Tls,
     Grpc,
     Hy2,
+    Hmc,
 }
 
 impl From<Protocol> for Proto {
@@ -99,6 +100,7 @@ impl From<Protocol> for Proto {
             Protocol::Tls => Proto::Tls,
             Protocol::Grpc => Proto::Grpc,
             Protocol::Hy2 => Proto::Hy2,
+            Protocol::Hmc => Proto::Hmc,
         }
     }
 }
@@ -109,6 +111,7 @@ impl From<Proto> for Protocol {
             Proto::Tls => Protocol::Tls,
             Proto::Grpc => Protocol::Grpc,
             Proto::Hy2 => Protocol::Hy2,
+            Proto::Hmc => Protocol::Hmc,
         }
     }
 }

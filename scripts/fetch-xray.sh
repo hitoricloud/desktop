@@ -9,7 +9,7 @@
 set -euo pipefail
 
 repo="${XRAY_REPO:-hitoricloud/Xray-core}"
-tag="${1:-${XRAY_TAG:-v26.6.1-hitori.1}}"
+tag="${1:-${XRAY_TAG:-v26.11.9-hitori.1}}"
 wintun_version=0.14.1
 wintun_sha256=07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51
 root="$(cd "$(dirname "$0")/.." && pwd)"
