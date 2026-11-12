@@ -194,6 +194,10 @@ fn flag_code(s: &str) -> Option<(String, &str)> {
 
 fn protocol(outbound: &Value) -> Option<Protocol> {
     let stream = &outbound["streamSettings"];
+    // The bundled core has no `hmc` mask; one such outbound would stop the whole core.
+    if stream["finalmask"]["tcp"].as_array().is_some_and(|m| m.iter().any(|m| m["type"] == "hmc")) {
+        return None;
+    }
     match (outbound["protocol"].as_str()?, stream["network"].as_str().unwrap_or("tcp")) {
         ("hysteria", _) => Some(Protocol::Hy2),
         ("vless" | "trojan" | "vmess", "grpc") => Some(Protocol::Grpc),
@@ -275,12 +279,16 @@ mod tests {
         let grpc = json!({"tag": "proxy", "protocol": "vless", "streamSettings": {"network": "grpc", "security": "reality"}});
         let hy = json!({"tag": "proxy", "protocol": "hysteria", "streamSettings": {"network": "hysteria"}});
         let xhttp = json!({"tag": "proxy", "protocol": "vless", "streamSettings": {"network": "xhttp"}});
+        let hmc = json!({"tag": "proxy", "protocol": "vless",
+            "streamSettings": {"network": "raw", "security": "tls", "finalmask": {"tcp": [{"type": "hmc", "settings": {"hostname": "eu.minemen.club"}}]}}});
         let auto = json!({"remarks": "Автоматический", "routing": {"balancers": [{"tag": "auto-proxy"}],
             "rules": [{"type": "field", "domain": ["domain:ua"], "balancerTag": "auto-proxy"}, {"type": "field", "network": "tcp,udp", "outboundTag": "direct"}]}, "outbounds": []});
         let body = serde_json::to_vec(&json!([
             auto,
             host("Обход белых списков ", xhttp.clone()),
+            host("🇪🇪 Эстония #1 - HMC (тест)", hmc.clone()),
             host("🇪🇪 Эстония #1", tcp.clone()),
+            host("🇩🇪 Германия #2 - HMC (тест)", hmc),
             host("🇪🇪 Эстония #1 - Hysteria2", hy),
             host("🇪🇪 Эстония #1 - GRPC", grpc.clone()),
             host("🇱🇻 Latvia #2 - GRPC", grpc),
@@ -295,6 +303,7 @@ mod tests {
         assert_eq!((ee.country, ee.code, ee.city), ("Estonia", "EE", "Server #1"));
         assert_eq!(ee.variants.iter().map(|v| v.0).collect::<Vec<_>>(), [Protocol::Tls, Protocol::Grpc, Protocol::Hy2]);
         assert!(ee.variants[0].1.get("tag").is_none());
+        assert_eq!(ee.variants[0].1["streamSettings"]["security"], "reality");
         let lv = &sub.servers[1];
         assert_eq!(lv.variant(Protocol::Hy2).unwrap().0, Protocol::Grpc);
         assert_eq!(sub.tunnel_rules, vec![json!({"type": "field", "domain": ["domain:ua"], "outboundTag": "proxy"})]);
