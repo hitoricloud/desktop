@@ -1,4 +1,6 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+#[macro_use]
+mod i18n;
 mod app;
 mod apps;
 mod auth;
@@ -15,6 +17,7 @@ mod sub;
 mod xray;
 mod fx;
 mod input;
+mod ipc;
 mod live;
 mod map;
 mod net;
@@ -93,6 +96,7 @@ fn skip_software_vulkan() {
 /// `--tray`: only the tray popup window (screenshots). `--background`: start with just the tray icon.
 /// `--smoke`: open the main window, draw for a few seconds and exit 0 (CI on real Windows and macOS machines).
 /// `--tun-selftest` (Windows, macOS; already elevated in CI): TUN mode end to end, see `helper::selftest`.
+/// `status|connect|disconnect|servers|select <id>|watch`: control the running instance, see docs/ipc.md.
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("--tun-helper") {
@@ -105,11 +109,16 @@ fn main() {
     if args.get(1).map(String::as_str) == Some("--tun-selftest") {
         std::process::exit(helper::selftest());
     }
+    if let Some(code) = ipc::cli(args.get(1..).unwrap_or_default()) {
+        std::process::exit(code);
+    }
     #[cfg(target_os = "linux")]
     skip_software_vulkan();
     let tray_only = args.iter().any(|a| a == "--tray");
     let background = args.iter().any(|a| a == "--background");
     let smoke = args.iter().any(|a| a == "--smoke");
+    // One instance per user: a second launch shows the running one instead. `--smoke` may run beside it.
+    let control = if smoke { None } else { ipc::claim() };
     // A previous run that crashed may have left the system proxy pointing at it, or (macOS) its core running.
     sysproxy::restore();
     os::reap_orphans();
@@ -119,7 +128,9 @@ fn main() {
             .filter_map(|w| Assets::get(&format!("fonts/GoogleSans-{w}.ttf")).map(|f| f.data))
             .collect();
         cx.text_system().add_fonts(fonts).expect("fonts");
-        let dark = store::load::<store::Settings>(&store::Settings::path()).unwrap_or_default().dark;
+        let settings = store::load::<store::Settings>(&store::Settings::path()).unwrap_or_default();
+        i18n::set(i18n::resolve(i18n::Lang::parse(&settings.language)));
+        let dark = settings.dark;
         cx.set_global(if dark { theme::Theme::dark() } else { theme::Theme::light() });
         cx.bind_keys(app::bindings());
         cx.bind_keys(input::bindings());
@@ -130,6 +141,9 @@ fn main() {
         }
         let vpn = cx.new(app::Vpn::new);
         cx.set_global(tray::Windows { vpn: Some(vpn.clone()), ..Default::default() });
+        if let Some(listener) = control {
+            ipc::serve(listener, &vpn, cx);
+        }
         let has_tray = !tray_only && tray::start(&vpn, cx);
         // With a tray icon, closing every window leaves the app (and the tunnel) running.
         gpui::KEEP_ALIVE_WITHOUT_WINDOWS.store(has_tray, std::sync::atomic::Ordering::Relaxed);
@@ -144,7 +158,7 @@ fn main() {
             .detach();
             cx.on_action(|_: &Quit, cx| cx.quit());
             cx.bind_keys([gpui::KeyBinding::new("cmd-q", Quit, None)]);
-            cx.set_menus(vec![gpui::Menu { name: "Hitori VPN".into(), items: vec![gpui::MenuItem::action("Quit Hitori VPN", Quit)] }]);
+            set_menus(cx);
         }
         if tray_only {
             tray::open_window(Variant::Tray, None, cx);
@@ -157,6 +171,11 @@ fn main() {
             smoke_test(cx);
         }
     });
+}
+
+#[cfg(target_os = "macos")]
+pub fn set_menus(cx: &mut App) {
+    cx.set_menus(vec![gpui::Menu { name: t!("app.title").into(), items: vec![gpui::MenuItem::action(t!("app.quit_app"), Quit)] }]);
 }
 
 /// The main window opened and keeps drawing frames: exit 0 after a few seconds, 2 if it never opened or closed early.

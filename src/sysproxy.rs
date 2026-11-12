@@ -18,9 +18,9 @@ pub struct Active {
     stop: Arc<AtomicBool>,
 }
 
-/// Point the system's HTTP(S) and SOCKS proxy at the core.
+/// Point the system's HTTP(S) and SOCKS proxy at the core's listeners on `host`.
 #[cfg(not(target_os = "linux"))]
-pub fn set(http: u16, socks: u16) -> Result<Active, String> {
+pub fn set(host: &str, http: u16, socks: u16) -> Result<Active, String> {
     // A file left by a crashed run still holds what was there before that run: keep it.
     let previous = match crate::store::load(&saved()) {
         Some(p) => p,
@@ -30,18 +30,19 @@ pub fn set(http: u16, socks: u16) -> Result<Active, String> {
             p
         }
     };
-    platform::apply(&previous, http, socks).inspect_err(|_| restore())?;
+    platform::apply(&previous, host, http, socks).inspect_err(|_| restore())?;
     let stop = Arc::new(AtomicBool::new(false));
     #[cfg(target_os = "macos")]
     {
         // Network services added or enabled while connected (a new Wi-Fi, a USB adapter) get the proxy too.
         let stop = stop.clone();
+        let host = host.to_owned();
         std::thread::spawn(move || {
             while !stop.load(Ordering::SeqCst) {
                 std::thread::sleep(std::time::Duration::from_secs(3));
                 let Some(mut previous) = crate::store::load::<platform::Previous>(&saved()) else { break };
                 if !stop.load(Ordering::SeqCst) && platform::adopt_new(&mut previous) && keep(&previous).is_ok() {
-                    let _ = platform::apply(&previous, http, socks);
+                    let _ = platform::apply(&previous, &host, http, socks);
                 }
             }
         });
@@ -51,8 +52,8 @@ pub fn set(http: u16, socks: u16) -> Result<Active, String> {
 
 /// Linux system-wide mode is always a TUN.
 #[cfg(target_os = "linux")]
-pub fn set(_http: u16, _socks: u16) -> Result<Active, String> {
-    Err("system-wide mode is a TUN on Linux".into())
+pub fn set(_host: &str, _http: u16, _socks: u16) -> Result<Active, String> {
+    Err(t!("sysproxy.error.linux_is_tun").into())
 }
 
 impl Drop for Active {
@@ -123,14 +124,14 @@ mod wininet {
     }
 
     /// Ours: only the manual proxy (no PAC, no auto-detect, which would win over it), the user's bypass entries kept.
-    pub fn ours(previous: &Previous, http: u16) -> Previous {
+    pub fn ours(previous: &Previous, host: &str, http: u16) -> Previous {
         let mut bypass: Vec<&str> = BYPASS.to_vec();
         for entry in previous.bypass.iter().flat_map(|b| b.split([';', ' ', '\t', '\r', '\n'])).map(str::trim).filter(|e| !e.is_empty()) {
             if !bypass.iter().any(|b| b.eq_ignore_ascii_case(entry)) {
                 bypass.push(entry);
             }
         }
-        Previous { flags: DIRECT | PROXY, server: Some(format!("127.0.0.1:{http}")), bypass: Some(bypass.join(";")), pac: previous.pac.clone() }
+        Previous { flags: DIRECT | PROXY, server: Some(format!("{host}:{http}")), bypass: Some(bypass.join(";")), pac: previous.pac.clone() }
     }
 }
 
@@ -200,8 +201,8 @@ mod platform {
         Ok(())
     }
 
-    pub fn apply(previous: &Previous, http: u16, _socks: u16) -> Result<(), String> {
-        write(&super::wininet::ours(previous, http))
+    pub fn apply(previous: &Previous, host: &str, http: u16, _socks: u16) -> Result<(), String> {
+        write(&super::wininet::ours(previous, host, http))
     }
 
     pub fn put_back(previous: &Previous) -> Result<(), String> {
@@ -296,15 +297,15 @@ pub mod networksetup {
     }
 
     /// Ours on this service: every proxy at the core, the user's bypass domains kept, PAC and discovery off.
-    pub fn apply(svc: &Service, http: u16, socks: u16) -> Vec<Vec<String>> {
+    pub fn apply(svc: &Service, host: &str, http: u16, socks: u16) -> Vec<Vec<String>> {
         let (http, socks) = (http.to_string(), socks.to_string());
         let name = svc.name.as_str();
         let mut bypass: Vec<&str> = BYPASS.to_vec();
         bypass.extend(svc.bypass.iter().map(String::as_str).filter(|d| !BYPASS.contains(d)));
         vec![
-            cmd(&["-setwebproxy", name, "127.0.0.1", &http]),
-            cmd(&["-setsecurewebproxy", name, "127.0.0.1", &http]),
-            cmd(&["-setsocksfirewallproxy", name, "127.0.0.1", &socks]),
+            cmd(&["-setwebproxy", name, host, &http]),
+            cmd(&["-setsecurewebproxy", name, host, &http]),
+            cmd(&["-setsocksfirewallproxy", name, host, &socks]),
             cmd(&[&["-setproxybypassdomains", name][..], &bypass].concat()),
             cmd(&["-setautoproxystate", name, "off"]),
             cmd(&["-setproxyautodiscovery", name, "off"]),
@@ -379,9 +380,9 @@ mod platform {
         !fresh.is_empty()
     }
 
-    pub fn apply(previous: &Previous, http: u16, socks: u16) -> Result<(), String> {
+    pub fn apply(previous: &Previous, host: &str, http: u16, socks: u16) -> Result<(), String> {
         for svc in &previous.services {
-            for args in ns::apply(svc, http, socks) {
+            for args in ns::apply(svc, host, http, socks) {
                 run(&args)?;
             }
         }
@@ -411,7 +412,7 @@ mod tests {
     #[test]
     fn wininet_keeps_the_users_bypass_and_restores_exactly() {
         let before = Previous { flags: 1 | 4, server: Some("corp:3128".into()), bypass: Some("*.corp.example; 10.*;<local>".into()), pac: Some("http://wpad/proxy.pac".into()) };
-        let ours = wininet::ours(&before, 10809);
+        let ours = wininet::ours(&before, "127.0.0.1", 10809);
         assert_eq!(ours.flags, wininet::DIRECT | wininet::PROXY, "no PAC or auto-detect over the manual proxy");
         assert_eq!(ours.server.as_deref(), Some("127.0.0.1:10809"));
         let bypass: Vec<_> = ours.bypass.as_deref().unwrap().split(';').collect();
@@ -419,6 +420,7 @@ mod tests {
         assert!(bypass.contains(&"*.corp.example") && bypass.contains(&"172.31.*") && !bypass.iter().any(|b| *b == "172.2*"));
         assert_eq!(bypass.iter().filter(|b| **b == "10.*").count(), 1);
         assert_eq!(ours.pac, before.pac, "kept so restoring needs nothing but `before`");
+        assert_eq!(wininet::ours(&before, "192.168.0.10", 8080).server.as_deref(), Some("192.168.0.10:8080"));
         let json = serde_json::to_string(&before).unwrap();
         assert_eq!(serde_json::from_str::<Previous>(&json).unwrap(), before, "the crash file round-trips");
     }
@@ -450,11 +452,12 @@ mod tests {
             pac_on: true,
             discovery: false,
         };
-        let ours = ns::apply(&svc, 10809, 10808);
+        let ours = ns::apply(&svc, "127.0.0.1", 10809, 10808);
         assert_eq!(ours[0], ["-setwebproxy", "Wi-Fi", "127.0.0.1", "10809"]);
         assert_eq!(ours[2], ["-setsocksfirewallproxy", "Wi-Fi", "127.0.0.1", "10808"]);
         assert!(ours[3].contains(&"*.corp".to_owned()) && ours[3].iter().filter(|d| *d == "*.local").count() == 1);
         assert!(ours.contains(&vec!["-setautoproxystate".to_owned(), "Wi-Fi".into(), "off".into()]));
+        assert_eq!(ns::apply(&svc, "192.168.0.10", 8080, 1080)[2], ["-setsocksfirewallproxy", "Wi-Fi", "192.168.0.10", "1080"]);
         let back: Vec<String> = ns::restore(&svc).into_iter().map(|c| c.join(" ")).collect();
         assert_eq!(
             back,

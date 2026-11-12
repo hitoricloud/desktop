@@ -45,6 +45,37 @@ pub enum Panel {
     Account,
     Settings,
     Routes,
+    Log,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum SettingsTab {
+    Connection,
+    Network,
+    Location,
+    Appearance,
+}
+
+impl SettingsTab {
+    pub const ALL: [SettingsTab; 4] = [Self::Connection, Self::Network, Self::Location, Self::Appearance];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Connection => t!("app.settings_tab.connection"),
+            Self::Network => t!("app.settings_tab.network"),
+            Self::Location => t!("app.settings_tab.location"),
+            Self::Appearance => t!("app.settings_tab.appearance"),
+        }
+    }
+
+    pub fn icon(self) -> &'static str {
+        match self {
+            Self::Connection => "shield-check",
+            Self::Network => "globe",
+            Self::Location => "map",
+            Self::Appearance => "wand-sparkles",
+        }
+    }
 }
 
 pub use crate::data::Protocol;
@@ -78,6 +109,8 @@ pub enum Menu {
     NavUser,
     TrayAccount,
     AddApp,
+    /// A settings dropdown, by its id.
+    Select(&'static str),
 }
 
 /// Where the isolated ping ring goes this frame, in window pixels: centre and the map rect that clips it.
@@ -229,6 +262,11 @@ pub struct Hitori {
     pub paste_link: bool,
     /// New website rule on the rules page and sheet.
     pub site_input: Entity<TextInput>,
+    /// Local proxy ports in Settings › Network.
+    pub socks_input: Entity<TextInput>,
+    pub http_input: Entity<TextInput>,
+    /// The DoH URL or DoT server, whichever the DNS mode uses.
+    pub dns_input: Entity<TextInput>,
     pub page: Page,
     /// The inspector's server list is ordered by the last latency test.
     pub sort_ping: bool,
@@ -243,19 +281,46 @@ pub struct Hitori {
     pub keepout: std::cell::RefCell<Vec<[f32; 4]>>,
     pub menu_fx: Presence<Menu>,
     pub panel_fx: Presence<Panel>,
+    pub settings_tab: SettingsTab,
     pub palette_fx: Presence<Mode>,
+    /// The language this window's titles and placeholders are in.
+    lang: crate::i18n::Lang,
     _search_changes: Subscription,
     _site_changes: Subscription,
+    /// What the Network fields held at the last edit; caret blinks notify too.
+    network_typed: Vec<gpui::SharedString>,
+    _network_changes: Vec<Subscription>,
     _vpn_changes: Subscription,
+}
+
+/// A port typed into a settings field.
+pub fn port(input: &Entity<TextInput>, cx: &App) -> Option<u16> {
+    input.read(cx).content.trim().parse().ok().filter(|p| *p > 0)
+}
+
+/// The server the DNS field shows in this mode.
+pub fn dns_server(dns: &crate::xray::Dns) -> &str {
+    if dns.mode == crate::xray::DnsMode::Tls { &dns.tls } else { &dns.https }
 }
 
 impl Hitori {
     pub fn new(variant: Variant, vpn: Entity<Vpn>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let t = theme(cx);
-        let search = cx.new(|cx| TextInput::new("Search countries", t.muted_fg, t.foreground, cx));
+        let search = cx.new(|cx| TextInput::new(&search_placeholder(Mode::Exit), t.muted_fg, t.foreground, cx));
         let link = cx.new(|cx| TextInput::new("https://…/sub/…", t.muted_fg, t.foreground, cx));
-        let site_input = cx.new(|cx| TextInput::new("Add a website, e.g. youtube.com", t.muted_fg, t.foreground, cx));
+        let site_input = cx.new(|cx| TextInput::new(t!("app.add_site_placeholder"), t.muted_fg, t.foreground, cx));
         let site_changes = cx.observe(&site_input, |_, _, cx| cx.notify());
+        let (proxy, dns) = (vpn.read(cx).s.proxy.clone(), vpn.read(cx).s.dns.clone());
+        let field = |text: &str, cx: &mut Context<Self>| {
+            cx.new(|cx| {
+                let mut input = TextInput::new("", t.muted_fg, t.foreground, cx);
+                input.set_content(text);
+                input
+            })
+        };
+        let (socks_input, http_input) = (field(&proxy.socks.to_string(), cx), field(&proxy.http.to_string(), cx));
+        let dns_input = field(dns_server(&dns), cx);
+        let network_changes = [&socks_input, &http_input, &dns_input].map(|i| cx.observe(i, |this, _, cx| this.network_edited(cx))).into();
         // The caret blink notifies too; only an edit moves the selection back to the top.
         let changes = cx.observe(&search, |this, search, cx| {
             let query = search.read(cx).content.clone();
@@ -299,6 +364,9 @@ impl Hitori {
             link,
             paste_link: false,
             site_input,
+            socks_input,
+            http_input,
+            dns_input,
             page: Page::Map,
             sort_ping: false,
             open_countries: vec![],
@@ -310,9 +378,13 @@ impl Hitori {
             keepout: Default::default(),
             menu_fx: Presence::new(),
             panel_fx: Presence::new(),
+            settings_tab: SettingsTab::Connection,
             palette_fx: Presence::new(),
+            lang: crate::i18n::current(),
             _search_changes: changes,
             _site_changes: site_changes,
+            network_typed: vec![],
+            _network_changes: network_changes,
             _vpn_changes: vpn_changes,
         };
         if let Ok(state) = std::env::var("HITORI_STATE") {
@@ -358,6 +430,9 @@ impl Hitori {
                 }
                 "tray" => self.variant = Variant::Tray,
                 "light" => self.set_dark(false, cx),
+                "lang" => self.set_language(crate::i18n::Lang::parse(value), cx),
+                "tab" => self.settings_tab = SettingsTab::ALL.into_iter().find(|k| k.icon() == value).unwrap_or(SettingsTab::Connection),
+                "select" => self.menu = Some(Menu::Select(leak(value))),
                 "small" => self.s.rules_big = false,
                 "route" => self.s.default_route = RuleMode::parse(value),
                 "page" => self.page = if value == "rules" { Page::Rules } else { Page::Map },
@@ -387,6 +462,7 @@ impl Hitori {
                     self.panel = Some(match value {
                         "account" => Panel::Account,
                         "routes" => Panel::Routes,
+                        "log" => Panel::Log,
                         _ => Panel::Settings,
                     })
                 }
@@ -585,12 +661,7 @@ impl Hitori {
         self.palette = Some(mode);
         self.palette_index = 0;
         self.palette_query = Default::default();
-        let placeholder = match mode {
-            Mode::Entry => "Route through…".to_owned(),
-            Mode::Rule(a) => format!("Search {} settings", data::app(a).name),
-            Mode::Site(s) => format!("Search {s} settings"),
-            Mode::Exit => "Search countries".to_owned(),
-        };
+        let placeholder = search_placeholder(mode);
         self.search.update(cx, |input, cx| {
             input.reset();
             input.set_placeholder(&placeholder);
@@ -624,11 +695,67 @@ impl Hitori {
         cx.notify();
     }
 
+    /// Valid values go to the settings; invalid ones stay in their fields, flagged.
+    fn network_edited(&mut self, cx: &mut Context<Self>) {
+        let typed: Vec<_> = [&self.socks_input, &self.http_input, &self.dns_input].iter().map(|i| i.read(cx).content.clone()).collect();
+        if typed == self.network_typed {
+            return;
+        }
+        self.network_typed = typed;
+        cx.notify();
+        if let (Some(socks), Some(http)) = (port(&self.socks_input, cx), port(&self.http_input, cx)) {
+            let proxy = crate::xray::LocalProxy { socks, http, ..self.s.proxy.clone() };
+            if proxy.check().is_ok() {
+                self.s.proxy = proxy;
+            }
+        }
+        if let Ok(dns) = self.typed_dns(cx) {
+            self.s.dns = dns;
+        }
+    }
+
+    /// The DNS settings with the typed server, if it is valid.
+    pub fn typed_dns(&self, cx: &App) -> Result<crate::xray::Dns, String> {
+        let text = self.dns_input.read(cx).content.trim().to_owned();
+        let mut dns = self.s.dns.clone();
+        if dns.mode != crate::xray::DnsMode::Subscription {
+            dns.set_server(&text);
+        }
+        dns.check().map(|_| dns).map_err(|_| t!("xray.error.dns_server").into())
+    }
+
+    /// Own DNS server on: the typed one, or Cloudflare's DoH when the field holds nothing valid. Off: the subscription's.
+    pub fn set_custom_dns(&mut self, on: bool, cx: &mut Context<Self>) {
+        let mut dns = self.s.dns.clone();
+        if !on {
+            dns.mode = crate::xray::DnsMode::Subscription;
+        } else {
+            dns.set_server(&self.dns_input.read(cx).content);
+            if dns.check().is_err() {
+                let fallback = crate::xray::DNS_PRESETS[0].1;
+                dns.set_server(fallback);
+                self.dns_input.update(cx, |input, cx| {
+                    input.set_content(fallback);
+                    cx.notify();
+                });
+            }
+        }
+        self.s.dns = dns;
+    }
+
+    /// What is wrong with the typed ports.
+    pub fn ports_error(&self, cx: &App) -> Option<String> {
+        let (Some(socks), Some(http)) = (port(&self.socks_input, cx), port(&self.http_input, cx)) else {
+            return Some(t!("xray.error.ports_range").into());
+        };
+        crate::xray::LocalProxy { socks, http, ..self.s.proxy.clone() }.check().err()
+    }
+
     pub fn set_dark(&mut self, dark: bool, cx: &mut Context<Self>) {
         cx.set_global(if dark { Theme::dark() } else { Theme::light() });
         self.s.dark = dark;
         let t = theme(cx);
-        for input in [&self.search, &self.link] {
+        for input in [&self.search, &self.link, &self.socks_input, &self.http_input, &self.dns_input] {
             input.update(cx, |input, _| {
                 input.placeholder_color = t.muted_fg;
                 input.caret = t.foreground;
@@ -636,6 +763,29 @@ impl Hitori {
         }
         self.map.restyle();
         cx.notify();
+    }
+
+    /// Switch every window and the tray now; `None` follows the system.
+    pub fn set_language(&mut self, choice: Option<crate::i18n::Lang>, cx: &mut Context<Self>) {
+        self.s.language = choice;
+        crate::i18n::set(crate::i18n::resolve(choice));
+        data::relabel();
+        #[cfg(target_os = "macos")]
+        crate::set_menus(cx);
+        cx.notify();
+    }
+
+    /// Window title and text field placeholders after a language change.
+    fn relabel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.lang = crate::i18n::current();
+        window.set_window_title(t!("app.title"));
+        let search = search_placeholder(self.palette.unwrap_or(Mode::Exit));
+        for (input, text) in [(&self.search, search.as_str()), (&self.site_input, t!("app.add_site_placeholder"))] {
+            input.update(cx, |input, cx| {
+                input.set_placeholder(text);
+                cx.notify();
+            });
+        }
     }
 
     pub fn toggle_menu(&mut self, menu: Menu, cx: &mut Context<Self>) {
@@ -682,6 +832,15 @@ impl Hitori {
     }
 }
 
+fn search_placeholder(mode: Mode) -> String {
+    match mode {
+        Mode::Entry => t!("app.search.entry").to_owned(),
+        Mode::Rule(a) => t!("app.search.rule", name = data::app(a).name),
+        Mode::Site(s) => t!("app.search.rule", name = s),
+        Mode::Exit => t!("app.search.exit").to_owned(),
+    }
+}
+
 impl Focusable for Hitori {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
@@ -699,6 +858,9 @@ impl Render for Hitori {
         }
         if self.s != self.published {
             cx.defer_in(window, |this, _, cx| this.push(cx));
+        }
+        if self.lang != crate::i18n::current() {
+            self.relabel(window, cx);
         }
         self.ring.set(None);
         // Signed out (or without a subscription) every window shows only the sign-in screen.

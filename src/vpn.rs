@@ -1,5 +1,6 @@
 //! The VPN model every window and the tray mirror: account, servers, the running core and its numbers.
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -16,7 +17,7 @@ use crate::region::{self, Location};
 use crate::store::{self, Login, Rule, Settings};
 use crate::sub;
 use crate::suggest::Tracker;
-use crate::xray::{self, Core, Plan};
+use crate::xray::{self, Core, Dns, LocalProxy, Plan};
 
 #[derive(Clone, PartialEq)]
 pub struct Me {
@@ -59,6 +60,10 @@ pub struct Shared {
     pub default_route: RuleMode,
     pub system_wide: bool,
     pub tun: bool,
+    pub proxy: LocalProxy,
+    pub dns: Dns,
+    /// This computer's address on the LAN, which the local proxy can listen on.
+    pub lan: Option<Ipv4Addr>,
     pub app_routes: Vec<(&'static str, AppRule)>,
     pub sites: Vec<(&'static str, AppRule)>,
     pub suggestions: Vec<Suggestion>,
@@ -66,6 +71,8 @@ pub struct Shared {
     pub dismissed: Vec<String>,
     pub rules_big: bool,
     pub dark: bool,
+    /// Chosen UI language; `None` follows the system.
+    pub language: Option<crate::i18n::Lang>,
     pub signed_in: bool,
     /// Signed in with Telegram: name and avatar.
     pub user: Option<auth::User>,
@@ -115,6 +122,7 @@ impl Shared {
         self.pending = model.pending.clone();
         self.tested_at = model.tested_at;
         self.region = model.region.clone();
+        self.lan = model.lan;
         if !data::has_server(self.server_id) {
             self.server_id = model.server_id;
         }
@@ -131,7 +139,10 @@ impl Shared {
             route: self.default_route.key().into(),
             system_wide: self.system_wide,
             tun: self.tun,
+            proxy: self.proxy.clone(),
+            dns: self.dns.clone(),
             dark: self.dark,
+            language: self.language.map_or("system", |l| l.code()).into(),
             rules_big: self.rules_big,
             apps: self.app_routes.iter().map(|(a, r)| Rule::from_app(a, r)).collect(),
             sites: self.sites.iter().map(|(t, r)| Rule::from_app(t, r)).collect(),
@@ -154,6 +165,14 @@ struct Exit {
     city: Option<String>,
     lat: f64,
     lon: f64,
+}
+
+/// A private IPv4 address of this computer, not the tunnel's.
+fn lan(addr: Option<IpAddr>) -> Option<Ipv4Addr> {
+    match addr? {
+        IpAddr::V4(a) if a.is_private() => Some(a),
+        _ => None,
+    }
 }
 
 fn exits_path() -> std::path::PathBuf {
@@ -182,6 +201,8 @@ pub struct Vpn {
     reload: Option<Task<()>>,
     pinger: Option<Task<()>>,
     tester: Option<Task<()>>,
+    /// Output of the cores started this session, kept after one stops or fails for the log sheet.
+    log: xray::Log,
     login: Option<String>,
     auth: Arc<auth::Client>,
     /// Set to stop the Telegram sign-in in progress.
@@ -220,6 +241,7 @@ impl Vpn {
         let location: Option<Location> = store::load(&Location::path());
         let auth = Arc::new(auth::Client::new(auth::api(), auth::session_path()));
         let session = auth.session();
+        let net_addr = region::local_addr();
         let i = data::intern;
         let s = Shared {
             conn: Conn::Off,
@@ -234,6 +256,9 @@ impl Vpn {
             default_route: RuleMode::parse(&saved.route),
             system_wide: saved.system_wide,
             tun: saved.tun,
+            proxy: saved.proxy.clone(),
+            dns: saved.dns.clone(),
+            lan: lan(net_addr),
             app_routes: saved.apps.iter().map(Rule::to_app).collect(),
             sites: saved.sites(),
             suggestions: vec![],
@@ -241,6 +266,7 @@ impl Vpn {
             dismissed: saved.dismissed.clone(),
             rules_big: saved.rules_big,
             dark: saved.dark,
+            language: crate::i18n::Lang::parse(&saved.language),
             signed_in: login.is_some() || session.is_some(),
             user: session.as_ref().map(|s| s.user.clone()),
             avatar: None,
@@ -268,6 +294,7 @@ impl Vpn {
             ticker: None,
             reload: None,
             pinger: None,
+            log: xray::Log::default(),
             tester: None,
             login,
             auth,
@@ -285,7 +312,7 @@ impl Vpn {
             region_rules: Arc::default(),
             checking: None,
             last_check: None,
-            net_addr: region::local_addr(),
+            net_addr,
             _region_watch: Self::region_watch(cx),
             live: None,
             revs: live::Revs::default(),
@@ -432,7 +459,7 @@ impl Vpn {
                 store::save(&Location::path(), &l, false);
                 self.location = Some(l);
                 self.set_region_lists(&found.lists, cx);
-                if found.missing { region::Status::Failed(format!("Cannot download the lists for {}", self.s.region.place())) } else { region::Status::Ready }
+                if found.missing { region::Status::Failed(t!("vpn.region.cannot_download", place = self.s.region.place())) } else { region::Status::Ready }
             }
             Ok(_) => region::Status::Ready,
             Err(e) => region::Status::Failed(e),
@@ -463,6 +490,11 @@ impl Vpn {
                     let changed = std::mem::replace(&mut this.net_addr, addr) != addr;
                     if changed {
                         this.kick_live();
+                    }
+                    // Through a TUN the address is the tunnel's.
+                    if this.direct() && this.s.lan != lan(addr) {
+                        this.s.lan = lan(addr);
+                        cx.notify();
                     }
                     let backoff = this.last_check.is_some_and(|t| t.elapsed() < Duration::from_secs(120));
                     if this.direct() && (changed || !backoff) && region::due(this.location.as_ref(), region::now(), changed) {
@@ -849,6 +881,7 @@ impl Vpn {
             tun: self.s.uses_tun(),
             system_proxy: self.s.system_wide && !self.s.tun && crate::os::SYSTEM_PROXY,
             kill_switch: self.s.kill_switch,
+            proxy: self.s.proxy.clone(),
             apps: self.s.app_routes.clone(),
             sites: self.s.sites.clone(),
             servers: data::servers(),
@@ -858,7 +891,8 @@ impl Vpn {
                 Arc::new(self.lists.tunnel.iter().chain(self.region_rules.iter()).cloned().collect())
             },
             base_rules: self.lists.base.clone(),
-            dns: self.lists.dns.clone(),
+            sub_dns: self.lists.dns.clone(),
+            dns: self.s.dns.clone(),
         }
     }
 
@@ -872,7 +906,7 @@ impl Vpn {
     /// Connect, or move the running connection to the current server and rules.
     pub fn connect(&mut self, cx: &mut Context<Self>) {
         if !self.s.signed_in || !data::has_server(self.s.server_id) {
-            self.s.error = Some(if self.s.signed_in { "No server to connect to".into() } else { "Sign in to connect".into() });
+            self.s.error = Some(if self.s.signed_in { t!("vpn.error.no_server").into() } else { t!("vpn.error.sign_in_to_connect").into() });
             cx.notify();
             return;
         }
@@ -891,6 +925,7 @@ impl Vpn {
         let plan = self.plan();
         let routing = self.s.routing();
         let previous = self.core.take();
+        let log = self.log.clone();
         self.starting = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -901,7 +936,7 @@ impl Vpn {
                         }
                         core.stop();
                     }
-                    Core::start(&plan)
+                    Core::start(&plan, log)
                 })
                 .await;
             this.update(cx, |this, cx| this.started(attempt, routing, result, cx)).ok();
@@ -932,6 +967,10 @@ impl Vpn {
                 cx.notify();
             }
         }
+    }
+
+    pub fn log_lines(&self) -> Vec<String> {
+        self.log.lines()
     }
 
     /// Connected now: the session clock and the 1 s metrics ticker start. (Also used without a core for screenshots.)
@@ -982,7 +1021,7 @@ impl Vpn {
             self.ticker = None;
             self.s.conn = Conn::Off;
             self.s.connected_at = None;
-            self.s.error = Some(format!("Connection lost{}", why.map(|w| format!(": {w}")).unwrap_or_default()));
+            self.s.error = Some(why.map_or_else(|| t!("vpn.error.connection_lost").into(), |w| t!("vpn.error.connection_lost_why", why = w)));
             cx.notify();
         }
         None
@@ -1062,6 +1101,11 @@ impl Vpn {
             self.forget_gone(cx);
         }
         cx.notify();
+    }
+
+    /// Bytes down and up through the running core since it started.
+    pub fn traffic(&self) -> Option<(u64, u64)> {
+        self.bytes.map(|(_, down, up)| (down, up))
     }
 
     pub fn toggle(&mut self, cx: &mut Context<Self>) {

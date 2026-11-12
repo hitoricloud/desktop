@@ -164,7 +164,7 @@ impl WaylandWindowState {
             acknowledged_first_configure: false,
             surface,
             decoration,
-            app_id: None,
+            app_id: options.app_id.clone(),
             blur: None,
             toplevel,
             viewport,
@@ -296,6 +296,10 @@ impl WaylandWindow {
 
         if params.kind == WindowKind::Floating {
             toplevel.set_parent(parent.as_ref());
+        }
+
+        if let Some(app_id) = &params.app_id {
+            toplevel.set_app_id(app_id.clone());
         }
 
         if let Some(size) = params.window_min_size {

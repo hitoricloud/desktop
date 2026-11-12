@@ -61,9 +61,9 @@ fn icon_index(conn: Conn) -> usize {
 fn status(conn: Conn, server_id: &str) -> String {
     let s = server(server_id);
     match conn {
-        Conn::On => format!("Protected · {}", s.country),
-        Conn::Connecting => format!("Connecting to {}…", s.country),
-        Conn::Off => "Unprotected".into(),
+        Conn::On => t!("tray.protected", country = s.country),
+        Conn::Connecting => t!("tray.connecting", country = s.country),
+        Conn::Off => t!("tray.unprotected").into(),
     }
 }
 
@@ -155,7 +155,7 @@ pub fn open_window(variant: Variant, popover: Option<Popover>, cx: &mut App) -> 
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             // A placed popup is just the card: no title bar, above other windows.
-            titlebar: if origin.is_some() { None } else { Some(TitlebarOptions { title: Some("Hitori VPN".into()), ..Default::default() }) },
+            titlebar: if origin.is_some() { None } else { Some(TitlebarOptions { title: Some(t!("app.title").into()), ..Default::default() }) },
             kind: if origin.is_some() { WindowKind::PopUp } else { WindowKind::Normal },
             // Tray windows keep their size: the popup is a fixed card, the popover overlay covers the work area.
             is_resizable: !tray,
@@ -225,7 +225,7 @@ fn place_popup(click: (i32, i32)) -> Option<Popover> {
     Some(Popover { size: (aw, ah), card: Card { x: x.round(), gap: 8., bottom }, origin: None })
 }
 
-fn handle(msg: Msg, cx: &mut App) {
+pub fn handle(msg: Msg, cx: &mut App) {
     let vpn = cx.global::<Windows>().vpn.clone();
     match msg {
         Msg::TogglePopup(x, y) => {
@@ -309,13 +309,13 @@ impl ksni::Tray for TrayIcon {
         "hitori".into()
     }
     fn title(&self) -> String {
-        "Hitori VPN".into()
+        t!("app.title").into()
     }
     fn icon_pixmap(&self) -> Vec<ksni::Icon> {
         self.icons[icon_index(self.conn)].clone()
     }
     fn tool_tip(&self) -> ksni::ToolTip {
-        ksni::ToolTip { title: "Hitori VPN".into(), description: self.status(), ..Default::default() }
+        ksni::ToolTip { title: t!("app.title").into(), description: self.status(), ..Default::default() }
     }
     fn activate(&mut self, x: i32, y: i32) {
         self.tx.send_blocking(Msg::TogglePopup(x, y)).ok();
@@ -324,9 +324,9 @@ impl ksni::Tray for TrayIcon {
         let send = |m: fn() -> Msg| Box::new(move |t: &mut Self| drop(t.tx.send_blocking(m())));
         vec![
             StandardItem { label: self.status(), enabled: false, ..Default::default() }.into(),
-            StandardItem { label: if self.conn == Conn::Off { "Connect".into() } else { "Disconnect".into() }, activate: send(|| Msg::Power), ..Default::default() }.into(),
+            StandardItem { label: if self.conn == Conn::Off { t!("tray.connect").into() } else { t!("tray.disconnect").into() }, activate: send(|| Msg::Power), ..Default::default() }.into(),
             SubMenu {
-                label: "Location".into(),
+                label: t!("tray.location").into(),
                 submenu: vec![
                     RadioGroup {
                         selected: data::servers().iter().position(|s| s.id == self.server_id).unwrap_or(0),
@@ -343,8 +343,8 @@ impl ksni::Tray for TrayIcon {
             }
             .into(),
             MenuItem::Separator,
-            StandardItem { label: "Open Hitori".into(), activate: send(|| Msg::OpenMain), ..Default::default() }.into(),
-            StandardItem { label: "Quit".into(), activate: send(|| Msg::Quit), ..Default::default() }.into(),
+            StandardItem { label: t!("tray.open").into(), activate: send(|| Msg::OpenMain), ..Default::default() }.into(),
+            StandardItem { label: t!("tray.quit").into(), activate: send(|| Msg::Quit), ..Default::default() }.into(),
         ]
     }
 }
@@ -398,7 +398,7 @@ mod native {
         icon: TrayIcon,
         icons: [Icon; 3],
         actions: HashMap<MenuId, Msg>,
-        shown: (Conn, &'static str, usize),
+        shown: (Conn, &'static str, usize, crate::i18n::Lang),
     }
 
     impl Global for Tray {}
@@ -414,7 +414,7 @@ mod native {
             item
         };
         let _ = menu.append(&item(&status(conn, server_id), None, &mut actions));
-        let _ = menu.append(&item(if conn == Conn::Off { "Connect" } else { "Disconnect" }, Some(Msg::Power), &mut actions));
+        let _ = menu.append(&item(if conn == Conn::Off { t!("tray.connect") } else { t!("tray.disconnect") }, Some(Msg::Power), &mut actions));
         let places: Vec<CheckMenuItem> = data::servers()
             .into_iter()
             .map(|s| {
@@ -424,12 +424,12 @@ mod native {
             })
             .collect();
         let refs: Vec<&dyn IsMenuItem> = places.iter().map(|p| p as &dyn IsMenuItem).collect();
-        if let Ok(sub) = Submenu::with_items("Location", !places.is_empty(), &refs) {
+        if let Ok(sub) = Submenu::with_items(t!("tray.location"), !places.is_empty(), &refs) {
             let _ = menu.append(&sub);
         }
         let _ = menu.append(&PredefinedMenuItem::separator());
-        let _ = menu.append(&item("Open Hitori", Some(Msg::OpenMain), &mut actions));
-        let _ = menu.append(&item("Quit", Some(Msg::Quit), &mut actions));
+        let _ = menu.append(&item(t!("tray.open"), Some(Msg::OpenMain), &mut actions));
+        let _ = menu.append(&item(t!("tray.quit"), Some(Msg::Quit), &mut actions));
         (menu, actions)
     }
 
@@ -454,7 +454,7 @@ mod native {
                 return false;
             }
         };
-        cx.set_global(Tray { icon, icons, actions, shown: (s.conn, s.server_id, data::servers().len()) });
+        cx.set_global(Tray { icon, icons, actions, shown: (s.conn, s.server_id, data::servers().len(), crate::i18n::current()) });
 
         let (tx, rx) = async_channel::unbounded();
         let (menu_tx, menu_rx) = async_channel::unbounded::<MenuId>();
@@ -483,7 +483,7 @@ mod native {
         .detach();
         cx.observe(vpn, |vpn, cx| {
             let s = vpn.read(cx).s.clone();
-            let now = (s.conn, s.server_id, data::servers().len());
+            let now = (s.conn, s.server_id, data::servers().len(), crate::i18n::current());
             let tray = cx.global_mut::<Tray>();
             if tray.shown == now {
                 return;

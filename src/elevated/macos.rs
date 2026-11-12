@@ -20,7 +20,7 @@ mod text;
 
 use super::Running;
 use crate::sysproxy::{networksetup, networksetup_run};
-use crate::xray::{TUN_ADDRS, TUN_DNS, TUN_ROUTES};
+use crate::xray::{TUN_ADDRS, TUN_ROUTES};
 
 const STATE: &str = "/Library/Application Support/Hitori VPN/tun.json";
 const ANCHOR: &str = "com.apple/hitori";
@@ -116,6 +116,8 @@ pub struct Net {
     name: String,
     uplink: Option<(String, String)>,
     kill: bool,
+    /// What every network service resolves through; the core answers it from the TUN.
+    dns: String,
     state: State,
     peer_uid: u32,
     dir: PathBuf,
@@ -162,9 +164,9 @@ fn open_utun() -> Result<(OwnedFd, String), String> {
 }
 
 impl Net {
-    pub fn up(peer: &Peer, _xray: &Path, kill: bool) -> Result<Net, String> {
+    pub fn up(peer: &Peer, _xray: &Path, kill: bool, dns: &str) -> Result<Net, String> {
         let (utun, name) = open_utun()?;
-        let mut net = Net { uplink: uplink(&name), utun, name, kill, state: State::default(), peer_uid: peer.uid, dir: peer.dir.clone() };
+        let mut net = Net { uplink: uplink(&name), utun, name, kill, dns: dns.to_owned(), state: State::default(), peer_uid: peer.uid, dir: peer.dir.clone() };
         net.save()?;
         net.scope_uplink()?;
         let (local, remote, mask) = text::p2p(TUN_ADDRS[0]).ok_or("bad TUN address")?;
@@ -212,7 +214,7 @@ impl Net {
             let before = networksetup::list(&networksetup_run(&["-getdnsservers", svc]).unwrap_or_default());
             self.state.dns.push((svc.clone(), before));
             self.save()?;
-            networksetup_run(&["-setdnsservers", svc, TUN_DNS])?;
+            networksetup_run(&["-setdnsservers", svc, &self.dns])?;
         }
         if !fresh.is_empty() {
             flush_dns();

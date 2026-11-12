@@ -1,0 +1,25 @@
+your_location = "Ваш регион"
+or = "или"
+use_link = "Войти по ссылке на подписку"
+no_subscription_yet = "Ещё нет подписки?"
+get_one = "Получить в @hitorivpn"
+open_bot = "Открыть @hitorivpn"
+
+[welcome]
+desc = "Войдите через аккаунт Telegram, чтобы получить серверы и подписку."
+
+[telegram]
+sign_in = "Войти через Telegram"
+opening = "Открываем Telegram…"
+try_again = "Повторить"
+waiting = "Ждём браузер…"
+waiting_desc = "Подтвердите вход через Telegram в браузере, затем вернитесь сюда."
+open_again = "Открыть страницу снова"
+cancel = "Отменить"
+
+[subscription]
+title = "Нет активной подписки"
+desc = "Оформите тариф или продлите подписку в боте Hitori, затем проверьте снова."
+check_again = "Проверить снова"
+checking = "Проверяем…"
+sign_out = "Выйти"

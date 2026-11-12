@@ -28,7 +28,7 @@ pub fn base(url: &str) -> Result<String, String> {
     let url = url.trim();
     let url = url.split(['?', '#']).next().unwrap_or(url).trim_end_matches('/');
     if !url.starts_with("https://") && !url.starts_with("http://") {
-        return Err("Paste the full subscription link (https://…)".into());
+        return Err(t!("sub.error.paste_full_link").into());
     }
     match url.rsplit_once('/') {
         Some((head, last)) if FORMATS.contains(&last) && head.matches('/').count() > 3 => Ok(head.to_owned()),
@@ -136,10 +136,10 @@ fn decode_title(v: &str) -> String {
 
 fn status_error(e: ureq::Error) -> String {
     match e {
-        ureq::Error::Status(404, _) => "Subscription not found — check the link".into(),
-        ureq::Error::Status(403, _) => "The panel refused this device (device limit?)".into(),
-        ureq::Error::Status(code, _) => format!("Subscription server answered {code}"),
-        ureq::Error::Transport(t) => format!("Cannot reach the subscription server ({})", t.kind()),
+        ureq::Error::Status(404, _) => t!("sub.error.not_found").into(),
+        ureq::Error::Status(403, _) => t!("sub.error.refused_device").into(),
+        ureq::Error::Status(code, _) => t!("sub.error.server_answered", code = code),
+        ureq::Error::Transport(t) => t!("sub.error.cannot_reach", kind = t.kind()),
     }
 }
 
@@ -197,8 +197,8 @@ fn protocol(outbound: &Value) -> Option<Protocol> {
 }
 
 pub fn parse(body: &[u8]) -> Result<Subscription, String> {
-    let configs: Value = serde_json::from_slice(body).map_err(|_| "This subscription has no Xray JSON profiles".to_owned())?;
-    let configs = configs.as_array().ok_or("This subscription has no Xray JSON profiles")?;
+    let configs: Value = serde_json::from_slice(body).map_err(|_| t!("sub.error.no_profiles").to_owned())?;
+    let configs = configs.as_array().ok_or(t!("sub.error.no_profiles"))?;
     let mut servers: Vec<Server> = vec![];
     let mut tunnel_rules = vec![];
     let mut base_rules = None;
@@ -242,11 +242,11 @@ pub fn parse(body: &[u8]) -> Result<Subscription, String> {
         }
         let (country, lat, lon) = data::country(&code).unwrap_or(("", 50., 10.));
         let country = if country.is_empty() { data::intern(name.split('#').next().unwrap_or(name).trim()) } else { country };
-        let city = data::intern(&number.map(|n| format!("Server #{n}")).unwrap_or_else(|| "Server".into()));
+        let city = data::intern(&number.map(|n| t!("sub.label.server_number", n = n)).unwrap_or_else(|| t!("sub.label.server").into()));
         servers.push(Server { id, country, code: data::intern(&code), city, ip: "", lat, lon, variants: vec![(proto, outbound)] });
     }
     if servers.is_empty() {
-        return Err("The subscription has no servers you can use".into());
+        return Err(t!("sub.error.no_servers").into());
     }
     for s in &mut servers {
         s.variants.sort_by_key(|(p, _)| Protocol::ALL.iter().position(|q| q == p));

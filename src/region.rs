@@ -271,16 +271,16 @@ pub struct Found {
 /// country's lists. `None` when the IP turns out to be one of the tunnel's exits: that lookup went through the VPN.
 pub fn check(cached: Option<Location>, lookup: bool, force: bool, exits: &[String]) -> Result<Option<Found>, String> {
     let location = if lookup {
-        let ip = net::my_ip().ok_or("You seem to be offline")?;
+        let ip = net::my_ip().ok_or(t!("region.error.offline"))?;
         if exits.contains(&ip) {
             return Ok(None);
         }
         match reuse(cached.as_ref(), &ip).filter(|_| !force) {
             Some(c) => Location { checked_at: now(), ..c.clone() },
-            None => net::locate(&ip).and_then(|g| Location::new(ip, &g, now())).ok_or("Cannot tell which country this is")?,
+            None => net::locate(&ip).and_then(|g| Location::new(ip, &g, now())).ok_or(t!("region.error.cannot_tell_country"))?,
         }
     } else {
-        cached.ok_or("Your location is checked while the VPN is off")?
+        cached.ok_or(t!("region.error.checked_while_off"))?
     };
     let (lists, missing) = load(&location.country, if force { Fetch::Always } else { Fetch::Stale });
     Ok(Some(Found { location, lists, missing }))
@@ -310,7 +310,7 @@ fn thousands(n: usize) -> String {
     let mut out = String::new();
     for (i, c) in s.chars().enumerate() {
         if i > 0 && (s.len() - i) % 3 == 0 {
-            out.push(',');
+            out.push_str(t!("region.thousands_separator"));
         }
         out.push(c);
     }
@@ -319,7 +319,7 @@ fn thousands(n: usize) -> String {
 
 impl Summary {
     pub fn place(&self) -> String {
-        self.name.clone().or_else(|| self.country.clone()).unwrap_or_else(|| "Unknown".into())
+        self.name.clone().or_else(|| self.country.clone()).unwrap_or_else(|| t!("region.place.unknown").into())
     }
 
     /// e.g. "1,183 blocked sites and 2,040 subnets go through the VPN."
@@ -330,11 +330,11 @@ impl Summary {
             return e.clone();
         }
         match (&self.country, self.domains + self.subnets) {
-            (None, _) => "Checking where you are…".into(),
-            (Some(c), 0) if sources(c).is_empty() => format!("No ready-made list for {}; your provider's rules apply.", self.place()),
-            (Some(_), 0) if self.status == Status::Computing => "Loading the lists of blocked sites…".into(),
-            (Some(_), 0) => format!("Cannot download the lists for {}.", self.place()),
-            _ => format!("{} blocked sites and {} subnets go through the VPN.", thousands(self.domains), thousands(self.subnets)),
+            (None, _) => t!("region.summary.checking").into(),
+            (Some(c), 0) if sources(c).is_empty() => t!("region.summary.no_list", place = self.place()),
+            (Some(_), 0) if self.status == Status::Computing => t!("region.summary.loading").into(),
+            (Some(_), 0) => t!("region.summary.cannot_download", place = self.place()),
+            _ => t!("region.summary.line", sites = t!("region.summary.sites", n = self.domains, count = thousands(self.domains)), subnets = t!("region.summary.subnets", n = self.subnets, count = thousands(self.subnets))),
         }
     }
 }

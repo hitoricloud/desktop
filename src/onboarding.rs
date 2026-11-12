@@ -84,7 +84,7 @@ impl Hitori {
                         .flex_col()
                         .flex_1()
                         .min_w_0()
-                        .child(div().sm().medium().child(if r.country.is_some() { r.place() } else { "Your location".into() }))
+                        .child(div().sm().medium().child(if r.country.is_some() { r.place() } else { t!("onboarding.your_location").into() }))
                         .child(div().xs().text_color(t.muted_fg).child(r.line())),
                 )
                 .into_any_element(),
@@ -105,7 +105,7 @@ impl Hitori {
                     .items_center()
                     .gap(px(4.))
                     .child(div().text_px(24., 32.).semibold().tight().child("Hitori VPN"))
-                    .child(div().sm().text_color(t.muted_fg).text_center().child("Sign in with your Telegram account to get your servers and subscription.")),
+                    .child(div().sm().text_color(t.muted_fg).text_center().child(t!("onboarding.welcome.desc"))),
             );
         let error = self.s.error.clone().filter(|_| !self.paste_link && self.s.telegram == Telegram::Idle);
         let action = match &self.s.telegram {
@@ -118,9 +118,9 @@ impl Hitori {
                     .when(starting, |b| b.opacity(0.6))
                     .child(if starting { spinner("tg-start", 16., t.primary_fg).into_any_element() } else { icon("send", 16., t.primary_fg).into_any_element() })
                     .child(match (starting, error.is_some()) {
-                        (true, _) => "Opening Telegram…",
-                        (false, true) => "Try again",
-                        (false, false) => "Sign in with Telegram",
+                        (true, _) => t!("onboarding.telegram.opening"),
+                        (false, true) => t!("onboarding.telegram.try_again"),
+                        (false, false) => t!("onboarding.telegram.sign_in"),
                     })
                     .on_click(cx.listener(|this, _, _, cx| this.telegram_sign_in(cx)))
                     .into_any_element()
@@ -133,7 +133,7 @@ impl Hitori {
                 .w_full()
                 .fg(t.muted_fg, t.foreground)
                 .child(icon("link", 16., t.muted_fg))
-                .child("Use a subscription link instead")
+                .child(t!("onboarding.use_link"))
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.paste_link = true;
                     window.focus(&this.link.read(cx).focus_handle(cx));
@@ -168,9 +168,9 @@ impl Hitori {
                     }))
                     .child(action),
             )
-            .child(divider("or", t))
+            .child(divider(t!("onboarding.or"), t))
             .child(link)
-            .child(self.bot_line("No subscription yet?", "Get one in @hitorivpn", t))
+            .child(self.bot_line(t!("onboarding.no_subscription_yet"), t!("onboarding.get_one"), t))
     }
 
     /// The browser is open at Telegram: reopen the page or give up.
@@ -190,8 +190,8 @@ impl Hitori {
                         .flex()
                         .flex_col()
                         .gap(px(2.))
-                        .child(div().sm().medium().child("Waiting for the browser…"))
-                        .child(div().xs().text_color(t.muted_fg).child("Confirm the sign-in with Telegram in your browser, then come back here.")),
+                        .child(div().sm().medium().child(t!("onboarding.telegram.waiting")))
+                        .child(div().xs().text_color(t.muted_fg).child(t!("onboarding.telegram.waiting_desc"))),
                 ),
             )
             .child(
@@ -202,10 +202,10 @@ impl Hitori {
                         button("tg-reopen", Btn::Outline, Size::Sm, true, t)
                             .flex_1()
                             .child(icon("globe", 16., t.foreground))
-                            .child("Open the page again")
+                            .child(t!("onboarding.telegram.open_again"))
                             .on_click(move |_, _, cx| cx.open_url(&url)),
                     )
-                    .child(button("tg-cancel", Btn::Ghost, Size::Sm, false, t).child("Cancel").on_click(cx.listener(|this, _, _, cx| this.cancel_sign_in(cx)))),
+                    .child(button("tg-cancel", Btn::Ghost, Size::Sm, false, t).child(t!("onboarding.telegram.cancel")).on_click(cx.listener(|this, _, _, cx| this.cancel_sign_in(cx)))),
             )
     }
 
@@ -236,8 +236,8 @@ impl Hitori {
                     .p(px(16.))
                     .rounded(px(LG))
                     .bg(t.muted.opacity(0.5))
-                    .child(div().base().semibold().child("No active subscription"))
-                    .child(div().sm().text_color(t.muted_fg).text_center().child("Get a plan or renew yours in the Hitori bot, then check again.")),
+                    .child(div().base().semibold().child(t!("onboarding.subscription.title")))
+                    .child(div().sm().text_color(t.muted_fg).text_center().child(t!("onboarding.subscription.desc"))),
             )
             .children(self.s.error.clone().map(|e| div().sm().text_color(t.destructive).text_center().child(e)))
             .child(
@@ -250,7 +250,7 @@ impl Hitori {
                             .w_full()
                             .h(px(44.))
                             .child(icon("send", 16., t.primary_fg))
-                            .child("Open @hitorivpn")
+                            .child(t!("onboarding.open_bot"))
                             .on_click(|_, _, cx| cx.open_url(BOT)),
                     )
                     .child(
@@ -258,7 +258,7 @@ impl Hitori {
                             .w_full()
                             .when(busy, |b| b.opacity(0.6))
                             .child(if busy { spinner("check-spin", 16., t.foreground).into_any_element() } else { icon("refresh-cw", 16., t.foreground).into_any_element() })
-                            .child(if busy { "Checking…" } else { "Check again" })
+                            .child(if busy { t!("onboarding.subscription.checking") } else { t!("onboarding.subscription.check_again") })
                             .on_click(cx.listener(|this, _, _, cx| {
                                 if !this.s.busy {
                                     this.with_vpn(cx, |v, cx| v.sync(cx));
@@ -271,7 +271,7 @@ impl Hitori {
                     button("nosub-signout", Btn::Ghost, Size::Sm, true, t)
                         .fg(t.muted_fg, t.foreground)
                         .child(icon("log-out", 16., t.muted_fg))
-                        .child("Sign out")
+                        .child(t!("onboarding.subscription.sign_out"))
                         .on_click(cx.listener(|this, _, _, cx| this.sign_out(cx))),
                 ),
             )

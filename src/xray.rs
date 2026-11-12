@@ -3,18 +3,162 @@
 //! helper (`tun.rs` on Linux, `elevated.rs` on Windows and macOS) through `helper.rs`.
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::data::{AppRule, Protocol, RuleMode, Server, processes};
 
-pub const SOCKS_PORT: u16 = 10808;
-pub const HTTP_PORT: u16 = 10809;
+/// The SOCKS5 and HTTP listeners of proxy and system-proxy modes.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LocalProxy {
+    /// 127.0.0.1, this computer's address on the LAN, or 0.0.0.0 for every network.
+    pub listen: String,
+    pub socks: u16,
+    pub http: u16,
+}
+
+impl Default for LocalProxy {
+    fn default() -> Self {
+        Self { listen: "127.0.0.1".into(), socks: 10808, http: 10809 }
+    }
+}
+
+impl LocalProxy {
+    pub fn check(&self) -> Result<(), String> {
+        if self.listen.parse::<Ipv4Addr>().is_err() {
+            return Err(t!("xray.error.not_ipv4", ip = self.listen));
+        }
+        if self.socks == 0 || self.http == 0 {
+            return Err(t!("xray.error.ports_range").into());
+        }
+        if self.socks == self.http {
+            return Err(t!("xray.error.ports_different").into());
+        }
+        Ok(())
+    }
+
+    /// Other devices may connect: the listeners are not on loopback, and stay up in TUN mode too.
+    pub fn lan(&self) -> bool {
+        self.listen != "127.0.0.1"
+    }
+
+    /// Where apps on this computer reach the listeners.
+    pub fn host(&self) -> &str {
+        if self.listen == "0.0.0.0" { "127.0.0.1" } else { &self.listen }
+    }
+}
+/// How the core resolves names.
+#[derive(Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DnsMode {
+    /// The servers the subscription sets.
+    #[default]
+    Subscription,
+    Https,
+    /// Xray has no DoT client: DNS over TCP to the server, wrapped in TLS by the `dns-tls` outbound.
+    Tls,
+}
+
+/// Name, DoH URL, DoT server.
+pub const DNS_PRESETS: [(&str, &str, &str); 3] =
+    [("Cloudflare", "https://1.1.1.1/dns-query", "1.1.1.1"), ("Google", "https://8.8.8.8/dns-query", "8.8.8.8"), ("Quad9", "https://9.9.9.9/dns-query", "9.9.9.9")];
+
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Dns {
+    pub mode: DnsMode,
+    /// DoH URL.
+    pub https: String,
+    /// DoT server: host, host:port or [IPv6]:port.
+    pub tls: String,
+    /// Queries leave from this computer instead of through the tunnel.
+    pub direct: bool,
+}
+
+impl Default for Dns {
+    fn default() -> Self {
+        Self { mode: DnsMode::Subscription, https: DNS_PRESETS[0].1.into(), tls: DNS_PRESETS[0].2.into(), direct: false }
+    }
+}
+
+/// `host`, `host:port`, `[IPv6]`, `[IPv6]:port` or a bare IPv6 address.
+fn host_port(s: &str, default: u16) -> Option<(&str, u16)> {
+    if s.parse::<std::net::Ipv6Addr>().is_ok() {
+        return Some((s, default));
+    }
+    let (host, port) = match s.strip_prefix('[') {
+        Some(v6) => v6.split_once(']')?,
+        None => s.find(':').map_or((s, ""), |i| s.split_at(i)),
+    };
+    let port = match port {
+        "" => default,
+        p => p.strip_prefix(':')?.parse().ok().filter(|p| *p > 0)?,
+    };
+    let valid = !host.is_empty() && host.chars().all(|c| c.is_ascii_alphanumeric() || ".-_:".contains(c));
+    valid.then_some((host, port))
+}
+
+impl Dns {
+    pub fn https_host(&self) -> Option<&str> {
+        let rest = self.https.trim().strip_prefix("https://")?;
+        host_port(rest.split(['/', '?', '#']).next()?, 443).map(|(h, _)| h)
+    }
+
+    pub fn tls_target(&self) -> Option<(&str, u16)> {
+        let s = self.tls.trim();
+        host_port(s.strip_prefix("tls://").unwrap_or(s).trim_end_matches('/'), 853)
+    }
+
+    /// A typed server: an `https://` URL is DoH, anything else (`host`, `host:port`, `tls://…`) DoT.
+    pub fn set_server(&mut self, server: &str) {
+        let server = server.trim();
+        if server.starts_with("https://") {
+            (self.mode, self.https) = (DnsMode::Https, server.into());
+        } else {
+            (self.mode, self.tls) = (DnsMode::Tls, server.into());
+        }
+    }
+
+    pub fn check(&self) -> Result<(), String> {
+        match self.mode {
+            DnsMode::Subscription => Ok(()),
+            DnsMode::Https => self.https_host().map(|_| ()).ok_or_else(|| t!("xray.error.dns_https").into()),
+            DnsMode::Tls => self.tls_target().map(|_| ()).ok_or_else(|| t!("xray.error.dns_tls").into()),
+        }
+    }
+
+    /// The core's DNS: the subscription's, or with its servers replaced by the chosen one.
+    fn config(&self, sub: &Value) -> Value {
+        let mut dns = sub.clone();
+        match (self.mode, self.tls_target()) {
+            (DnsMode::Https, _) => dns["servers"] = json!([self.https.trim()]),
+            (DnsMode::Tls, Some((host, port))) => dns["servers"] = json!([format!("tcp://{}:{port}", if host.contains(':') { format!("[{host}]") } else { host.into() })]),
+            _ => {}
+        }
+        dns["tag"] = json!("dns-internal");
+        dns
+    }
+
+    /// The resolver the system is given in TUN mode: the chosen server's IPv4 address where there is one. Queries
+    /// to any address through the TUN are answered by the core.
+    pub fn resolver(&self, sub: &Value) -> String {
+        let ipv4 = |a: &&str| a.parse::<Ipv4Addr>().is_ok();
+        let found = match self.mode {
+            DnsMode::Subscription => sub["servers"].as_array().into_iter().flatten().filter_map(|s| s.as_str().or(s["address"].as_str())).find(ipv4),
+            DnsMode::Https => self.https_host().filter(ipv4),
+            DnsMode::Tls => self.tls_target().map(|(h, _)| h).filter(ipv4),
+        };
+        found.unwrap_or(TUN_DNS).to_owned()
+    }
+}
+
 /// The TUN device (Linux), the wintun adapter (Windows); macOS names utun devices itself.
 pub const TUN_NAME: &str = if cfg!(windows) { "Hitori" } else { "hitori0" };
 /// Firewall mark on the core's own sockets, so they skip the TUN routing table (Linux).
@@ -57,12 +201,15 @@ pub struct Plan {
     /// The system proxy at the core (Windows, macOS).
     pub system_proxy: bool,
     pub kill_switch: bool,
+    pub proxy: LocalProxy,
     pub apps: Vec<(&'static str, AppRule)>,
     pub sites: Vec<(&'static str, AppRule)>,
     pub servers: Vec<&'static Server>,
     pub tunnel_rules: Arc<Vec<Value>>,
     pub base_rules: Arc<Vec<Value>>,
-    pub dns: Arc<Value>,
+    /// The subscription's DNS block.
+    pub sub_dns: Arc<Value>,
+    pub dns: Dns,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -137,20 +284,24 @@ pub fn config(plan: &Plan, ports: Ports) -> Result<Value, String> {
     let exit = plan.exit;
     // App rules only where the core can tell apps apart.
     let tun = plan.tun;
+    if !tun {
+        plan.proxy.check()?;
+    }
+    plan.dns.check()?;
     let apps: &[(&'static str, AppRule)] = if crate::os::PER_APP { &plan.apps } else { &[] };
     let entry = plan.entry.filter(|e| e.id != exit.id);
     let mut out = Outbounds { list: vec![], protocol: plan.protocol };
     let main = match entry {
         Some(e) => {
-            let hop = e.chainable(plan.protocol).ok_or("The first server has no usable transport")?.1.clone();
+            let hop = e.chainable(plan.protocol).ok_or(t!("xray.error.first_no_transport"))?.1.clone();
             out.list.push(tagged(hop, "entry"));
-            let last = exit.chainable(plan.protocol).ok_or("The exit server has no usable transport")?.1.clone();
+            let last = exit.chainable(plan.protocol).ok_or(t!("xray.error.exit_no_transport"))?.1.clone();
             with_sockopt(tagged(last, "proxy"), "dialerProxy", json!("entry"))
         }
-        None => tagged(exit.variant(plan.protocol).ok_or("This server has no usable transport")?.1.clone(), "proxy"),
+        None => tagged(exit.variant(plan.protocol).ok_or(t!("xray.error.no_transport"))?.1.clone(), "proxy"),
     };
     out.list.insert(0, main);
-    let routed: Vec<_> = plan.servers.iter().filter_map(|s| Some((s.id, out.route(s, None, plan.protocol)?))).collect();
+    let routed = ping_routes(&mut out, &plan.servers);
     let (ping_in, ping_rules) = ping_in(&routed, ports.ping);
 
     let mut rules = vec![];
@@ -158,7 +309,13 @@ pub fn config(plan: &Plan, ports: Ports) -> Result<Value, String> {
         rules.push(json!({"type": "field", "inboundTag": ["tun"], "port": "53", "outboundTag": "dns-out"}));
     }
     rules.extend(ping_rules);
-    rules.push(field(json!({"inboundTag": ["dns-internal", "probe-in"]}), "proxy"));
+    let dns_route = match (plan.dns.mode, plan.dns.direct) {
+        (DnsMode::Tls, _) => "dns-tls",
+        (_, true) => "direct",
+        (_, false) => "proxy",
+    };
+    rules.push(field(json!({"inboundTag": ["dns-internal"]}), dns_route));
+    rules.push(field(json!({"inboundTag": ["probe-in"]}), "proxy"));
     rules.push(field(json!({"ip": PRIVATE}), "direct"));
     rules.push(field(json!({"domain": ["domain:localhost"]}), "direct"));
     // The provider's rules send some traffic direct (torrents), which an allowlist must not do.
@@ -238,6 +395,10 @@ pub fn config(plan: &Plan, ports: Ports) -> Result<Value, String> {
     };
     rules.push(field(json!({"network": "tcp,udp"}), last));
 
+    if let (DnsMode::Tls, Some((host, _))) = (plan.dns.mode, plan.dns.tls_target()) {
+        let tls = json!({"tag": "dns-tls", "protocol": "freedom", "streamSettings": {"security": "tls", "tlsSettings": {"serverName": host, "alpn": ["dot"]}}});
+        out.list.push(if plan.dns.direct { tls } else { with_sockopt(tls, "dialerProxy", json!("proxy")) });
+    }
     out.list.push(json!({"tag": "direct", "protocol": "freedom"}));
     out.list.push(json!({"tag": "block", "protocol": "blackhole"}));
     if tun {
@@ -250,13 +411,14 @@ pub fn config(plan: &Plan, ports: Ports) -> Result<Value, String> {
     let sniff = json!({"enabled": true, "destOverride": ["http", "tls", "quic"], "routeOnly": false});
     let mut inbounds = vec![json!({"tag": "probe-in", "listen": "127.0.0.1", "port": ports.probe, "protocol": "http"}), ping_in];
     if tun {
-        inbounds.push(json!({"tag": "tun", "port": 0, "protocol": "tun", "settings": tun_settings(), "sniffing": sniff}));
-    } else {
-        inbounds.push(json!({"tag": "socks", "listen": "127.0.0.1", "port": SOCKS_PORT, "protocol": "socks", "settings": {"udp": true}, "sniffing": sniff}));
-        inbounds.push(json!({"tag": "http", "listen": "127.0.0.1", "port": HTTP_PORT, "protocol": "http", "sniffing": sniff}));
+        inbounds.push(json!({"tag": "tun", "port": 0, "protocol": "tun", "settings": tun_settings(&plan.dns.resolver(&plan.sub_dns)), "sniffing": sniff}));
     }
-    let mut dns = (*plan.dns).clone();
-    dns["tag"] = json!("dns-internal");
+    if !tun || plan.proxy.lan() {
+        let p = &plan.proxy;
+        inbounds.push(json!({"tag": "socks", "listen": p.listen, "port": p.socks, "protocol": "socks", "settings": {"udp": true}, "sniffing": sniff}));
+        inbounds.push(json!({"tag": "http", "listen": p.listen, "port": p.http, "protocol": "http", "sniffing": sniff}));
+    }
+    let dns = plan.dns.config(&plan.sub_dns);
     Ok(json!({
         // Info carries the failed direct dials that autorouting suggestions come from.
         "log": {"loglevel": if plan.default_route.tries_direct() { "info" } else { "warning" }},
@@ -273,10 +435,13 @@ pub fn config(plan: &Plan, ports: Ports) -> Result<Value, String> {
 
 /// The TUN inbound. Windows: the core sets the adapter's addresses, routes and DNS itself; macOS: the helper opens the
 /// utun and sets them. Both bind the core's own sockets to the uplink (`autoOutboundsInterface`, filled in by the
-/// helper), so its traffic to the servers never loops back into the TUN.
-fn tun_settings() -> Value {
+/// helper), so its traffic to the servers never loops back into the TUN. `dns` is the system's resolver: set by the
+/// core on Windows, read by the helper on macOS.
+fn tun_settings(dns: &str) -> Value {
     if cfg!(windows) {
-        json!({"name": TUN_NAME, "mtu": 1500, "gateway": TUN_ADDRS, "dns": [TUN_DNS], "autoSystemRoutingTable": TUN_ROUTES})
+        json!({"name": TUN_NAME, "mtu": 1500, "gateway": TUN_ADDRS, "dns": [dns], "autoSystemRoutingTable": TUN_ROUTES})
+    } else if cfg!(target_os = "macos") {
+        json!({"name": TUN_NAME, "mtu": 1500, "dns": [dns]})
     } else {
         json!({"name": TUN_NAME, "mtu": 1500})
     }
@@ -288,7 +453,7 @@ pub fn selftest_config(metrics: u16) -> Value {
     json!({
         "log": {"loglevel": "info"},
         "dns": {"servers": [TUN_DNS], "tag": "dns-internal"},
-        "inbounds": [{"tag": "tun", "port": 0, "protocol": "tun", "settings": tun_settings(), "sniffing": {"enabled": true, "destOverride": ["http", "tls"]}}],
+        "inbounds": [{"tag": "tun", "port": 0, "protocol": "tun", "settings": tun_settings(TUN_DNS), "sniffing": {"enabled": true, "destOverride": ["http", "tls"]}}],
         "outbounds": [{"tag": "direct", "protocol": "freedom"}, {"tag": "dns-out", "protocol": "dns"}],
         "routing": {"rules": [{"type": "field", "inboundTag": ["tun"], "port": "53", "outboundTag": "dns-out"}]},
         "stats": {},
@@ -299,7 +464,32 @@ pub fn selftest_config(metrics: u16) -> Value {
 
 const PING_PASS: &str = "ping";
 
-/// The `ping-in` inbound (one proxy user per server) and the rules sending each user out through its server only.
+/// `ping-in` user for one server over one transport: `ee-1-Hy2`.
+fn ping_user(id: &str, p: Protocol) -> &'static str {
+    crate::data::intern(&format!("{id}-{p:?}"))
+}
+
+/// A `ping-in` user and its outbound for every transport of every server.
+fn ping_routes(out: &mut Outbounds, servers: &[&'static Server]) -> Vec<(&'static str, String)> {
+    let mut routed = vec![];
+    for s in servers {
+        for (p, _) in &s.variants {
+            if let Some(tag) = out.route(s, None, *p) {
+                routed.push((ping_user(s.id, *p), tag));
+            }
+        }
+    }
+    routed
+}
+
+/// The server's `ping-in` users, the transport a connection would use first.
+fn ping_users(s: &Server, protocol: Protocol) -> Vec<&'static str> {
+    let first = s.variant(protocol).map(|(p, _)| p);
+    first.into_iter().chain(s.variants.iter().map(|(p, _)| *p).filter(|p| Some(*p) != first)).map(|p| ping_user(s.id, p)).collect()
+}
+
+/// The `ping-in` inbound (one proxy user per server and transport) and the rules sending each user out through its
+/// route only.
 fn ping_in(routed: &[(&'static str, String)], port: u16) -> (Value, Vec<Value>) {
     let accounts: Vec<Value> = routed.iter().map(|(id, _)| json!({"user": id, "pass": PING_PASS})).collect();
     let mut rules: Vec<Value> = routed.iter().map(|(id, tag)| field(json!({"inboundTag": ["ping-in"], "user": [id]}), tag)).collect();
@@ -310,7 +500,7 @@ fn ping_in(routed: &[(&'static str, String)], port: u16) -> (Value, Vec<Value>) 
 /// One-off core that only measures servers (used while disconnected).
 pub fn probe_config(servers: &[&'static Server], protocol: Protocol, ping: u16) -> Value {
     let mut out = Outbounds { list: vec![], protocol };
-    let routed: Vec<_> = servers.iter().filter_map(|s| Some((s.id, out.route(s, None, protocol)?))).collect();
+    let routed = ping_routes(&mut out, servers);
     let (inbound, rules) = ping_in(&routed, ping);
     out.list.push(json!({"tag": "block", "protocol": "blackhole"}));
     json!({"log": {"loglevel": "error"}, "inbounds": [inbound], "outbounds": out.list, "routing": {"rules": rules}})
@@ -329,7 +519,7 @@ pub fn metrics(port: u16) -> Option<Metrics> {
     let v: Value = ureq::get(&format!("http://127.0.0.1:{port}/debug/vars")).timeout(Duration::from_secs(2)).call().ok()?.into_json().ok()?;
     let mut m = Metrics::default();
     if let Some(out) = v["stats"]["outbound"].as_object() {
-        for (tag, c) in out.iter().filter(|(t, _)| !matches!(t.as_str(), "direct" | "block" | "dns-out")) {
+        for (tag, c) in out.iter().filter(|(t, _)| !matches!(t.as_str(), "direct" | "block" | "dns-out" | "dns-tls")) {
             // Chained hops count the same bytes again.
             if tag == "entry" || tag.starts_with("h-") {
                 continue;
@@ -348,7 +538,7 @@ pub fn metrics(port: u16) -> Option<Metrics> {
 }
 
 pub fn write_config(path: &PathBuf, config: &Value) -> Result<(), String> {
-    crate::store::write(path, &serde_json::to_vec(config).unwrap(), true).map_err(|e| format!("Cannot write the core config: {e}"))
+    crate::store::write(path, &serde_json::to_vec(config).unwrap(), true).map_err(|e| t!("xray.error.cannot_write_config", error = e))
 }
 
 /// Latest core log lines, kept for error messages, and lines handed to whoever watches for failures.
@@ -381,6 +571,10 @@ impl Log {
         }
     }
 
+    pub fn lines(&self) -> Vec<String> {
+        self.tail.lock().unwrap().clone()
+    }
+
     pub fn take(&self) -> Vec<String> {
         std::mem::take(&mut *self.fresh.lock().unwrap())
     }
@@ -406,6 +600,7 @@ pub struct Core {
     pub ports: Ports,
     /// Started in TUN mode.
     pub tun: bool,
+    proxy: LocalProxy,
     /// The system proxy points at this core until this is dropped.
     system_proxy: Option<crate::sysproxy::Active>,
     pub log: Log,
@@ -413,28 +608,28 @@ pub struct Core {
 }
 
 impl Core {
-    /// Start and wait until it serves; TUN mode may wait for the administrator's password.
-    pub fn start(plan: &Plan) -> Result<Core, String> {
-        let xray = xray_path().ok_or("The Xray core is missing — run scripts/fetch-xray.sh")?;
+    /// Start and wait until it serves, writing its output to `log`; TUN mode may wait for the administrator's password.
+    pub fn start(plan: &Plan, log: Log) -> Result<Core, String> {
+        let xray = xray_path().ok_or(t!("xray.error.core_missing"))?;
         let ports = Ports { probe: free_port(), metrics: free_port(), ping: free_port() };
         let path = crate::store::runtime_dir().join("core.json");
         let config = config(plan, ports)?;
-        let log = Log::default();
         if plan.tun {
             let helper = crate::helper::Link::start(&xray, &path, &config, plan.kill_switch, &log)?;
-            return Ok(Core { child: None, helper: Some(helper), ports, tun: true, system_proxy: None, log, path });
+            return Ok(Core { child: None, helper: Some(helper), ports, tun: true, proxy: plan.proxy.clone(), system_proxy: None, log, path });
         }
         write_config(&path, &config)?;
         let mut cmd = Command::new(&xray);
         cmd.args(["run", "-c"]).arg(&path).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-        let mut child = crate::os::spawn_core(&mut cmd).map_err(|e| format!("Cannot start the core: {e}"))?;
+        let mut child = crate::os::spawn_core(&mut cmd).map_err(|e| t!("xray.error.cannot_start_core", error = e))?;
         // The core logs to stdout; stderr carries Go panics.
         log.follow(child.stdout.take().unwrap());
         log.follow(child.stderr.take().unwrap());
-        let mut core = Core { child: Some(child), helper: None, ports, tun: false, system_proxy: None, log, path };
+        let mut core = Core { child: Some(child), helper: None, ports, tun: false, proxy: plan.proxy.clone(), system_proxy: None, log, path };
         core.wait_serving(Duration::from_secs(10))?;
         if plan.system_proxy {
-            core.system_proxy = Some(crate::sysproxy::set(HTTP_PORT, SOCKS_PORT).map_err(|e| format!("Cannot set the system proxy: {e}"))?);
+            let p = &plan.proxy;
+            core.system_proxy = Some(crate::sysproxy::set(p.host(), p.http, p.socks).map_err(|e| t!("xray.error.cannot_set_system_proxy", error = e))?);
         }
         Ok(core)
     }
@@ -444,20 +639,20 @@ impl Core {
         let addr = SocketAddr::from(([127, 0, 0, 1], self.ports.metrics));
         while start.elapsed() < limit {
             if let Some(Ok(Some(status))) = self.child.as_mut().map(|c| c.try_wait()) {
-                return Err(self.log.last_error().unwrap_or_else(|| format!("The core stopped ({status})")));
+                return Err(self.log.last_error().unwrap_or_else(|| t!("xray.error.core_stopped", status = status)));
             }
             if TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok() {
                 return Ok(());
             }
             std::thread::sleep(Duration::from_millis(100));
         }
-        Err("The core did not start in time".into())
+        Err(t!("xray.error.did_not_start").into())
     }
 
     /// Apply a new plan: the helper restarts the core under the same routing; otherwise the core is restarted.
     pub fn reload(&mut self, plan: &Plan) -> Result<(), String> {
-        if plan.tun != self.tun || plan.system_proxy != self.system_proxy.is_some() {
-            return Err("mode changed".into());
+        if plan.tun != self.tun || plan.system_proxy != self.system_proxy.is_some() || (!plan.tun && plan.proxy != self.proxy) {
+            return Err(t!("xray.error.mode_changed").into());
         }
         let config = config(plan, self.ports)?;
         if let Some(helper) = self.helper.as_mut() {
@@ -466,7 +661,7 @@ impl Core {
         self.stop_child();
         // The system proxy stays in place for the core that replaces this one.
         let proxy = self.system_proxy.take();
-        let mut fresh = Core::start(&Plan { system_proxy: false, ..plan.clone() })?;
+        let mut fresh = Core::start(&Plan { system_proxy: false, ..plan.clone() }, self.log.clone())?;
         fresh.system_proxy = proxy;
         std::mem::swap(self, &mut fresh);
         Ok(())
@@ -586,6 +781,26 @@ fn ping_server(port: u16, id: &'static str, target: &'static str) -> Option<u32>
     None
 }
 
+/// Every transport of a server at once: the first one's round trip when it answers, else the fastest other's, so a
+/// server is not offline just because the chosen transport is blocked to it.
+fn ping_any(port: u16, users: &[&'static str], target: &'static str) -> Option<u32> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    for (i, user) in users.iter().copied().enumerate() {
+        let tx = tx.clone();
+        std::thread::spawn(move || tx.send((i, ping_server(port, user, target))));
+    }
+    drop(tx);
+    let mut others = vec![];
+    for (i, ms) in rx {
+        match (i, ms) {
+            (0, Some(_)) => return ms,
+            (_, Some(ms)) => others.push(ms),
+            _ => {}
+        }
+    }
+    others.into_iter().min()
+}
+
 pub type Pinged = Result<(&'static str, Option<u32>), String>;
 
 /// Latency test of every server at once, each result sent as it comes. Through the running core's `ping-in` when
@@ -610,7 +825,7 @@ fn ping(servers: Vec<&'static Server>, protocol: Protocol, running: Option<u16>,
         std::thread::scope(|scope| {
             for s in &servers {
                 let tx = tx.clone();
-                scope.spawn(move || tx.send_blocking(Ok((s.id, ping_server(port, s.id, target)))));
+                scope.spawn(move || tx.send_blocking(Ok((s.id, ping_any(port, &ping_users(s, protocol), target)))));
             }
         });
         if let Some((mut child, path)) = own {
@@ -629,13 +844,13 @@ pub fn ping_all(servers: Vec<&'static Server>, protocol: Protocol, running: Opti
 
 /// A core with only `ping-in` and the servers' outbounds, serving once its port accepts.
 fn probe_core(servers: &[&'static Server], protocol: Protocol) -> Result<(Child, PathBuf, u16), String> {
-    let xray = xray_path().ok_or("The Xray core is missing — run scripts/fetch-xray.sh")?;
+    let xray = xray_path().ok_or(t!("xray.error.core_missing"))?;
     let port = free_port();
     let path = crate::store::runtime_dir().join(format!("probe-{port}.json"));
     write_config(&path, &probe_config(servers, protocol, port))?;
     let mut cmd = Command::new(xray);
     cmd.args(["run", "-c"]).arg(&path).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-    let mut child = crate::os::spawn_core(&mut cmd).map_err(|e| format!("Cannot start the latency test: {e}"))?;
+    let mut child = crate::os::spawn_core(&mut cmd).map_err(|e| t!("xray.error.cannot_start_latency_test", error = e))?;
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(10) {
         if matches!(child.try_wait(), Ok(Some(_))) {
@@ -650,7 +865,7 @@ fn probe_core(servers: &[&'static Server], protocol: Protocol) -> Result<(Child,
     let _ = child.wait();
     crate::os::reaped(&child);
     let _ = std::fs::remove_file(&path);
-    Err("The latency test core did not start".into())
+    Err(t!("xray.error.latency_core_did_not_start").into())
 }
 
 #[cfg(test)]
@@ -683,12 +898,14 @@ mod tests {
             tun: false,
             system_proxy: false,
             kill_switch: true,
+            proxy: LocalProxy::default(),
             apps: vec![],
             sites: vec![],
             servers: vec![a, b],
             tunnel_rules: Arc::new(vec![json!({"type": "field", "domain": ["domain:blocked.example"], "outboundTag": "proxy"})]),
             base_rules: Arc::new(vec![json!({"type": "field", "protocol": ["bittorrent"], "outboundTag": "direct"})]),
-            dns: Arc::new(json!({"servers": ["1.1.1.1"]})),
+            sub_dns: Arc::new(json!({"servers": ["1.1.1.1"]})),
+            dns: Dns::default(),
         }
     }
 
@@ -714,8 +931,8 @@ mod tests {
         assert_eq!(rule_for(&c, "domain", "domain:blocked.example").unwrap()["outboundTag"], "proxy");
         assert_eq!(rule_for(&c, "protocol", "bittorrent").unwrap()["outboundTag"], "direct");
         let tags: Vec<_> = c["outbounds"].as_array().unwrap().iter().map(|o| o["tag"].as_str().unwrap().to_owned()).collect();
-        assert_eq!(tags, ["proxy", "p-aa-1", "p-bb-2-Grpc", "direct", "block"]);
-        assert!(c["inbounds"].as_array().unwrap().iter().any(|i| i["port"] == SOCKS_PORT));
+        assert_eq!(tags, ["proxy", "p-aa-1", "p-aa-1-Hy2", "p-bb-2-Grpc", "direct", "block"]);
+        assert!(c["inbounds"].as_array().unwrap().iter().any(|i| i["port"] == LocalProxy::default().socks));
     }
 
     #[test]
@@ -724,10 +941,13 @@ mod tests {
         let ping = c["inbounds"].as_array().unwrap().iter().find(|i| i["tag"] == "ping-in").unwrap();
         assert_eq!((ping["port"].as_u64(), ping["listen"].as_str()), (Some(3), Some("127.0.0.1")));
         let users: Vec<_> = ping["settings"]["accounts"].as_array().unwrap().iter().map(|a| a["user"].as_str().unwrap()).collect();
-        assert_eq!(users, ["aa-1", "bb-2"]);
+        assert_eq!(users, ["aa-1-Tls", "aa-1-Hy2", "bb-2-Grpc"]);
         let rules = c["routing"]["rules"].as_array().unwrap();
         let to = |user: &str| rule_for(&c, "user", user).map(|r| r["outboundTag"].as_str().unwrap().to_owned());
-        assert_eq!((to("aa-1").as_deref(), to("bb-2").as_deref()), (Some("p-aa-1"), Some("p-bb-2-Grpc")));
+        assert_eq!(["aa-1-Tls", "aa-1-Hy2", "bb-2-Grpc"].map(to).map(Option::unwrap), ["p-aa-1", "p-aa-1-Hy2", "p-bb-2-Grpc"]);
+        let p = plan();
+        assert_eq!(ping_users(p.servers[0], Protocol::Hy2), ["aa-1-Hy2", "aa-1-Tls"], "the chosen transport first");
+        assert_eq!(ping_users(p.servers[1], Protocol::Tls), ["bb-2-Grpc"]);
         let last_ping = rules.iter().rposition(|r| r["inboundTag"][0] == "ping-in").unwrap();
         assert_eq!(rules[last_ping]["outboundTag"], "block", "an unknown user never leaves through another route");
         assert!(last_ping < position(&c, "ip", "10.0.0.0/8").unwrap(), "before the LAN and default rules");
@@ -736,9 +956,9 @@ mod tests {
         let p = plan();
         let probe = probe_config(&p.servers, Protocol::Tls, 4);
         assert_eq!(probe["inbounds"][0]["port"], 4);
-        assert_eq!(rule_for(&probe, "user", "bb-2").unwrap()["outboundTag"], "p-bb-2-Grpc");
+        assert_eq!(rule_for(&probe, "user", "bb-2-Grpc").unwrap()["outboundTag"], "p-bb-2-Grpc");
         let tags: Vec<_> = probe["outbounds"].as_array().unwrap().iter().map(|o| o["tag"].as_str().unwrap()).collect();
-        assert_eq!(tags, ["p-aa-1", "p-bb-2-Grpc", "block"]);
+        assert_eq!(tags, ["p-aa-1", "p-aa-1-Hy2", "p-bb-2-Grpc", "block"]);
     }
 
     const UUID: &str = "5783a3e7-e373-51cd-8642-c83782b807c5";
@@ -795,18 +1015,23 @@ mod tests {
         let Some(xray) = xray_path() else { return eprintln!("skipped: no Xray core (scripts/fetch-xray.sh)") };
         let (_server, port, target) = fixture(&xray);
         let (up, down) = (local("up-1", port), local("down-2", free_port()));
-        let got = results(ping(vec![up, down], Protocol::Tls, None, target));
+        let other = local("other-3", port);
+        let dead = local("other-3", free_port()).variants[0].1.clone();
+        let other: &'static Server = Box::leak(Box::new(Server { variants: vec![(Protocol::Tls, dead), (Protocol::Grpc, other.variants[0].1.clone())], ..other.clone() }));
+        let got = results(ping(vec![up, down, other], Protocol::Tls, None, target));
         assert!(got["up-1"].is_some_and(|ms| ms < 5000), "{got:?}");
         assert_eq!(got["down-2"], None, "a dead server is a timeout, not another route");
+        assert!(got["other-3"].is_some(), "another transport answers for a blocked one: {got:?}");
         assert!(!std::fs::read_dir(crate::store::runtime_dir()).unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with("probe-")), "throwaway config removed");
 
-        if TcpListener::bind(("127.0.0.1", SOCKS_PORT)).is_err() {
-            return eprintln!("skipped the connected half: port {SOCKS_PORT} is in use");
+        let socks = LocalProxy::default().socks;
+        if TcpListener::bind(("127.0.0.1", socks)).is_err() {
+            return eprintln!("skipped the connected half: port {socks} is in use");
         }
         let mut p = plan();
         (p.exit, p.servers, p.default_route) = (up, vec![up, down], RuleMode::Vpn);
         assert!(!p.tun, "proxy mode: never the system-wide helper in tests");
-        let mut core = Core::start(&p).unwrap();
+        let mut core = Core::start(&p, Log::default()).unwrap();
         let through = |core: &Core| {
             let proxy = ureq::Proxy::new(format!("http://127.0.0.1:{}", core.ports.probe)).unwrap();
             ureq::AgentBuilder::new().proxy(proxy).timeout(Duration::from_secs(5)).build().get(&format!("http://{target}/")).call().map(|r| r.status())
@@ -818,6 +1043,115 @@ mod tests {
         assert!(core.alive());
         assert_eq!(through(&core).ok(), Some(204), "the tunnel still works after the test");
         core.stop();
+    }
+
+    #[test]
+    fn local_proxy_listens_where_and_on_the_ports_chosen() {
+        let inbound = |c: &Value, tag: &str| c["inbounds"].as_array().unwrap().iter().find(|i| i["tag"] == tag).cloned().unwrap();
+        let c = config(&plan(), Ports { probe: 1, metrics: 2, ping: 3 }).unwrap();
+        let (socks, http) = (inbound(&c, "socks"), inbound(&c, "http"));
+        assert_eq!((socks["listen"].as_str(), socks["port"].as_u64()), (Some("127.0.0.1"), Some(10808)));
+        assert_eq!((http["listen"].as_str(), http["port"].as_u64()), (Some("127.0.0.1"), Some(10809)));
+
+        let mut p = plan();
+        p.proxy = LocalProxy { listen: "192.168.0.10".into(), socks: 1080, http: 8080 };
+        let c = config(&p, Ports { probe: 1, metrics: 2, ping: 3 }).unwrap();
+        let (socks, http) = (inbound(&c, "socks"), inbound(&c, "http"));
+        assert_eq!((socks["listen"].as_str(), socks["port"].as_u64()), (Some("192.168.0.10"), Some(1080)));
+        assert_eq!((http["listen"].as_str(), http["port"].as_u64()), (Some("192.168.0.10"), Some(8080)));
+        assert_eq!(inbound(&c, "probe-in")["listen"], "127.0.0.1", "internal listeners stay on loopback");
+        assert_eq!(p.proxy.host(), "192.168.0.10");
+
+        p.proxy.listen = "0.0.0.0".into();
+        assert_eq!(inbound(&config(&p, Ports { probe: 1, metrics: 2, ping: 3 }).unwrap(), "socks")["listen"], "0.0.0.0");
+        assert_eq!(p.proxy.host(), "127.0.0.1", "the system proxy uses loopback");
+
+        p.proxy.http = 1080;
+        assert!(config(&p, Ports { probe: 1, metrics: 2, ping: 3 }).unwrap_err().contains("different ports"));
+        p.proxy = LocalProxy { socks: 0, ..LocalProxy::default() };
+        assert!(config(&p, Ports { probe: 1, metrics: 2, ping: 3 }).is_err());
+        p.proxy = LocalProxy { listen: "lan".into(), ..LocalProxy::default() };
+        assert!(config(&p, Ports { probe: 1, metrics: 2, ping: 3 }).is_err());
+        p.tun = true;
+        assert!(config(&p, Ports { probe: 1, metrics: 2, ping: 3 }).is_ok(), "TUN mode has no proxy listeners");
+    }
+
+    #[test]
+    fn dns_choice_sets_servers_route_and_tun_resolver() {
+        let with = |dns: Dns| {
+            let mut p = plan();
+            p.dns = dns;
+            config(&p, Ports { probe: 1, metrics: 2, ping: 3 })
+        };
+        let route = |c: &Value| rule_for(c, "inboundTag", "dns-internal").unwrap()["outboundTag"].clone();
+        let outbound = |c: &Value, tag: &str| c["outbounds"].as_array().unwrap().iter().find(|o| o["tag"] == tag).cloned();
+
+        let sub = with(Dns::default()).unwrap();
+        assert_eq!(sub["dns"], json!({"servers": ["1.1.1.1"], "tag": "dns-internal"}), "the subscription's, as before");
+        assert_eq!(route(&sub), "proxy");
+        assert_eq!(rule_for(&sub, "inboundTag", "probe-in").unwrap()["outboundTag"], "proxy");
+        assert!(outbound(&sub, "dns-tls").is_none());
+
+        let doh = with(Dns { mode: DnsMode::Https, https: "https://8.8.8.8/dns-query".into(), direct: true, ..Dns::default() }).unwrap();
+        assert_eq!(doh["dns"], json!({"servers": ["https://8.8.8.8/dns-query"], "tag": "dns-internal"}));
+        assert_eq!(route(&doh), "direct");
+
+        let dot = with(Dns { mode: DnsMode::Tls, tls: "dns.quad9.net".into(), ..Dns::default() }).unwrap();
+        assert_eq!(dot["dns"]["servers"], json!(["tcp://dns.quad9.net:853"]));
+        assert_eq!(route(&dot), "dns-tls");
+        let tls = outbound(&dot, "dns-tls").unwrap();
+        assert_eq!((tls["protocol"].as_str(), tls["streamSettings"]["security"].as_str()), (Some("freedom"), Some("tls")));
+        assert_eq!(tls["streamSettings"]["tlsSettings"]["serverName"], "dns.quad9.net");
+        assert_eq!(tls["streamSettings"]["sockopt"]["dialerProxy"], "proxy", "through the tunnel");
+
+        let v6 = with(Dns { mode: DnsMode::Tls, tls: "tls://[2606:4700:4700::1111]:8853".into(), direct: true, ..Dns::default() }).unwrap();
+        assert_eq!(v6["dns"]["servers"], json!(["tcp://[2606:4700:4700::1111]:8853"]));
+        assert!(outbound(&v6, "dns-tls").unwrap()["streamSettings"]["sockopt"].is_null(), "direct: no dialer proxy");
+
+        for bad in [Dns { mode: DnsMode::Https, https: "http://1.1.1.1/dns-query".into(), ..Dns::default() }, Dns { mode: DnsMode::Tls, tls: "a b".into(), ..Dns::default() }, Dns { mode: DnsMode::Tls, tls: "1.1.1.1:0".into(), ..Dns::default() }] {
+            assert!(with(bad.clone()).is_err(), "{bad:?}");
+        }
+        assert!(with(Dns { mode: DnsMode::Subscription, https: "junk".into(), ..Dns::default() }).is_ok(), "unused fields are not checked");
+
+        let sub_dns = json!({"servers": [{"address": "https://dns.example/q"}, "77.88.8.8"]});
+        assert_eq!(Dns::default().resolver(&sub_dns), "77.88.8.8");
+        assert_eq!(Dns::default().resolver(&Value::Null), TUN_DNS);
+        assert_eq!(Dns { mode: DnsMode::Https, https: "https://9.9.9.9/dns-query".into(), ..Dns::default() }.resolver(&sub_dns), "9.9.9.9");
+        assert_eq!(Dns { mode: DnsMode::Tls, tls: "8.8.8.8:853".into(), ..Dns::default() }.resolver(&sub_dns), "8.8.8.8");
+        assert_eq!(Dns { mode: DnsMode::Tls, tls: "dns.google".into(), ..Dns::default() }.resolver(&sub_dns), TUN_DNS);
+
+        let mut p = plan();
+        (p.tun, p.dns) = (true, Dns { mode: DnsMode::Https, https: "https://9.9.9.9/dns-query".into(), ..Dns::default() });
+        let c = config(&p, Ports { probe: 1, metrics: 2, ping: 3 }).unwrap();
+        assert_eq!(c["routing"]["rules"][0]["outboundTag"], "dns-out", "the system's queries still go to the core");
+        let tun = c["inbounds"].as_array().unwrap().iter().find(|i| i["tag"] == "tun").unwrap();
+        if cfg!(not(target_os = "linux")) {
+            assert_eq!(tun["settings"]["dns"], json!(["9.9.9.9"]));
+        }
+    }
+
+    /// Every DNS choice passes the real core's own validation.
+    #[test]
+    fn dns_choices_load_in_the_core() {
+        let Some(xray) = xray_path() else { return eprintln!("skipped: no Xray core (scripts/fetch-xray.sh)") };
+        let server = local("up-1", 1);
+        let choices = [
+            Dns::default(),
+            Dns { mode: DnsMode::Https, direct: true, ..Dns::default() },
+            Dns { mode: DnsMode::Tls, ..Dns::default() },
+            Dns { mode: DnsMode::Tls, tls: "dns.google:853".into(), direct: true, ..Dns::default() },
+        ];
+        for (i, dns) in choices.into_iter().enumerate() {
+            for tun in [false, true] {
+                let mut p = plan();
+                (p.exit, p.servers, p.tun, p.dns) = (server, vec![server], tun, dns.clone());
+                let path = std::env::temp_dir().join(format!("hitori-dns-{}-{i}-{tun}.json", std::process::id()));
+                crate::store::write(&path, &serde_json::to_vec(&config(&p, Ports { probe: 1, metrics: 2, ping: 3 }).unwrap()).unwrap(), true).unwrap();
+                let out = Command::new(&xray).args(["run", "-test", "-c"]).arg(&path).output().unwrap();
+                std::fs::remove_file(&path).unwrap();
+                assert!(out.status.success(), "{dns:?} tun={tun}: {}", String::from_utf8_lossy(&out.stdout));
+            }
+        }
     }
 
     #[test]
@@ -888,7 +1222,24 @@ mod tests {
         }
         assert_eq!(c["routing"]["rules"][0]["outboundTag"], "dns-out");
         assert!(c["inbounds"].as_array().unwrap().iter().any(|i| i["protocol"] == "tun" && i["settings"]["name"] == TUN_NAME));
-        assert!(!c["inbounds"].as_array().unwrap().iter().any(|i| i["port"] == SOCKS_PORT));
+        assert!(!c["inbounds"].as_array().unwrap().iter().any(|i| i["port"] == LocalProxy::default().socks));
+        p.proxy.listen = "192.168.1.248".into();
+        let c = config(&p, Ports { probe: 1, metrics: 2, ping: 3 }).unwrap();
+        let socks = c["inbounds"].as_array().unwrap().iter().find(|i| i["tag"] == "socks").expect("LAN listeners stay up in TUN mode");
+        assert_eq!(socks["listen"], "192.168.1.248");
+    }
+
+    #[test]
+    fn a_typed_dns_server_picks_doh_or_dot() {
+        let mut d = Dns::default();
+        d.set_server(" https://dns.google/dns-query ");
+        assert_eq!((d.mode, d.https.as_str()), (DnsMode::Https, "https://dns.google/dns-query"));
+        d.set_server("1.1.1.1:853");
+        assert_eq!((d.mode, d.tls_target()), (DnsMode::Tls, Some(("1.1.1.1", 853))));
+        d.set_server("tls://dns.quad9.net");
+        assert_eq!(d.tls_target(), Some(("dns.quad9.net", 853)));
+        d.set_server("http://x/");
+        assert!(d.check().is_err());
     }
 
     /// Against the real subscription and core: HITORI_TEST_SUB=<subscription JSON> cargo test live -- --ignored --nocapture
@@ -919,12 +1270,14 @@ mod tests {
             tun: false,
             system_proxy: false,
             kill_switch: true,
+            proxy: LocalProxy::default(),
             apps: vec![("curl", AppRule { exit: Some(ch.id), ..AppRule::mode(RuleMode::Vpn) })],
             sites: vec![("example.org", AppRule::mode(RuleMode::Direct))],
             servers: servers.clone(),
             tunnel_rules: Arc::new(sub.tunnel_rules),
             base_rules: Arc::new(sub.base_rules),
-            dns: Arc::new(sub.dns),
+            sub_dns: Arc::new(sub.dns),
+            dns: Dns::default(),
         };
         // Every generated variant must pass the core's own validation.
         for (tun, entry, route, proto) in [(false, None, RuleMode::Vpn, Protocol::Tls), (true, None, RuleMode::Auto, Protocol::Hy2), (false, Some(ch), RuleMode::Block, Protocol::Grpc)] {
@@ -937,14 +1290,14 @@ mod tests {
             assert!(out.status.success(), "tun={tun} entry={} route={route:?}: {}", entry.is_some(), String::from_utf8_lossy(&out.stdout));
         }
         plan.apps.clear();
-        let core = Core::start(&plan).unwrap();
+        let core = Core::start(&plan, Log::default()).unwrap();
         let ip = exit_ip(core.ports.probe).expect("exit ip through the tunnel");
         eprintln!("exit ip via {}: {ip}", ee.id);
         let trace = |args: &[&str]| {
             let out = Command::new("curl").args(args).args(["-sS", "-m", "15", "https://1.1.1.1/cdn-cgi/trace"]).output().unwrap();
             format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))
         };
-        let got = trace(&["--socks5-hostname", &format!("127.0.0.1:{SOCKS_PORT}")]);
+        let got = trace(&["--socks5-hostname", &format!("127.0.0.1:{}", LocalProxy::default().socks)]);
         assert!(got.contains(&main_loc), "{main_loc}: {got:?} / {:?}", core.log.last_error());
         std::thread::sleep(Duration::from_secs(4));
         let m = metrics(core.ports.metrics).unwrap();
@@ -956,12 +1309,12 @@ mod tests {
         per_app.apps = vec![("curl", AppRule { exit: Some(ch.id), ..AppRule::mode(RuleMode::Vpn) })];
         let mut core = core;
         core.reload(&per_app).unwrap();
-        assert!(trace(&["--socks5-hostname", &format!("127.0.0.1:{SOCKS_PORT}")]).contains(&other_loc));
+        assert!(trace(&["--socks5-hostname", &format!("127.0.0.1:{}", LocalProxy::default().socks)]).contains(&other_loc));
         // Cascade: Switzerland exit through Estonia.
         let mut cascade = plan.clone();
         (cascade.exit, cascade.entry) = (ch, Some(ee));
         core.reload(&cascade).unwrap();
-        assert!(trace(&["--proxy", &format!("http://127.0.0.1:{HTTP_PORT}")]).contains(&other_loc));
+        assert!(trace(&["--proxy", &format!("http://127.0.0.1:{}", LocalProxy::default().http)]).contains(&other_loc));
         let config = core.path.clone();
         core.stop();
         assert!(!config.exists(), "config with credentials removed");
@@ -1017,14 +1370,16 @@ mod tests {
             tun: true,
             system_proxy: false,
             kill_switch: true,
+            proxy: LocalProxy::default(),
             apps: vec![],
             sites: vec![],
             servers: servers.clone(),
             tunnel_rules: Arc::new(sub.tunnel_rules),
             base_rules: Arc::new(sub.base_rules),
-            dns: Arc::new(sub.dns),
+            sub_dns: Arc::new(sub.dns),
+            dns: Dns::default(),
         };
-        let mut core = Core::start(&plan).unwrap();
+        let mut core = Core::start(&plan, Log::default()).unwrap();
         assert!(rules() >= 5, "policy rules installed");
         assert_eq!(loc(3), want, "plain curl goes through the tunnel");
         assert_eq!(format!("loc={}", country()), want, "names resolve and connect through the tunnel");

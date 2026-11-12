@@ -152,7 +152,12 @@ pub struct Settings {
     pub system_wide: bool,
     /// Windows and macOS: system-wide mode is a TUN (administrator rights once per connection), not the system proxy.
     pub tun: bool,
+    /// Proxy mode's SOCKS5 and HTTP listeners.
+    pub proxy: crate::xray::LocalProxy,
+    pub dns: crate::xray::Dns,
     pub dark: bool,
+    /// UI language: `system`, `en` or `ru`.
+    pub language: String,
     pub rules_big: bool,
     pub apps: Vec<Rule>,
     #[serde(deserialize_with = "sites")]
@@ -173,7 +178,10 @@ impl Default for Settings {
             route: "auto".into(),
             system_wide: true,
             tun: false,
+            proxy: Default::default(),
+            dns: Default::default(),
             dark: true,
+            language: "system".into(),
             rules_big: true,
             apps: vec![],
             sites: vec![],
@@ -219,6 +227,30 @@ mod tests {
         let modes: Vec<_> = s.sites().into_iter().map(|(d, r)| (d, r.mode.key())).collect();
         assert_eq!(modes, [("youtube.com", "vpn"), ("bank.ru", "direct"), ("x.org", "block")]);
         assert_eq!(s.route, "vpn");
+    }
+
+    #[test]
+    fn local_proxy_defaults_and_round_trips() {
+        let old: Settings = serde_json::from_str(r#"{"route":"vpn"}"#).unwrap();
+        assert_eq!((old.proxy.listen.as_str(), old.proxy.socks, old.proxy.http), ("127.0.0.1", 10808, 10809));
+        let partial: Settings = serde_json::from_str(r#"{"proxy":{"listen":"0.0.0.0"}}"#).unwrap();
+        assert_eq!((partial.proxy.listen.as_str(), partial.proxy.socks), ("0.0.0.0", 10808));
+        let mut s = Settings::default();
+        s.proxy = crate::xray::LocalProxy { listen: "192.168.0.10".into(), socks: 1080, http: 8080 };
+        let back: Settings = serde_json::from_slice(&serde_json::to_vec(&s).unwrap()).unwrap();
+        assert_eq!(back.proxy, s.proxy);
+    }
+
+    #[test]
+    fn dns_defaults_to_the_subscription_and_round_trips() {
+        use crate::xray::DnsMode;
+        let old: Settings = serde_json::from_str(r#"{"route":"vpn"}"#).unwrap();
+        assert_eq!((old.dns.mode, old.dns.direct), (DnsMode::Subscription, false));
+        let s: Settings = serde_json::from_str(r#"{"dns":{"mode":"tls","tls":"dns.google","direct":true}}"#).unwrap();
+        assert_eq!((s.dns.mode, s.dns.tls.as_str(), s.dns.https.as_str(), s.dns.direct), (DnsMode::Tls, "dns.google", "https://1.1.1.1/dns-query", true));
+        let json = serde_json::to_value(&s).unwrap();
+        assert_eq!(json["dns"]["mode"], "tls");
+        assert_eq!(serde_json::from_value::<Settings>(json).unwrap().dns, s.dns);
     }
 }
 

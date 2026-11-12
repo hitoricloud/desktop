@@ -1,0 +1,8 @@
+[error]
+no_server = "Нет сервера для подключения"
+sign_in_to_connect = "Войдите, чтобы подключиться"
+connection_lost = "Соединение потеряно"
+connection_lost_why = "Соединение потеряно: {why}"
+
+[region]
+cannot_download = "Не удалось загрузить списки для региона «{place}»"

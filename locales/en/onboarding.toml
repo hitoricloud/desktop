@@ -1,0 +1,25 @@
+your_location = "Your location"
+or = "or"
+use_link = "Use a subscription link instead"
+no_subscription_yet = "No subscription yet?"
+get_one = "Get one in @hitorivpn"
+open_bot = "Open @hitorivpn"
+
+[welcome]
+desc = "Sign in with your Telegram account to get your servers and subscription."
+
+[telegram]
+sign_in = "Sign in with Telegram"
+opening = "Opening Telegram…"
+try_again = "Try again"
+waiting = "Waiting for the browser…"
+waiting_desc = "Confirm the sign-in with Telegram in your browser, then come back here."
+open_again = "Open the page again"
+cancel = "Cancel"
+
+[subscription]
+title = "No active subscription"
+desc = "Get a plan or renew yours in the Hitori bot, then check again."
+check_again = "Check again"
+checking = "Checking…"
+sign_out = "Sign out"
