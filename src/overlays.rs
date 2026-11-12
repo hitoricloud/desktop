@@ -101,12 +101,12 @@ impl Hitori {
         let w = if f32::from(vp.width) >= 640. { 448. } else { f32::from(vp.width) };
         let (title, desc) = match panel {
             Panel::Account => match &self.s.account {
-                Some(_) if self.s.signed_in => ("Account", format!("Signed in as {}", self.account_name())),
-                _ if self.s.signed_in => ("Account", "Loading your subscription…".into()),
-                _ => ("Sign in", "Paste the subscription link from the Hitori bot.".into()),
+                Some(_) if self.s.signed_in => (t!("overlays.account.title"), t!("overlays.account.signed_in_as", name = self.account_name())),
+                _ if self.s.signed_in => (t!("overlays.account.title"), t!("overlays.account.loading").into()),
+                _ => (t!("overlays.signin.title"), t!("overlays.signin.desc").into()),
             },
-            Panel::Routes => ("Routing rules", format!("Apps and sites without a rule follow the default route: {}.", self.s.default_route.label())),
-            Panel::Log => ("Connection log", "The last error and the core's recent output.".into()),
+            Panel::Routes => (t!("overlays.routes.title"), t!("overlays.routes.desc", route = self.s.default_route.label())),
+            Panel::Log => (t!("overlays.log.title"), t!("overlays.log.desc").into()),
             Panel::Settings => unreachable!(),
         };
         // Sheet: overlay `fade-in-0` 150ms; content `slide-in-from-right` 500ms in / 300ms out, ease-in-out.
@@ -181,7 +181,7 @@ impl Hitori {
             let (muted, muted_fg) = (t.muted, t.muted_fg);
             nav = nav.child(
                 div()
-                    .id(SharedString::from(format!("settings-tab-{}", k.label())))
+                    .id(SharedString::from(format!("settings-tab-{}", k.icon())))
                     .h(px(36.))
                     .px(px(12.))
                     .flex()
@@ -205,11 +205,14 @@ impl Hitori {
         let content = match tab {
             SettingsTab::Connection => self.connection_sections(cw, window, cx),
             SettingsTab::Network => self.network_sections(cw, window, cx),
-            SettingsTab::Location => vec![page_section("Location", &t, vec![self.region_row(cw, window, cx)])],
+            SettingsTab::Location => vec![page_section(t!("overlays.settings.location"), &t, vec![self.region_row(cw, window, cx)])],
             SettingsTab::Appearance => {
                 let dark = t.dark;
                 let room = page_room(cw, 32.);
-                vec![page_section("Theme", &t, vec![row("Dark theme", Some("Use the dark color scheme."), room, switch("dark", dark, &t).on_click(cx.listener(move |this, _, _, cx| this.set_dark(!dark, cx))), &t, window)])]
+                vec![
+                    page_section(t!("overlays.settings.theme"), &t, vec![row(t!("overlays.settings.dark"), Some(t!("overlays.settings.dark_hint")), room, switch("dark", dark, &t).on_click(cx.listener(move |this, _, _, cx| this.set_dark(!dark, cx))), &t, window)]),
+                    page_section(t!("overlays.settings.language"), &t, vec![self.language_row(cw, window, cx)]),
+                ]
             }
         };
         let dialog = div()
@@ -241,7 +244,7 @@ impl Hitori {
                             .items_center()
                             .gap(px(8.))
                             .sm()
-                            .child(div().text_color(t.muted_fg).child("Settings"))
+                            .child(div().text_color(t.muted_fg).child(t!("overlays.settings.title")))
                             .child(div().text_color(t.muted_fg).child("/"))
                             .child(div().medium().child(tab.label())),
                     )
@@ -336,20 +339,20 @@ impl Hitori {
         let mode = (crate::os::SYSTEM_PROXY && self.s.system_wide).then(|| self.mode_row(cw, window, cx));
         let room = page_room(cw, 32.);
         let p = &self.s.proxy;
-        let proxy_hint = format!("Only apps set to use the proxy: SOCKS5 {}:{}, HTTP {}.", p.host(), p.socks, p.http);
+        let proxy_hint = t!("overlays.connection.system_wide_off", host = p.host(), socks = p.socks, http = p.http);
         vec![page_section(
-            "Connection",
+            t!("overlays.connection.title"),
             &t,
-            [row("Protocol", Some("TLS gets through the most filters."), page_room(cw, toggle_w), group, &t, window)]
+            [row(t!("overlays.connection.protocol"), Some(t!("overlays.connection.protocol_hint")), page_room(cw, toggle_w), group, &t, window)]
                 .into_iter()
                 .chain([row(
-                    "System-wide",
+                    t!("overlays.connection.system_wide"),
                     Some(if !self.s.system_wide {
                         &proxy_hint
                     } else if crate::os::SYSTEM_PROXY {
-                        "Browsers and most apps, or every app in TUN mode, go through Hitori."
+                        t!("overlays.connection.system_wide_proxy")
                     } else {
-                        "Every app goes through Hitori. Asks for your password to connect."
+                        t!("overlays.connection.system_wide_tun")
                     }),
                     room,
                     switch("system-wide", self.s.system_wide, &t).on_click(cx.listener(|this, _, _, cx| {
@@ -362,8 +365,8 @@ impl Hitori {
                 .chain(mode)
                 .chain([
                     row(
-                        "Connect on startup",
-                        Some("Connect as soon as the app starts."),
+                        t!("overlays.connection.startup"),
+                        Some(t!("overlays.connection.startup_hint")),
                         room,
                         switch("startup", self.s.auto_connect, &t).on_click(cx.listener(|this, _, _, cx| {
                             this.s.auto_connect = !this.s.auto_connect;
@@ -373,13 +376,13 @@ impl Hitori {
                         window,
                     ),
                     row(
-                        "Kill switch",
+                        t!("overlays.connection.kill_switch"),
                         Some(if !self.s.system_wide {
-                            "Needs system-wide mode."
+                            t!("overlays.connection.kill_switch_needs_system_wide")
                         } else if crate::os::SYSTEM_PROXY && !self.s.tun {
-                            "Needs TUN mode."
+                            t!("overlays.connection.kill_switch_needs_tun")
                         } else {
-                            "Block all traffic while the tunnel is down."
+                            t!("overlays.connection.kill_switch_hint")
                         }),
                         room,
                         switch("kill-switch", self.s.kill_switch, &t).on_click(cx.listener(|this, _, _, cx| {
@@ -399,7 +402,7 @@ impl Hitori {
         use crate::xray::{DNS_PRESETS, DnsMode};
         let t = self.theme(cx);
         let dns = self.s.dns.clone();
-        let modes = [(DnsMode::Subscription, "Subscription"), (DnsMode::Https, "HTTPS"), (DnsMode::Tls, "TLS")];
+        let modes = [(DnsMode::Subscription, t!("overlays.dns.subscription")), (DnsMode::Https, "HTTPS"), (DnsMode::Tls, "TLS")];
         let width = segmented_width(modes.iter().map(|(_, l)| *l), window);
         let items = modes
             .into_iter()
@@ -409,11 +412,11 @@ impl Hitori {
             })
             .collect();
         let hint = match dns.mode {
-            DnsMode::Subscription => "The servers your subscription sets.",
-            DnsMode::Https => "Encrypted DNS over HTTPS.",
-            DnsMode::Tls => "Encrypted DNS over TLS.",
+            DnsMode::Subscription => t!("overlays.dns.subscription_hint"),
+            DnsMode::Https => t!("overlays.dns.https_hint"),
+            DnsMode::Tls => t!("overlays.dns.tls_hint"),
         };
-        let mut rows = vec![row("Servers", Some(hint), page_room(cw, width), self.segmented("dns-mode", items, cx), &t, window)];
+        let mut rows = vec![row(t!("overlays.dns.servers"), Some(hint), page_room(cw, width), self.segmented("dns-mode", items, cx), &t, window)];
         if dns.mode != DnsMode::Subscription {
             let tls = dns.mode == DnsMode::Tls;
             let typed = self.dns_input.read(cx).content.trim().to_owned();
@@ -429,19 +432,19 @@ impl Hitori {
                     (name.to_owned(), typed == if tls { dot } else { https }, Box::new(pick) as Pick)
                 })
                 .collect();
-            rows.push(row("Provider", Some("Or type another server below."), page_room(cw, width), self.segmented("dns-preset", presets, cx), &t, window));
+            rows.push(row(t!("overlays.dns.provider"), Some(t!("overlays.dns.provider_hint")), page_room(cw, width), self.segmented("dns-preset", presets, cx), &t, window));
             let error = self.typed_dns(cx).err();
             let hint = match (&error, tls) {
                 (Some(e), _) => format!("{e}."),
-                (None, false) => "With an IP address in the URL no lookup is needed first.".to_owned(),
-                (None, true) => "A host or host:port, port 853 if none is given.".to_owned(),
+                (None, false) => t!("overlays.dns.https_server_hint").to_owned(),
+                (None, true) => t!("overlays.dns.tls_server_hint").to_owned(),
             };
-            rows.push(row("Server", Some(&hint), page_room(cw, 260.), text_field("dns-server", &self.dns_input, 260., error.is_some(), &t, cx), &t, window));
+            rows.push(row(t!("overlays.dns.server"), Some(&hint), page_room(cw, 260.), text_field("dns-server", &self.dns_input, 260., error.is_some(), &t, cx), &t, window));
         }
         let direct = dns.direct;
         rows.push(row(
-            "Through the VPN",
-            Some(if direct { "Queries leave from this computer directly." } else { "Queries go through the tunnel, unseen by your network." }),
+            t!("overlays.dns.through_vpn"),
+            Some(if direct { t!("overlays.dns.direct_hint") } else { t!("overlays.dns.tunnel_hint") }),
             page_room(cw, 32.),
             switch("dns-direct", !direct, &t).on_click(cx.listener(move |this, _, _, cx| {
                 this.s.dns.direct = !direct;
@@ -450,7 +453,7 @@ impl Hitori {
             &t,
             window,
         ));
-        page_section("DNS", &t, rows)
+        page_section(t!("overlays.dns.title"), &t, rows)
     }
 
     /// Local proxy and DNS.
@@ -475,14 +478,15 @@ impl Hitori {
             })
             .collect();
         let listen_hint = match listen.as_str() {
-            "127.0.0.1" => "Only apps on this computer can connect.".to_owned(),
-            "0.0.0.0" => "Any network this computer is on. Anyone there can use your VPN.".to_owned(),
-            ip if Some(ip) == lan.as_deref() => "Devices on your network can connect. Anyone there can use your VPN.".to_owned(),
-            ip => format!("{ip} is from another network."),
+            "127.0.0.1" => t!("overlays.network.listen_loopback").to_owned(),
+            "0.0.0.0" => t!("overlays.network.listen_any").to_owned(),
+            ip if Some(ip) == lan.as_deref() => t!("overlays.network.listen_lan").to_owned(),
+            ip => t!("overlays.network.listen_other", ip = ip),
         };
         let error = self.ports_error(cx);
-        let socks_bad = crate::app::port(&self.socks_input, cx).is_none() || error.as_deref().is_some_and(|e| e.contains("different"));
-        let http_bad = crate::app::port(&self.http_input, cx).is_none() || error.as_deref().is_some_and(|e| e.contains("different"));
+        let (socks, http) = (crate::app::port(&self.socks_input, cx), crate::app::port(&self.http_input, cx));
+        let same = socks.is_some() && socks == http;
+        let (socks_bad, http_bad) = (socks.is_none() || same, http.is_none() || same);
         let caption = |s: &str| div().sm().text_color(t.muted_fg).child(s.to_owned());
         let ports = div()
             .flex()
@@ -496,20 +500,20 @@ impl Hitori {
         let p = &self.s.proxy;
         let ports_hint = match error {
             Some(e) => format!("{e}."),
-            None if self.s.uses_tun() => "Not used while every app goes through the TUN.".to_owned(),
-            None => format!("Apps connect to SOCKS5 {0}:{1} and HTTP {0}:{2}.", p.host(), p.socks, p.http),
+            None if self.s.uses_tun() => t!("overlays.network.ports_tun").to_owned(),
+            None => t!("overlays.network.ports_hint", host = p.host(), socks = p.socks, http = p.http),
         };
         vec![
             page_section(
-                "Local proxy",
+                t!("overlays.network.local_proxy"),
                 &t,
                 vec![
-                    row("Listen on", Some(&listen_hint), page_room(cw, width), self.segmented("listen", items, cx), &t, window),
-                    row("Ports", Some(&ports_hint), page_room(cw, ports_w), ports, &t, window),
+                    row(t!("overlays.network.listen_on"), Some(&listen_hint), page_room(cw, width), self.segmented("listen", items, cx), &t, window),
+                    row(t!("overlays.network.ports"), Some(&ports_hint), page_room(cw, ports_w), ports, &t, window),
                 ],
             ),
             self.dns_section(cw, window, cx),
-            div().px(px(4.)).sm().text_color(t.muted_fg).child("Changes apply on the next connection.").into_any_element(),
+            div().px(px(4.)).sm().text_color(t.muted_fg).child(t!("overlays.network.apply")).into_any_element(),
         ]
     }
 
@@ -519,12 +523,12 @@ impl Hitori {
         let r = &self.s.region;
         let busy = r.status == crate::region::Status::Computing;
         let hint = match (&r.country, &r.status) {
-            (Some(_), crate::region::Status::Failed(e)) if r.domains + r.subnets > 0 => format!("{} · {e}. The saved lists still apply.", r.place()),
-            (Some(_), crate::region::Status::Failed(e)) => format!("{} · {e}.", r.place()),
+            (Some(_), crate::region::Status::Failed(e)) if r.domains + r.subnets > 0 => t!("overlays.region.failed_saved", place = r.place(), error = e),
+            (Some(_), crate::region::Status::Failed(e)) => t!("overlays.region.failed", place = r.place(), error = e),
             (Some(_), _) => format!("{} · {}", r.place(), r.line()),
             (None, _) => r.line(),
         };
-        let label = if busy { "Checking…" } else { "Recheck" };
+        let label = if busy { t!("overlays.region.checking") } else { t!("overlays.region.recheck") };
         let w = 2. + 24. + 16. + 8. + crate::ui::text_width(label, 14., gpui::FontWeight::MEDIUM, window);
         let button = button("region-recheck", Variant::Outline, Size::Sm, true, &t)
             .when(busy, |b| b.opacity(0.5))
@@ -535,19 +539,51 @@ impl Hitori {
                     this.recheck_region(cx);
                 }
             }));
-        row("Detected location", Some(&hint), page_room(cw, w), button, &t, window)
+        row(t!("overlays.region.detected"), Some(&hint), page_room(cw, w), button, &t, window)
+    }
+
+    /// System, English, Русский: switches every window and the tray right away.
+    fn language_row(&self, cw: f32, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let t = self.theme(cx);
+        let choices: Vec<(Option<crate::i18n::Lang>, &str)> =
+            std::iter::once((None, t!("overlays.settings.language_system"))).chain(crate::i18n::Lang::ALL.map(|l| (Some(l), l.name()))).collect();
+        let n = choices.len();
+        let mut group = div().flex().bg(t.background).rounded(px(MD)).p(px(4.));
+        for (i, (choice, label)) in choices.iter().copied().enumerate() {
+            let (muted, muted_fg) = (t.muted, t.muted_fg);
+            let on = self.s.language == choice;
+            group = group.child(
+                div()
+                    .id(SharedString::from(format!("language-{}", choice.map_or("system", |l| l.code()))))
+                    .h(px(32.))
+                    .px(px(12.))
+                    .flex()
+                    .items_center()
+                    .sm()
+                    .medium()
+                    .cursor_pointer()
+                    .when(i == 0, |d| d.rounded_l(px(MD)))
+                    .when(i == n - 1, |d| d.rounded_r(px(MD)))
+                    .when(on, |d| d.bg(t.accent))
+                    .when(!on, |d| d.hover(move |s| s.bg(muted).text_color(muted_fg)))
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_language(choice, cx)))
+                    .child(label),
+            );
+        }
+        let w = 8. + choices.iter().map(|(_, l)| crate::ui::text_width(l, 14., gpui::FontWeight::MEDIUM, window) + 24.).sum::<f32>();
+        row(t!("overlays.settings.language_row"), Some(t!("overlays.settings.language_hint")), page_room(cw, w), group, &t, window)
     }
 
     /// Windows and macOS: how system-wide mode works, the system proxy or a TUN.
     fn mode_row(&self, cw: f32, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let t = self.theme(cx);
-        let modes = [(false, "System proxy"), (true, "TUN")];
+        let modes = [(false, t!("overlays.mode.system_proxy")), (true, "TUN")];
         let mut group = div().flex().bg(t.background).rounded(px(MD)).p(px(4.));
         for (i, (tun, label)) in modes.into_iter().enumerate() {
             let (muted, muted_fg) = (t.muted, t.muted_fg);
             group = group.child(
                 div()
-                    .id(SharedString::from(format!("mode-{label}")))
+                    .id(SharedString::from(format!("mode-{tun}")))
                     .h(px(32.))
                     .px(px(12.))
                     .flex()
@@ -568,11 +604,11 @@ impl Hitori {
         }
         let w = 8. + modes.iter().map(|(_, l)| crate::ui::text_width(l, 14., gpui::FontWeight::MEDIUM, window) + 24.).sum::<f32>();
         let hint = match (self.s.tun, cfg!(windows)) {
-            (false, _) => "Browsers and most apps, no administrator rights.",
-            (true, true) => "Every app and DNS. Asks for administrator rights.",
-            (true, false) => "Every app and DNS. Asks for your password.",
+            (false, _) => t!("overlays.mode.proxy_hint"),
+            (true, true) => t!("overlays.mode.tun_hint_windows"),
+            (true, false) => t!("overlays.mode.tun_hint"),
         };
-        row("Mode", Some(hint), page_room(cw, w), group, &t, window)
+        row(t!("overlays.mode.title"), Some(hint), page_room(cw, w), group, &t, window)
     }
 
     pub fn sign_in_body(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -603,11 +639,11 @@ impl Hitori {
                 div().flex().child(
                     button("signin", Variant::Default, Size::Default, false, &t)
                         .when(busy, |b| b.opacity(0.5))
-                        .child(if busy { "Signing in…" } else { "Sign in" })
+                        .child(if busy { t!("overlays.signin.busy") } else { t!("overlays.signin.button") })
                         .on_click(cx.listener(|this, _, window, cx| this.sign_in(window, cx))),
                 ),
             )
-            .child(div().xs().text_color(t.muted_fg).child("The link stays on this computer; it is the only key to your subscription."))
+            .child(div().xs().text_color(t.muted_fg).child(t!("overlays.signin.note")))
             .into_any_element()
     }
 
@@ -617,11 +653,11 @@ impl Hitori {
         }
         let t = self.theme(cx);
         let a = self.s.account.clone().unwrap_or_default();
-        let days = a.days_left.map_or("—".to_owned(), |d| format!("{d} days"));
-        let renews = a.expires.clone().map(|d| format!("until {d}")).unwrap_or_default();
+        let days = a.days_left.map_or("—".to_owned(), |d| t!("overlays.account.days", n = d));
+        let renews = a.expires.clone().map(|d| t!("overlays.account.until", date = d)).unwrap_or_default();
         // Days of a 30-day period, or the traffic allowance when there is one.
         let fill = if a.limit > 0 { 1. - (a.used as f32 / a.limit as f32).min(1.) } else { a.days_left.map_or(0., |d| (d as f32 / 30.).min(1.)) };
-        let traffic = if a.limit > 0 { format!("{} of {} used", data::bytes(a.used), data::bytes(a.limit)) } else { format!("{} used · no traffic limit", data::bytes(a.used)) };
+        let traffic = if a.limit > 0 { t!("overlays.account.used_of", used = data::bytes(a.used), limit = data::bytes(a.limit)) } else { t!("overlays.account.used_unlimited", used = data::bytes(a.used)) };
         let support = a.support.clone();
         let profile = self.s.user.as_ref().map(|u| {
             div()
@@ -639,7 +675,7 @@ impl Hitori {
                         .flex()
                         .flex_col()
                         .child(div().base().semibold().truncate().child(u.name.clone()))
-                        .child(div().sm().text_color(t.muted_fg).truncate().child(u.username.as_ref().map_or("Telegram account".into(), |n| format!("@{n}")))),
+                        .child(div().sm().text_color(t.muted_fg).truncate().child(u.username.as_ref().map_or(t!("overlays.account.telegram_account").into(), |n| format!("@{n}")))),
                 )
                 .child(badge_secondary("Telegram", &t))
         });
@@ -656,14 +692,14 @@ impl Hitori {
                     .flex()
                     .items_start()
                     .gap(px(8.))
-                    .child(div().flex_1().flex().flex_col().gap(px(8.)).child(div().sm().text_color(t.muted_fg).child("Plan")).child(div().text_px(24., 32.).semibold().child(a.plan())))
+                    .child(div().flex_1().flex().flex_col().gap(px(8.)).child(div().sm().text_color(t.muted_fg).child(t!("overlays.account.plan"))).child(div().text_px(24., 32.).semibold().child(a.plan())))
                     .child(div().flex().flex_col().items_end().child(div().xl().semibold().child(days)).child(div().xs().text_color(t.muted_fg).child(renews))),
             )
             .child(div().px(px(24.)).flex().flex_col().gap(px(8.)).child(progress(fill, &t)).child(div().xs().text_color(t.muted_fg).child(traffic)))
             .children(support.map(|url| {
                 div().px(px(24.)).flex().items_center().child(
                     button("extend", Variant::Default, Size::Default, false, &t)
-                        .child("Extend subscription")
+                        .child(t!("overlays.account.extend"))
                         .on_click(move |_, _, cx| cx.open_url(&url)),
                 )
             }));
@@ -674,8 +710,8 @@ impl Hitori {
             .p(px(16.))
             .sm()
             .child(div().h(px(44.)).flex().items_start().child(icon("laptop", 20., t.muted_fg)))
-            .child(div().flex_1().flex().flex_col().gap(px(4.)).child(div().sm().medium().child(crate::sub::hostname())).child(div().sm().text_color(t.muted_fg).child(format!("{} desktop", crate::sub::OS))))
-            .child(badge_secondary("This device", &t))
+            .child(div().flex_1().flex().flex_col().gap(px(4.)).child(div().sm().medium().child(crate::sub::hostname())).child(div().sm().text_color(t.muted_fg).child(t!("overlays.account.desktop", os = crate::sub::OS))))
+            .child(badge_secondary(t!("overlays.account.this_device"), &t))
             .into_any_element();
         div()
             .flex()
@@ -683,21 +719,21 @@ impl Hitori {
             .gap(px(24.))
             .children(profile)
             .child(card)
-            .child(section("Devices".into(), &t, vec![device]))
+            .child(section(t!("overlays.account.devices").into(), &t, vec![device]))
             .child(section(
-                "Session".into(),
+                t!("overlays.account.session").into(),
                 &t,
                 vec![row(
-                    "Sign out",
+                    t!("overlays.account.sign_out"),
                     Some(if self.s.user.is_some() {
-                        "Signs this computer out of your Telegram account; the tunnel stops."
+                        t!("overlays.account.sign_out_telegram")
                     } else {
-                        "Forgets the subscription link on this computer; the tunnel stops."
+                        t!("overlays.account.sign_out_link")
                     }),
-                    hint_room(2. + 24. + 16. + 8. + crate::ui::text_width("Sign out", 14., gpui::FontWeight::MEDIUM, window)),
+                    hint_room(2. + 24. + 16. + 8. + crate::ui::text_width(t!("overlays.account.sign_out"), 14., gpui::FontWeight::MEDIUM, window)),
                     button("signout", Variant::Outline, Size::Sm, true, &t)
                         .child(icon("log-out", 16., t.foreground))
-                        .child("Sign out")
+                        .child(t!("overlays.account.sign_out"))
                         .on_click(cx.listener(|this, _, _, cx| this.sign_out(cx))),
                     &t,
                     window,
@@ -722,7 +758,7 @@ impl Hitori {
                 div().flex().child(
                     button("log-copy", Variant::Outline, Size::Sm, true, &t)
                         .child(icon("copy", 16., t.foreground))
-                        .child("Copy")
+                        .child(t!("overlays.log.copy"))
                         .on_click(move |_, _, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()))),
                 ),
             )
@@ -736,7 +772,7 @@ impl Hitori {
                     .bg(t.muted.opacity(0.5))
                     .xs()
                     .text_color(t.muted_fg)
-                    .when(empty, |d| d.child("No core output yet."))
+                    .when(empty, |d| d.child(t!("overlays.log.empty")))
                     .children(lines.into_iter().map(|l| div().child(l))),
             )
             .into_any_element()
@@ -760,7 +796,7 @@ impl Hitori {
                         .flex()
                         .flex_col()
                         .gap(px(8.))
-                        .child(heading(format!("Suggestions · {}", suggestions.len())))
+                        .child(heading(t!("overlays.routes.suggestions", count = suggestions.len())))
                         .children(suggestions.iter().map(|s| self.suggestion_card(s, false, cx).into_any_element())),
                 )
             })
@@ -769,11 +805,11 @@ impl Hitori {
                     .flex()
                     .flex_col()
                     .gap(px(8.))
-                    .child(div().mr(px(-4.)).h(px(32.)).flex().items_center().justify_between().child(heading(format!("Apps · {}", self.s.app_routes.len()))).child(self.add_app(cx)))
+                    .child(div().mr(px(-4.)).h(px(32.)).flex().items_center().justify_between().child(heading(t!("overlays.routes.apps", count = self.s.app_routes.len()))).child(self.add_app(cx)))
                     .child(self.active_rules(true, false, Place::Sheet, window, cx)),
             )
-            .child(div().flex().flex_col().gap(px(8.)).child(heading(format!("Sites · {}", self.s.sites.len()))).child(self.site_field(cx)).when(!self.s.sites.is_empty(), |d| d.child(sites)))
-            .child(div().xs().text_color(t.muted_fg).child(format!("Everything else: {} · {}.", self.s.default_route.label(), self.s.default_route.default_hint().to_lowercase())))
+            .child(div().flex().flex_col().gap(px(8.)).child(heading(t!("overlays.routes.sites", count = self.s.sites.len()))).child(self.site_field(cx)).when(!self.s.sites.is_empty(), |d| d.child(sites)))
+            .child(div().xs().text_color(t.muted_fg).child(t!("overlays.routes.everything_else", route = self.s.default_route.label(), hint = self.s.default_route.default_hint().to_lowercase())))
             .into_any_element()
     }
 }

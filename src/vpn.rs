@@ -71,6 +71,8 @@ pub struct Shared {
     pub dismissed: Vec<String>,
     pub rules_big: bool,
     pub dark: bool,
+    /// Chosen UI language; `None` follows the system.
+    pub language: Option<crate::i18n::Lang>,
     pub signed_in: bool,
     /// Signed in with Telegram: name and avatar.
     pub user: Option<auth::User>,
@@ -140,6 +142,7 @@ impl Shared {
             proxy: self.proxy.clone(),
             dns: self.dns.clone(),
             dark: self.dark,
+            language: self.language.map_or("system", |l| l.code()).into(),
             rules_big: self.rules_big,
             apps: self.app_routes.iter().map(|(a, r)| Rule::from_app(a, r)).collect(),
             sites: self.sites.iter().map(|(t, r)| Rule::from_app(t, r)).collect(),
@@ -263,6 +266,7 @@ impl Vpn {
             dismissed: saved.dismissed.clone(),
             rules_big: saved.rules_big,
             dark: saved.dark,
+            language: crate::i18n::Lang::parse(&saved.language),
             signed_in: login.is_some() || session.is_some(),
             user: session.as_ref().map(|s| s.user.clone()),
             avatar: None,
@@ -455,7 +459,7 @@ impl Vpn {
                 store::save(&Location::path(), &l, false);
                 self.location = Some(l);
                 self.set_region_lists(&found.lists, cx);
-                if found.missing { region::Status::Failed(format!("Cannot download the lists for {}", self.s.region.place())) } else { region::Status::Ready }
+                if found.missing { region::Status::Failed(t!("vpn.region.cannot_download", place = self.s.region.place())) } else { region::Status::Ready }
             }
             Ok(_) => region::Status::Ready,
             Err(e) => region::Status::Failed(e),
@@ -902,7 +906,7 @@ impl Vpn {
     /// Connect, or move the running connection to the current server and rules.
     pub fn connect(&mut self, cx: &mut Context<Self>) {
         if !self.s.signed_in || !data::has_server(self.s.server_id) {
-            self.s.error = Some(if self.s.signed_in { "No server to connect to".into() } else { "Sign in to connect".into() });
+            self.s.error = Some(if self.s.signed_in { t!("vpn.error.no_server").into() } else { t!("vpn.error.sign_in_to_connect").into() });
             cx.notify();
             return;
         }
@@ -1017,7 +1021,7 @@ impl Vpn {
             self.ticker = None;
             self.s.conn = Conn::Off;
             self.s.connected_at = None;
-            self.s.error = Some(format!("Connection lost{}", why.map(|w| format!(": {w}")).unwrap_or_default()));
+            self.s.error = Some(why.map_or_else(|| t!("vpn.error.connection_lost").into(), |w| t!("vpn.error.connection_lost_why", why = w)));
             cx.notify();
         }
         None

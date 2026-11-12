@@ -1,4 +1,6 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+#[macro_use]
+mod i18n;
 mod app;
 mod apps;
 mod auth;
@@ -126,7 +128,9 @@ fn main() {
             .filter_map(|w| Assets::get(&format!("fonts/GoogleSans-{w}.ttf")).map(|f| f.data))
             .collect();
         cx.text_system().add_fonts(fonts).expect("fonts");
-        let dark = store::load::<store::Settings>(&store::Settings::path()).unwrap_or_default().dark;
+        let settings = store::load::<store::Settings>(&store::Settings::path()).unwrap_or_default();
+        i18n::set(i18n::resolve(i18n::Lang::parse(&settings.language)));
+        let dark = settings.dark;
         cx.set_global(if dark { theme::Theme::dark() } else { theme::Theme::light() });
         cx.bind_keys(app::bindings());
         cx.bind_keys(input::bindings());
@@ -154,7 +158,7 @@ fn main() {
             .detach();
             cx.on_action(|_: &Quit, cx| cx.quit());
             cx.bind_keys([gpui::KeyBinding::new("cmd-q", Quit, None)]);
-            cx.set_menus(vec![gpui::Menu { name: "Hitori VPN".into(), items: vec![gpui::MenuItem::action("Quit Hitori VPN", Quit)] }]);
+            set_menus(cx);
         }
         if tray_only {
             tray::open_window(Variant::Tray, None, cx);
@@ -167,6 +171,11 @@ fn main() {
             smoke_test(cx);
         }
     });
+}
+
+#[cfg(target_os = "macos")]
+pub fn set_menus(cx: &mut App) {
+    cx.set_menus(vec![gpui::Menu { name: t!("app.title").into(), items: vec![gpui::MenuItem::action(t!("app.quit_app"), Quit)] }]);
 }
 
 /// The main window opened and keeps drawing frames: exit 0 after a few seconds, 2 if it never opened or closed early.

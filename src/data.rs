@@ -73,8 +73,18 @@ impl Server {
     }
 }
 
-static NONE: LazyLock<Server> =
-    LazyLock::new(|| Server { id: "none", country: "No servers", code: "", city: "Sign in to connect", ip: "", lat: 52., lon: 30., variants: vec![] });
+/// Stand-in while there are no servers, in the current language.
+fn none() -> &'static Server {
+    static ALL: Mutex<Vec<&'static Server>> = Mutex::new(Vec::new());
+    let (country, city) = (t!("data.none.country"), t!("data.none.city"));
+    let mut all = ALL.lock().unwrap();
+    if let Some(s) = all.iter().find(|s| s.country == country && s.city == city) {
+        return s;
+    }
+    let s: &'static Server = Box::leak(Box::new(Server { id: "none", country, code: "", city, ip: "", lat: 52., lon: 30., variants: vec![] }));
+    all.push(s);
+    s
+}
 static SERVERS: RwLock<Vec<&'static Server>> = RwLock::new(Vec::new());
 static NUMBERS: LazyLock<RwLock<HashMap<&'static str, u16>>> = LazyLock::new(Default::default);
 /// Last latency test result per server; `None` when it timed out.
@@ -113,7 +123,7 @@ fn numbers(ids: &[&'static str]) -> HashMap<&'static str, u16> {
 
 pub fn server(id: &str) -> &'static Server {
     let all = SERVERS.read().unwrap();
-    all.iter().find(|s| s.id == id).copied().or_else(|| all.first().copied()).unwrap_or(&NONE)
+    all.iter().find(|s| s.id == id).copied().or_else(|| all.first().copied()).unwrap_or_else(none)
 }
 
 pub fn has_server(id: &str) -> bool {
@@ -130,6 +140,19 @@ pub fn learn_exit(id: &str, ip: &str, city: Option<&str>, lat: f64, lon: f64) {
             return;
         }
         *slot = Box::leak(Box::new(Server { ip: intern(ip), city, lat, lon, variants: s.variants.clone(), ..*s }));
+    }
+}
+
+/// Country names in the current language, after it changes.
+pub fn relabel() {
+    let mut all = SERVERS.write().unwrap();
+    for slot in all.iter_mut() {
+        let s = *slot;
+        if let Some((country, ..)) = country(s.code)
+            && country != s.country
+        {
+            *slot = Box::leak(Box::new(Server { country, variants: s.variants.clone(), ..*s }));
+        }
     }
 }
 
@@ -171,7 +194,7 @@ pub fn by_latency(list: &mut [&'static Server]) {
 /// Lowest measured ping; the first server until something is measured.
 pub fn fastest() -> &'static Server {
     let all = servers();
-    all.iter().filter_map(|s| ping(s.id).map(|p| (p, *s))).min_by_key(|(p, _)| *p).map(|(_, s)| s).or_else(|| all.first().copied()).unwrap_or(&NONE)
+    all.iter().filter_map(|s| ping(s.id).map(|p| (p, *s))).min_by_key(|(p, _)| *p).map(|(_, s)| s).or_else(|| all.first().copied()).unwrap_or_else(none)
 }
 
 /// A country's best server: lowest measured ping, then lowest load among the ones that did not time out.
@@ -185,58 +208,58 @@ pub fn best_in(code: &str) -> &'static str {
             None => (1, 0, loads.get(s.id).copied().unwrap_or(100)),
             Some(None) => (2, 0, 0),
         })
-        .map_or(NONE.id, |s| s.id)
+        .map_or("none", |s| s.id)
 }
 
-/// English name and capital of the countries nodes are likely to be in, for the list and the map before an exit is seen.
+/// Name and capital of the countries nodes are likely to be in, for the list and the map before an exit is seen.
 pub fn country(code: &str) -> Option<(&'static str, f64, f64)> {
     Some(match code {
-        "AE" => ("United Arab Emirates", 24.45, 54.38),
-        "AM" => ("Armenia", 40.18, 44.51),
-        "AT" => ("Austria", 48.21, 16.37),
-        "AU" => ("Australia", -33.87, 151.21),
-        "BE" => ("Belgium", 50.85, 4.35),
-        "BG" => ("Bulgaria", 42.70, 23.32),
-        "BR" => ("Brazil", -23.55, -46.63),
-        "BY" => ("Belarus", 53.90, 27.57),
-        "CA" => ("Canada", 43.65, -79.38),
-        "CH" => ("Switzerland", 47.37, 8.54),
-        "CZ" => ("Czechia", 50.08, 14.44),
-        "DE" => ("Germany", 50.11, 8.68),
-        "DK" => ("Denmark", 55.68, 12.57),
-        "EE" => ("Estonia", 59.44, 24.75),
-        "ES" => ("Spain", 40.42, -3.70),
-        "FI" => ("Finland", 60.17, 24.94),
-        "FR" => ("France", 48.86, 2.35),
-        "GB" => ("United Kingdom", 51.51, -0.13),
-        "GE" => ("Georgia", 41.72, 44.79),
-        "GR" => ("Greece", 37.98, 23.73),
-        "HK" => ("Hong Kong", 22.32, 114.17),
-        "HU" => ("Hungary", 47.50, 19.04),
-        "IE" => ("Ireland", 53.35, -6.26),
-        "IL" => ("Israel", 32.09, 34.78),
-        "IN" => ("India", 19.08, 72.88),
-        "IS" => ("Iceland", 64.15, -21.94),
-        "IT" => ("Italy", 45.46, 9.19),
-        "JP" => ("Japan", 35.68, 139.69),
-        "KR" => ("South Korea", 37.57, 126.98),
-        "KZ" => ("Kazakhstan", 43.24, 76.89),
-        "LT" => ("Lithuania", 54.69, 25.28),
-        "LU" => ("Luxembourg", 49.61, 6.13),
-        "LV" => ("Latvia", 56.95, 24.11),
-        "MD" => ("Moldova", 47.01, 28.86),
-        "NL" => ("Netherlands", 52.37, 4.90),
-        "NO" => ("Norway", 59.91, 10.75),
-        "PL" => ("Poland", 52.23, 21.01),
-        "PT" => ("Portugal", 38.72, -9.14),
-        "RO" => ("Romania", 44.43, 26.10),
-        "RS" => ("Serbia", 44.79, 20.45),
-        "RU" => ("Russia", 55.76, 37.62),
-        "SE" => ("Sweden", 59.33, 18.07),
-        "SG" => ("Singapore", 1.35, 103.82),
-        "TR" => ("Turkey", 41.01, 28.98),
-        "UA" => ("Ukraine", 50.45, 30.52),
-        "US" => ("United States", 40.71, -74.01),
+        "AE" => (t!("data.country.ae"), 24.45, 54.38),
+        "AM" => (t!("data.country.am"), 40.18, 44.51),
+        "AT" => (t!("data.country.at"), 48.21, 16.37),
+        "AU" => (t!("data.country.au"), -33.87, 151.21),
+        "BE" => (t!("data.country.be"), 50.85, 4.35),
+        "BG" => (t!("data.country.bg"), 42.70, 23.32),
+        "BR" => (t!("data.country.br"), -23.55, -46.63),
+        "BY" => (t!("data.country.by"), 53.90, 27.57),
+        "CA" => (t!("data.country.ca"), 43.65, -79.38),
+        "CH" => (t!("data.country.ch"), 47.37, 8.54),
+        "CZ" => (t!("data.country.cz"), 50.08, 14.44),
+        "DE" => (t!("data.country.de"), 50.11, 8.68),
+        "DK" => (t!("data.country.dk"), 55.68, 12.57),
+        "EE" => (t!("data.country.ee"), 59.44, 24.75),
+        "ES" => (t!("data.country.es"), 40.42, -3.70),
+        "FI" => (t!("data.country.fi"), 60.17, 24.94),
+        "FR" => (t!("data.country.fr"), 48.86, 2.35),
+        "GB" => (t!("data.country.gb"), 51.51, -0.13),
+        "GE" => (t!("data.country.ge"), 41.72, 44.79),
+        "GR" => (t!("data.country.gr"), 37.98, 23.73),
+        "HK" => (t!("data.country.hk"), 22.32, 114.17),
+        "HU" => (t!("data.country.hu"), 47.50, 19.04),
+        "IE" => (t!("data.country.ie"), 53.35, -6.26),
+        "IL" => (t!("data.country.il"), 32.09, 34.78),
+        "IN" => (t!("data.country.in"), 19.08, 72.88),
+        "IS" => (t!("data.country.is"), 64.15, -21.94),
+        "IT" => (t!("data.country.it"), 45.46, 9.19),
+        "JP" => (t!("data.country.jp"), 35.68, 139.69),
+        "KR" => (t!("data.country.kr"), 37.57, 126.98),
+        "KZ" => (t!("data.country.kz"), 43.24, 76.89),
+        "LT" => (t!("data.country.lt"), 54.69, 25.28),
+        "LU" => (t!("data.country.lu"), 49.61, 6.13),
+        "LV" => (t!("data.country.lv"), 56.95, 24.11),
+        "MD" => (t!("data.country.md"), 47.01, 28.86),
+        "NL" => (t!("data.country.nl"), 52.37, 4.90),
+        "NO" => (t!("data.country.no"), 59.91, 10.75),
+        "PL" => (t!("data.country.pl"), 52.23, 21.01),
+        "PT" => (t!("data.country.pt"), 38.72, -9.14),
+        "RO" => (t!("data.country.ro"), 44.43, 26.10),
+        "RS" => (t!("data.country.rs"), 44.79, 20.45),
+        "RU" => (t!("data.country.ru"), 55.76, 37.62),
+        "SE" => (t!("data.country.se"), 59.33, 18.07),
+        "SG" => (t!("data.country.sg"), 1.35, 103.82),
+        "TR" => (t!("data.country.tr"), 41.01, 28.98),
+        "UA" => (t!("data.country.ua"), 50.45, 30.52),
+        "US" => (t!("data.country.us"), 40.71, -74.01),
         _ => return None,
     })
 }
@@ -389,10 +412,10 @@ impl RuleMode {
 
     pub fn label(self) -> &'static str {
         match self {
-            RuleMode::Auto => "Auto",
-            RuleMode::Vpn => "VPN",
-            RuleMode::Direct => "Direct",
-            RuleMode::Block => "Block",
+            RuleMode::Auto => t!("data.mode.auto"),
+            RuleMode::Vpn => t!("data.mode.vpn"),
+            RuleMode::Direct => t!("data.mode.direct"),
+            RuleMode::Block => t!("data.mode.block"),
         }
     }
 
@@ -413,10 +436,10 @@ impl RuleMode {
     /// As the default route.
     pub fn default_hint(self) -> &'static str {
         match self {
-            RuleMode::Auto => "Direct first, VPN when it fails",
-            RuleMode::Vpn => "Everything through the VPN",
-            RuleMode::Direct => "Only your rules use the VPN",
-            RuleMode::Block => "Only apps and sites you allow",
+            RuleMode::Auto => t!("data.mode_hint.auto"),
+            RuleMode::Vpn => t!("data.mode_hint.vpn"),
+            RuleMode::Direct => t!("data.mode_hint.direct"),
+            RuleMode::Block => t!("data.mode_hint.block"),
         }
     }
 }
@@ -499,12 +522,12 @@ impl Account {
         if !self.active {
             return title_case(&self.status);
         }
-        if self.title.is_empty() { "Active".into() } else { self.title.clone() }
+        if self.title.is_empty() { t!("data.plan_active").into() } else { self.title.clone() }
     }
 
     pub fn summary(&self) -> String {
         match self.days_left {
-            Some(d) => format!("{} · {d} days left", self.plan()),
+            Some(d) => t!("data.days_left", n = d, plan = self.plan()),
             None => self.plan(),
         }
     }
@@ -518,25 +541,28 @@ fn title_case(s: &str) -> String {
 
 /// `2029-02-04T13:30:14Z` → `4 Feb 2029`.
 pub fn date(iso: &str) -> Option<String> {
-    const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    let months = [
+        t!("data.month.jan"), t!("data.month.feb"), t!("data.month.mar"), t!("data.month.apr"), t!("data.month.may"), t!("data.month.jun"),
+        t!("data.month.jul"), t!("data.month.aug"), t!("data.month.sep"), t!("data.month.oct"), t!("data.month.nov"), t!("data.month.dec"),
+    ];
     let mut parts = iso.get(..10)?.split('-');
     let (y, m, d): (u32, usize, u32) = (parts.next()?.parse().ok()?, parts.next()?.parse().ok()?, parts.next()?.parse().ok()?);
-    Some(format!("{d} {} {y}", MONTHS.get(m.checked_sub(1)?)?))
+    Some(t!("data.date", day = d, month = months.get(m.checked_sub(1)?)?, year = y))
 }
 
 pub fn bytes(n: u64) -> String {
-    let units = ["B", "KB", "MB", "GB", "TB"];
+    let units = [t!("data.unit.b"), t!("data.unit.kb"), t!("data.unit.mb"), t!("data.unit.gb"), t!("data.unit.tb")];
     let mut v = n as f64;
     let mut i = 0;
     while v >= 1024. && i < units.len() - 1 {
         v /= 1024.;
         i += 1;
     }
-    if i == 0 { format!("{n} B") } else { format!("{v:.1} {}", units[i]) }
+    if i == 0 { format!("{n} {}", units[0]) } else { format!("{v:.1} {}", units[i]) }
 }
 
 pub fn ago(min: u32) -> String {
-    if min == 0 { "now".into() } else if min < 60 { format!("{min}m") } else { format!("{}h", min / 60) }
+    if min == 0 { t!("data.ago.now").into() } else if min < 60 { t!("data.ago.minutes", n = min) } else { t!("data.ago.hours", n = min / 60) }
 }
 
 /// JS-style `String(number)` for one-decimal values: `3` rather than `3.0`.

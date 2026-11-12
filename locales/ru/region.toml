@@ -1,0 +1,18 @@
+thousands_separator = "\u00A0"
+
+[error]
+offline = "Нет подключения к интернету"
+cannot_tell_country = "Не удаётся определить страну"
+checked_while_off = "Регион проверяется только при выключенном VPN"
+
+[place]
+unknown = "Неизвестно"
+
+[summary]
+checking = "Определяем ваш регион…"
+no_list = "Для региона «{place}» нет готового списка; действуют правила провайдера."
+loading = "Загружаем списки заблокированных сайтов…"
+cannot_download = "Не удалось загрузить списки для региона «{place}»."
+line = "{sites} и {subnets} идут через VPN."
+sites = { one = "{count} заблокированный сайт", few = "{count} заблокированных сайта", many = "{count} заблокированных сайтов" }
+subnets = { one = "{count} подсеть", few = "{count} подсети", many = "{count} подсетей" }

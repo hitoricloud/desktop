@@ -38,11 +38,11 @@ pub fn load_tone(pct: u8) -> Hsla {
 
 pub fn route_label(r: &AppRule) -> String {
     match (r.mode, r.exit) {
-        (RuleMode::Vpn, Some(id)) => format!("Exit {}", server(id).country),
-        (RuleMode::Vpn, None) => "Always VPN".into(),
-        (RuleMode::Direct, _) => "Direct".into(),
-        (RuleMode::Block, _) => "Blocked".into(),
-        (RuleMode::Auto, _) => "Auto".into(),
+        (RuleMode::Vpn, Some(id)) => t!("views.route.exit", country = server(id).country),
+        (RuleMode::Vpn, None) => t!("views.route.always_vpn").into(),
+        (RuleMode::Direct, _) => t!("data.mode.direct").into(),
+        (RuleMode::Block, _) => t!("views.route.blocked").into(),
+        (RuleMode::Auto, _) => t!("data.mode.auto").into(),
     }
 }
 
@@ -50,13 +50,23 @@ pub fn subject(s: &Suggestion) -> String {
     if s.scope == Scope::Site || s.app_id.is_empty() { s.target.to_owned() } else { app(s.app_id).name.to_owned() }
 }
 
+fn reason_text(reason: &str) -> String {
+    match reason {
+        crate::suggest::TIMED_OUT => t!("views.reason.timed_out").into(),
+        crate::suggest::RESET => t!("views.reason.reset").into(),
+        crate::suggest::REFUSED => t!("views.reason.refused").into(),
+        crate::suggest::BLOCKED => t!("views.reason.blocked").into(),
+        other => other.to_owned(),
+    }
+}
+
 pub fn suggestion_detail(s: &Suggestion) -> String {
-    let mut parts = vec![s.reason.to_owned(), format!("worked via {}", server(s.via_id).country)];
+    let mut parts = vec![reason_text(s.reason), t!("views.suggestion.worked_via", server = server(s.via_id).country)];
     if let Some((a, b)) = s.speed {
         parts.push(format!("{} → {} Mbit/s", js_num(a), js_num(b)));
     }
     if s.hits > 1 {
-        parts.push(format!("{}× today", s.hits));
+        parts.push(t!("views.suggestion.hits", count = s.hits));
     }
     parts.join(" · ")
 }
@@ -358,25 +368,25 @@ impl Hitori {
         vec![
             menu_item("m-account", t, false)
                 .child(icon("user-round", 16., t.muted_fg))
-                .child("Account")
+                .child(t!("overlays.account.title"))
                 .on_click(cx.listener(|this, _, _, cx| this.open_panel(Panel::Account, cx)))
                 .into_any_element(),
             menu_item("m-settings", t, false)
                 .child(icon("settings-2", 16., t.muted_fg))
-                .child("Settings")
+                .child(t!("overlays.settings.title"))
                 .on_click(cx.listener(|this, _, _, cx| this.open_panel(Panel::Settings, cx)))
                 .into_any_element(),
             menu_separator(t).into_any_element(),
             if self.s.signed_in {
                 menu_item("m-signout", t, true)
                     .child(icon("log-out", 16., t.destructive))
-                    .child("Sign out")
+                    .child(t!("overlays.account.sign_out"))
                     .on_click(cx.listener(|this, _, _, cx| this.sign_out(cx)))
                     .into_any_element()
             } else {
                 menu_item("m-signin", t, false)
                     .child(icon("log-in", 16., t.muted_fg))
-                    .child("Sign in")
+                    .child(t!("overlays.signin.button"))
                     .on_click(cx.listener(|this, _, _, cx| this.open_panel(Panel::Account, cx)))
                     .into_any_element()
             },
@@ -444,12 +454,12 @@ impl Hitori {
                 .cursor_pointer()
                 .on_click(cx.listener(|this, _, _, cx| this.open_rules(cx)))
                 .child(icon("message-circle-question", 16., primary))
-                .child(div().flex_1().child(format!("{review} need VPN")))
-                .child("Review")
+                .child(div().flex_1().child(t!("views.review.need_vpn", n = review)))
+                .child(t!("views.review.button"))
         });
         let next_small = big;
         let view_btn = button("rules-view", Variant::Ghost, Size::IconSm, true, &t)
-            .tooltip(tip(if next_small { "Compact list" } else { "Cards" }, &t))
+            .tooltip(tip(if next_small { t!("views.rules.compact") } else { t!("views.rules.cards") }, &t))
             .child(icon(if next_small { "rows-3" } else { "layout-list" }, 16., t.foreground))
             .on_click(cx.listener(|this, _, _, cx| {
                 this.s.rules_big = !this.s.rules_big;
@@ -478,8 +488,8 @@ impl Hitori {
                             .gap(px(6.))
                             .xs()
                             .text_color(t.muted_fg)
-                            .child(div().medium().child(format!("Active rules · {count}")))
-                            .when(idle > 0, |d| d.child(format!("{idle} idle"))),
+                            .child(div().medium().child(t!("views.rules.active", count = count)))
+                            .when(idle > 0, |d| d.child(t!("views.rules.idle", count = idle))),
                     )
                     .child(view_btn),
             )
@@ -507,7 +517,7 @@ impl Hitori {
                         .sm()
                         .cursor_pointer()
                         .on_click(cx.listener(|this, _, _, cx| this.open_rules(cx)))
-                        .child("Manage rules")
+                        .child(t!("views.rules.manage"))
                         .child(icon("chevron-right", 16., muted)),
                 ),
             ))
@@ -517,7 +527,7 @@ impl Hitori {
     fn page_switch(&self, cx: &mut Context<Self>) -> Div {
         let t = self.theme(cx);
         let mut seg = div().flex().p(px(2.)).gap(px(2.)).rounded(px(MD)).bg(t.card).shadow(t.panel_shadow());
-        for (page, name, label) in [(Page::Map, "map", "Map"), (Page::Rules, "list", "Rules")] {
+        for (page, name, label) in [(Page::Map, "map", t!("views.page.map")), (Page::Rules, "list", t!("views.page.rules"))] {
             let on = self.page == page;
             seg = seg.child(
                 fx(SharedString::from(format!("page-{name}")), if on { t.accent } else { gpui::transparent_black() }, Some(t.accent))
@@ -560,7 +570,7 @@ impl Hitori {
             app_grid = app_grid.child(card(self.app_rule(a, true, Place::Page, window, cx).into_any_element()));
         }
         if apps.is_empty() {
-            app_grid = app_grid.child(div().sm().text_color(t.muted_fg).child("No app rules yet. Add a running app with +, or accept a suggestion."));
+            app_grid = app_grid.child(div().sm().text_color(t.muted_fg).child(t!("views.rules.no_apps")));
         }
         let mut site_grid = div().flex().flex_wrap().gap(px(12.));
         for (target, rule) in self.s.sites.clone() {
@@ -599,13 +609,13 @@ impl Hitori {
                                     .flex()
                                     .flex_col()
                                     .gap(px(4.))
-                                    .child(div().text_size(px(24.)).semibold().tight().child("Routing rules"))
-                                    .child(div().sm().text_color(t.muted_fg).child("Apps and websites without a rule follow the default route.")),
+                                    .child(div().text_size(px(24.)).semibold().tight().child(t!("overlays.routes.title")))
+                                    .child(div().sm().text_color(t.muted_fg).child(t!("views.rules.intro"))),
                             )
                             .child(div().rounded(px(XL)).bg(t.card).p(px(8.)).child(self.default_route(cx)))
                             .when(!suggestions.is_empty(), |d| {
                                 d.child(
-                                    div().flex().flex_col().gap(px(8.)).child(heading(format!("Suggestions · {}", suggestions.len()), None)).child(
+                                    div().flex().flex_col().gap(px(8.)).child(heading(t!("overlays.routes.suggestions", count = suggestions.len()), None)).child(
                                         div().flex().flex_wrap().gap(px(12.)).children(suggestions.iter().map(|s| card(self.suggestion_card(s, false, cx).into_any_element()))),
                                     ),
                                 )
@@ -616,7 +626,7 @@ impl Hitori {
                                     .flex_col()
                                     .gap(px(8.))
                                     .child(heading(
-                                        if idle > 0 { format!("Apps · {} · {idle} idle", apps.len()) } else { format!("Apps · {}", apps.len()) },
+                                        if idle > 0 { t!("views.rules.apps_idle", apps = apps.len(), idle = idle) } else { t!("overlays.routes.apps", count = apps.len()) },
                                         Some(self.add_app(cx).into_any_element()),
                                     ))
                                     .child(app_grid),
@@ -626,7 +636,7 @@ impl Hitori {
                                     .flex()
                                     .flex_col()
                                     .gap(px(8.))
-                                    .child(heading(format!("Websites · {}", self.s.sites.len()), None))
+                                    .child(heading(t!("views.rules.websites", count = self.s.sites.len()), None))
                                     .child(self.site_field(cx))
                                     .child(site_grid),
                             ),
@@ -676,8 +686,9 @@ impl Hitori {
                     .flex()
                     .items_baseline()
                     .justify_between()
-                    .child(div().sm().medium().child("Default route"))
-                    .child(div().xs().text_color(t.muted_fg).child(current.default_hint())),
+                    .gap(px(8.))
+                    .child(div().flex_none().sm().medium().child(t!("views.default_route.title")))
+                    .child(div().min_w_0().truncate().xs().text_color(t.muted_fg).child(current.default_hint())),
             )
             .child(seg)
     }
@@ -713,13 +724,13 @@ impl Hitori {
     /// Where traffic under this rule ends up; muted when it follows the main connection, which can change.
     pub fn destination(&self, rule: &AppRule) -> (String, bool) {
         match rule.mode {
-            RuleMode::Direct => return ("Bypasses VPN".into(), false),
-            RuleMode::Block => return ("Blocked".into(), false),
+            RuleMode::Direct => return (t!("views.dest.bypass").into(), false),
+            RuleMode::Block => return (t!("views.route.blocked").into(), false),
             _ => {}
         }
         let via = rule.via.or(if rule.exit.is_some() { None } else { self.s.entry_id });
-        let country = format!("{}{}", server(rule.exit.unwrap_or(self.s.server_id)).country, via.map(|v| format!(" via {}", server(v).country)).unwrap_or_default());
-        if rule.mode == RuleMode::Auto { (format!("Auto · {country}"), true) } else { (country, rule.exit.is_none()) }
+        let country = format!("{}{}", server(rule.exit.unwrap_or(self.s.server_id)).country, via.map(|v| t!("views.dest.via", country = server(v).country)).unwrap_or_default());
+        if rule.mode == RuleMode::Auto { (t!("views.dest.auto", country = country), true) } else { (country, rule.exit.is_none()) }
     }
 
     fn glyphs(&self, rule: &AppRule, t: &Theme) -> Div {
@@ -728,14 +739,14 @@ impl Hitori {
         };
         let row = div().flex().items_center().gap(px(4.));
         match rule.mode {
-            RuleMode::Block => row.child(g("ban", "All traffic blocked", t.destructive, "g-ban".into())),
-            RuleMode::Direct => row.child(g("globe", "Uses your real connection", t.muted_fg, "g-globe".into())),
+            RuleMode::Block => row.child(g("ban", t!("views.glyph.blocked"), t.destructive, "g-ban".into())),
+            RuleMode::Direct => row.child(g("globe", t!("views.glyph.direct"), t.muted_fg, "g-globe".into())),
             mode => {
                 let on = self.s.conn == Conn::On;
-                row.when(mode == RuleMode::Auto, |r| r.child(g("wand-sparkles", "Direct first, VPN when it fails", t.muted_fg, "g-auto".into())))
-                    .when(rule.exit.is_some(), |r| r.child(g("route", "Own exit, separate from the main route", t.muted_fg, "g-route".into())))
-                    .when(rule.via.is_some() || (rule.exit.is_none() && self.s.entry_id.is_some()), |r| r.child(g("layers", "Cascaded through two servers", t.muted_fg, "g-layers".into())))
-                    .child(g("shield-check", if on { "Encrypted" } else { "Waiting for the tunnel" }, if on { t.primary } else { t.muted_fg }, "g-shield".into()))
+                row.when(mode == RuleMode::Auto, |r| r.child(g("wand-sparkles", t!("data.mode_hint.auto"), t.muted_fg, "g-auto".into())))
+                    .when(rule.exit.is_some(), |r| r.child(g("route", t!("views.glyph.exit"), t.muted_fg, "g-route".into())))
+                    .when(rule.via.is_some() || (rule.exit.is_none() && self.s.entry_id.is_some()), |r| r.child(g("layers", t!("views.glyph.cascade"), t.muted_fg, "g-layers".into())))
+                    .child(g("shield-check", if on { t!("views.glyph.encrypted") } else { t!("views.glyph.waiting") }, if on { t.primary } else { t.muted_fg }, "g-shield".into()))
             }
         }
     }
@@ -800,7 +811,7 @@ impl Hitori {
             if let Some(p) = rule.protocol {
                 footer = footer.child(div().child("·")).child(div().child(p.label()));
             }
-            footer = footer.child(div().child("·")).child(div().child("website"));
+            footer = footer.child(div().child("·")).child(div().child(t!("views.site.website")));
             self.rule_card(id, open, &t).children(self.card_body(site_badge(&t), target, None, rule, footer, &t))
         } else {
             self.rule_line(id, open, &t)
@@ -847,7 +858,7 @@ impl Hitori {
                 button("add-site", Variant::Secondary, Size::Default, false, &t)
                     .when(!valid, |b| b.opacity(0.5))
                     .child(icon("plus", 16., t.foreground))
-                    .child("Add")
+                    .child(t!("views.site.add"))
                     .on_click(cx.listener(|this, _, window, cx| this.add_site(window, cx))),
             )
     }
@@ -860,7 +871,7 @@ impl Hitori {
             .child(icon("plus", 16., t.foreground))
             .on_click(cx.listener(|this, _, _, cx| this.toggle_menu(Menu::AddApp, cx)));
         let popup = self.menu_phase(Menu::AddApp).filter(|_| !rest.is_empty()).map(|ph| {
-            let mut items = vec![menu_label(&t).child("Running apps").into_any_element()];
+            let mut items = vec![menu_label(&t).child(t!("views.add_app.running")).into_any_element()];
             for a in rest {
                 let id = a.id;
                 items.push(
@@ -903,9 +914,9 @@ impl Hitori {
                         _ => site_badge(&t),
                     })
                     .child(div().flex_1().min_w_0().truncate().xs().text_color(t.muted_fg).child(match known {
-                        Some(a) if s.scope == Scope::Site => format!("in {}", a.name),
+                        Some(a) if s.scope == Scope::Site => t!("views.suggestion.in_app", app = a.name),
                         Some(_) => s.target.to_owned(),
-                        None => "website".to_owned(),
+                        None => t!("views.site.website").to_owned(),
                     }))
                     .child(div().xs().text_color(t.muted_fg).child(ago((s.at.elapsed().as_secs() / 60) as u32)))
                     .when(floating, |d| {
@@ -921,7 +932,7 @@ impl Hitori {
                 div()
                     .flex()
                     .flex_col()
-                    .child(div().truncate().sm().semibold().child(format!("{} needs VPN", subject(s))))
+                    .child(div().truncate().sm().semibold().child(t!("views.suggestion.needs_vpn", subject = subject(s))))
                     .child(div().xs().text_color(t.muted_fg).child(suggestion_detail(s))),
             )
             .child(
@@ -931,12 +942,12 @@ impl Hitori {
                     .child(
                         button(SharedString::from(format!("accept-{sid}")), Variant::Default, Size::Sm, false, &t)
                             .flex_1()
-                            .child("Always VPN")
+                            .child(t!("views.route.always_vpn"))
                             .on_click(cx.listener(move |this, _, _, cx| this.accept(accept_id, cx))),
                     )
                     .child(
                         button(SharedString::from(format!("keep-{sid}")), Variant::Ghost, Size::Sm, false, &t)
-                            .child("Keep auto")
+                            .child(t!("views.suggestion.keep_auto"))
                             .on_click(cx.listener(move |this, _, _, cx| this.dismiss(dismiss_id, cx))),
                     ),
             )
@@ -952,7 +963,7 @@ impl Hitori {
         let more = (live.len() > 2).then(|| {
             button("more", Variant::Secondary, Size::Default, false, &t)
                 .shadow(t.panel_shadow())
-                .child(format!("{} more · Review", live.len() - 2))
+                .child(t!("views.review.more", count = live.len() - 2))
                 .on_click(cx.listener(|this, _, _, cx| this.open_rules(cx)))
         });
         Some(
@@ -1014,9 +1025,9 @@ impl Hitori {
         let s = server(self.s.server_id);
         let tone = tone(self.s.conn, &t);
         let title = match self.s.conn {
-            Conn::On => "Protected",
-            Conn::Connecting => "Connecting…",
-            Conn::Off => "Unprotected",
+            Conn::On => t!("views.status.protected"),
+            Conn::Connecting => t!("views.status.connecting"),
+            Conn::Off => t!("tray.unprotected"),
         };
         let error = self.s.error.clone().filter(|_| self.s.conn == Conn::Off);
         let failed = error.is_some();
@@ -1052,9 +1063,9 @@ impl Hitori {
             .when(failed, |d| {
                 d.child(
                     button("view-log", Variant::Outline, Size::Xs, true, &t)
-                        .tooltip(tip("The full error and the core's output", &t))
+                        .tooltip(tip(t!("views.status.view_log_tip"), &t))
                         .child(icon("scroll-text", 12., t.foreground))
-                        .child("View log")
+                        .child(t!("views.status.view_log"))
                         .on_click(cx.listener(|this, _, _, cx| this.open_panel(Panel::Log, cx))),
                 )
             })
@@ -1069,10 +1080,10 @@ impl Hitori {
         let t = self.theme(cx);
         let exit = server(self.s.server_id);
         let label = match self.s.conn {
-            Conn::On => "Connected to",
-            Conn::Connecting => "Connecting to",
-            Conn::Off if exit.id == data::fastest().id && self.s.entry_id.is_none() => "Fastest location",
-            Conn::Off => "Location",
+            Conn::On => t!("views.field.connected_to"),
+            Conn::Connecting => t!("views.field.connecting_to"),
+            Conn::Off if exit.id == data::fastest().id && self.s.entry_id.is_none() => t!("views.field.fastest"),
+            Conn::Off => t!("tray.location"),
         };
         let exit_btn = self
             .field("exit-field", &t)
@@ -1103,7 +1114,7 @@ impl Hitori {
                             .flex_1()
                             .min_w_0()
                             .on_click(cx.listener(|this, _, window, cx| this.open_palette(Mode::Entry, window, cx)))
-                            .child(div().w(px(24.)).flex_none().flex().justify_center().xs().text_color(t.muted_fg).child("via"))
+                            .child(div().min_w(px(24.)).flex_none().flex().justify_center().xs().text_color(t.muted_fg).child(t!("views.via")))
                             .child(
                                 div()
                                     .flex()
@@ -1118,7 +1129,7 @@ impl Hitori {
                     )
                     .child(
                         button("go-direct", Variant::Ghost, Size::Icon, true, &t)
-                            .tooltip(tip("Go direct", &t))
+                            .tooltip(tip(t!("views.field.go_direct"), &t))
                             .child(icon("x", 16., t.foreground))
                             .on_click(cx.listener(|this, _, window, cx| this.via(None, window, cx))),
                     )
@@ -1132,7 +1143,7 @@ impl Hitori {
                     .sm()
                     .on_click(cx.listener(|this, _, window, cx| this.open_palette(Mode::Entry, window, cx)))
                     .child(icon("plus", 16., muted))
-                    .child("Route through another server")
+                    .child(t!("views.field.add_entry"))
                     .into_any_element()
             }
         };
@@ -1142,10 +1153,10 @@ impl Hitori {
     pub fn power_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme(cx);
         let (variant, label, fg) = match self.s.conn {
-            Conn::Off if !self.s.signed_in => (Variant::Default, "Sign in", t.primary_fg),
-            Conn::Off => (Variant::Default, "Connect", t.primary_fg),
-            Conn::Connecting => (Variant::Secondary, "Cancel", t.secondary_fg),
-            Conn::On => (Variant::Secondary, "Disconnect", t.secondary_fg),
+            Conn::Off if !self.s.signed_in => (Variant::Default, t!("overlays.signin.button"), t.primary_fg),
+            Conn::Off => (Variant::Default, t!("tray.connect"), t.primary_fg),
+            Conn::Connecting => (Variant::Secondary, t!("views.power.cancel"), t.secondary_fg),
+            Conn::On => (Variant::Secondary, t!("tray.disconnect"), t.secondary_fg),
         };
         button("power", variant, Size::Lg, true, &t)
             .w_full()
@@ -1195,11 +1206,11 @@ impl Hitori {
                 "m-latency",
                 "activity",
                 latency.map_or("—".into(), |ms| ms.to_string()),
-                "ms",
-                if on { "Latency through the tunnel" } else { "Latency to this server, from the last test" },
+                t!("views.metrics.ms"),
+                if on { t!("views.metrics.latency_on") } else { t!("views.metrics.latency_off") },
             ))
-            .child(cell("m-down", "arrow-down", speed(st.down), "Mbit/s", "Download"))
-            .child(cell("m-up", "arrow-up", speed(st.up), "Mbit/s", "Upload"))
+            .child(cell("m-down", "arrow-down", speed(st.down), t!("views.metrics.mbits"), t!("views.metrics.download")))
+            .child(cell("m-up", "arrow-up", speed(st.up), t!("views.metrics.mbits"), t!("views.metrics.upload")))
     }
 
     /// Kill switch as an icon toggle, blue while on; the full switch and its explanation live in Settings.
@@ -1207,10 +1218,10 @@ impl Hitori {
         let t = self.theme(cx);
         let on = self.s.kill_switch;
         let hint = match (on, self.s.uses_tun()) {
-            (true, true) => "Kill switch on · traffic is blocked while the tunnel is down",
-            (true, false) if crate::os::SYSTEM_PROXY => "Kill switch on · takes effect in TUN mode",
-            (true, false) => "Kill switch on · takes effect in system-wide mode",
-            (false, _) => "Kill switch off · block traffic while the tunnel is down",
+            (true, true) => t!("views.kill.on_blocks"),
+            (true, false) if crate::os::SYSTEM_PROXY => t!("views.kill.on_tun"),
+            (true, false) => t!("views.kill.on_system_wide"),
+            (false, _) => t!("views.kill.off"),
         };
         button("kill", Variant::Ghost, Size::IconSm, true, &t)
             .when(on, |b| b.rest(t.primary.opacity(0.1)))
@@ -1231,12 +1242,12 @@ impl Hitori {
         }
         let testing = self.s.testing;
         let tested = self.s.tested_at.map(|at| match ago((at.elapsed().as_secs() / 60) as u32) {
-            now if now == "now" => "tested just now".to_owned(),
-            a => format!("tested {a} ago"),
+            now if now == t!("data.ago.now") => t!("views.servers.tested_now").to_owned(),
+            a => t!("views.servers.tested_ago", ago = a),
         });
         let sort = button("sort-ping", Variant::Ghost, Size::IconXs, true, &t)
             .when(self.sort_ping, |b| b.rest(t.accent))
-            .tooltip(tip(if self.sort_ping { "Sorted by latency" } else { "Sort by latency" }, &t))
+            .tooltip(tip(if self.sort_ping { t!("views.servers.sorted") } else { t!("views.servers.sort") }, &t))
             .child(icon("arrow-down-narrow-wide", 12., if self.sort_ping { t.foreground } else { t.muted_fg }))
             .on_click(cx.listener(|this, _, _, cx| {
                 this.sort_ping = !this.sort_ping;
@@ -1244,9 +1255,9 @@ impl Hitori {
             }));
         let test = button("ping-test", Variant::Ghost, Size::Xs, true, &t)
             .when(testing || servers.is_empty(), |b| b.opacity(0.5))
-            .tooltip(tip(if testing { "Measuring every server…" } else { "Measure every server through its own protocol" }, &t))
+            .tooltip(tip(if testing { t!("views.servers.measuring") } else { t!("views.servers.measure") }, &t))
             .child(if testing { spinner("ping-spin", 12., t.foreground).into_any_element() } else { icon("gauge", 12., t.foreground).into_any_element() })
-            .child("Test")
+            .child(t!("views.servers.test"))
             .on_click(cx.listener(|this, _, _, cx| this.test_pings(cx)));
         let n = servers.len();
         // Servers under their country, in latency order when sorted (so countries by their best server). Servers that did
@@ -1288,7 +1299,7 @@ impl Hitori {
                             .gap(px(6.))
                             .xs()
                             .text_color(t.muted_fg)
-                            .child(div().medium().child("Servers"))
+                            .child(div().medium().child(t!("views.servers.title")))
                             .children(tested.map(|s| div().truncate().child(s))),
                     )
                     .child(sort)
@@ -1305,7 +1316,7 @@ impl Hitori {
                     .gap(px(4.))
                     .px(px(8.))
                     .pb(px(8.))
-                    .when(n == 0, |d| d.child(div().px(px(8.)).py(px(8.)).sm().text_color(t.muted_fg).child("Sign in to see your servers.")))
+                    .when(n == 0, |d| d.child(div().px(px(8.)).py(px(8.)).sm().text_color(t.muted_fg).child(t!("views.servers.sign_in"))))
                     .children(rows),
             )
     }
@@ -1314,7 +1325,7 @@ impl Hitori {
     fn load_el(&self, id: &'static str, t: &Theme) -> AnyElement {
         let col = div().id(SharedString::from(format!("load-{id}"))).w(px(24.)).flex_none().flex().items_center().justify_center();
         let Some(pct) = data::load(id) else { return col.into_any_element() };
-        col.tooltip(tip(format!("Server load {pct}%"), t)).child(meter(pct as f32 / 100., 16., 2., load_tone(pct), t.muted_fg.opacity(0.25))).into_any_element()
+        col.tooltip(tip(t!("views.servers.load", pct = pct), t)).child(meter(pct as f32 / 100., 16., 2., load_tone(pct), t.muted_fg.opacity(0.25))).into_any_element()
     }
 
     /// Row background: blue for the live exit, grey for the chosen one.
@@ -1331,7 +1342,7 @@ impl Hitori {
         }
         let text = match data::ping(id) {
             Some(ms) => format!("{ms} ms"),
-            None if data::timed_out(id) => "offline".into(),
+            None if data::timed_out(id) => t!("views.servers.offline").into(),
             None => "—".into(),
         };
         div().flex_none().whitespace_nowrap().xs().text_color(t.muted_fg).child(text).into_any_element()
@@ -1349,7 +1360,7 @@ impl Hitori {
             .h(px(40.))
             .child(self.load_el(id, &t))
             .child(div().flex_1().min_w_0().truncate().sm().text_color(if live { t.primary } else { t.foreground }).child(s.tag()))
-            .when(self.s.entry_id == Some(id), |d| d.child(div().xs().text_color(t.muted_fg).child("via")))
+            .when(self.s.entry_id == Some(id), |d| d.child(div().xs().text_color(t.muted_fg).child(t!("views.via"))))
             .when(live, |d| d.child(div().size(px(6.)).rounded_full().bg(t.primary)))
             .child(latency)
             .on_click(cx.listener(move |this, _, window, cx| this.go(id, window, cx)))
@@ -1381,7 +1392,7 @@ impl Hitori {
             .child(latency)
             .child(
                 button(SharedString::from(format!("country-open-{code}")), Variant::Ghost, Size::IconSm, true, &t)
-                    .tooltip(tip(if open { "Hide servers" } else { "Show servers" }, &t))
+                    .tooltip(tip(if open { t!("views.servers.hide") } else { t!("views.servers.show") }, &t))
                     .child(icon(if open { "chevron-up" } else { "chevron-down" }, 16., t.muted_fg))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
@@ -1428,7 +1439,7 @@ impl Hitori {
         match &self.s.account {
             Some(a) if !a.name.is_empty() => a.name.clone(),
             _ if self.s.signed_in => "Hitori".into(),
-            _ => "Not signed in".into(),
+            _ => t!("views.account.not_signed_in").into(),
         }
     }
 
@@ -1439,12 +1450,12 @@ impl Hitori {
     pub fn account_line(&self) -> String {
         match &self.s.account {
             Some(a) => a.summary(),
-            None if self.s.signed_in => "Loading…".into(),
-            None => "Paste your subscription link".into(),
+            None if self.s.signed_in => t!("views.account.loading").into(),
+            None => t!("views.account.paste_link").into(),
         }
     }
 
     pub fn renews(&self) -> String {
-        self.s.account.as_ref().and_then(|a| a.expires.clone()).map(|d| format!("renews {d}")).unwrap_or_default()
+        self.s.account.as_ref().and_then(|a| a.expires.clone()).map(|d| t!("views.account.renews", date = d)).unwrap_or_default()
     }
 }

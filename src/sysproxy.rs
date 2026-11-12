@@ -53,7 +53,7 @@ pub fn set(host: &str, http: u16, socks: u16) -> Result<Active, String> {
 /// Linux system-wide mode is always a TUN.
 #[cfg(target_os = "linux")]
 pub fn set(_host: &str, _http: u16, _socks: u16) -> Result<Active, String> {
-    Err("system-wide mode is a TUN on Linux".into())
+    Err(t!("sysproxy.error.linux_is_tun").into())
 }
 
 impl Drop for Active {

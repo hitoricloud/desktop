@@ -1,0 +1,14 @@
+title = "Hitori VPN"
+quit_app = "Quit Hitori VPN"
+add_site_placeholder = "Add a website, e.g. youtube.com"
+
+[settings_tab]
+connection = "Connection"
+network = "Network"
+location = "Location"
+appearance = "Appearance"
+
+[search]
+exit = "Search countries"
+entry = "Route through…"
+rule = "Search {name} settings"

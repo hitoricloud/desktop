@@ -61,10 +61,10 @@ impl SettingsTab {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Connection => "Connection",
-            Self::Network => "Network",
-            Self::Location => "Location",
-            Self::Appearance => "Appearance",
+            Self::Connection => t!("app.settings_tab.connection"),
+            Self::Network => t!("app.settings_tab.network"),
+            Self::Location => t!("app.settings_tab.location"),
+            Self::Appearance => t!("app.settings_tab.appearance"),
         }
     }
 
@@ -281,6 +281,8 @@ pub struct Hitori {
     pub panel_fx: Presence<Panel>,
     pub settings_tab: SettingsTab,
     pub palette_fx: Presence<Mode>,
+    /// The language this window's titles and placeholders are in.
+    lang: crate::i18n::Lang,
     _search_changes: Subscription,
     _site_changes: Subscription,
     /// What the Network fields held at the last edit; caret blinks notify too.
@@ -302,9 +304,9 @@ pub fn dns_server(dns: &crate::xray::Dns) -> &str {
 impl Hitori {
     pub fn new(variant: Variant, vpn: Entity<Vpn>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let t = theme(cx);
-        let search = cx.new(|cx| TextInput::new("Search countries", t.muted_fg, t.foreground, cx));
+        let search = cx.new(|cx| TextInput::new(&search_placeholder(Mode::Exit), t.muted_fg, t.foreground, cx));
         let link = cx.new(|cx| TextInput::new("https://…/sub/…", t.muted_fg, t.foreground, cx));
-        let site_input = cx.new(|cx| TextInput::new("Add a website, e.g. youtube.com", t.muted_fg, t.foreground, cx));
+        let site_input = cx.new(|cx| TextInput::new(t!("app.add_site_placeholder"), t.muted_fg, t.foreground, cx));
         let site_changes = cx.observe(&site_input, |_, _, cx| cx.notify());
         let (proxy, dns) = (vpn.read(cx).s.proxy.clone(), vpn.read(cx).s.dns.clone());
         let field = |text: &str, cx: &mut Context<Self>| {
@@ -376,6 +378,7 @@ impl Hitori {
             panel_fx: Presence::new(),
             settings_tab: SettingsTab::Connection,
             palette_fx: Presence::new(),
+            lang: crate::i18n::current(),
             _search_changes: changes,
             _site_changes: site_changes,
             network_typed: vec![],
@@ -425,6 +428,8 @@ impl Hitori {
                 }
                 "tray" => self.variant = Variant::Tray,
                 "light" => self.set_dark(false, cx),
+                "lang" => self.set_language(crate::i18n::Lang::parse(value), cx),
+                "tab" => self.settings_tab = SettingsTab::ALL.into_iter().find(|k| k.icon() == value).unwrap_or(SettingsTab::Connection),
                 "small" => self.s.rules_big = false,
                 "route" => self.s.default_route = RuleMode::parse(value),
                 "page" => self.page = if value == "rules" { Page::Rules } else { Page::Map },
@@ -653,12 +658,7 @@ impl Hitori {
         self.palette = Some(mode);
         self.palette_index = 0;
         self.palette_query = Default::default();
-        let placeholder = match mode {
-            Mode::Entry => "Route through…".to_owned(),
-            Mode::Rule(a) => format!("Search {} settings", data::app(a).name),
-            Mode::Site(s) => format!("Search {s} settings"),
-            Mode::Exit => "Search countries".to_owned(),
-        };
+        let placeholder = search_placeholder(mode);
         self.search.update(cx, |input, cx| {
             input.reset();
             input.set_placeholder(&placeholder);
@@ -735,7 +735,7 @@ impl Hitori {
     /// What is wrong with the typed ports.
     pub fn ports_error(&self, cx: &App) -> Option<String> {
         let (Some(socks), Some(http)) = (port(&self.socks_input, cx), port(&self.http_input, cx)) else {
-            return Some("Ports are numbers from 1 to 65535".into());
+            return Some(t!("xray.error.ports_range").into());
         };
         crate::xray::LocalProxy { socks, http, ..self.s.proxy.clone() }.check().err()
     }
@@ -752,6 +752,29 @@ impl Hitori {
         }
         self.map.restyle();
         cx.notify();
+    }
+
+    /// Switch every window and the tray now; `None` follows the system.
+    pub fn set_language(&mut self, choice: Option<crate::i18n::Lang>, cx: &mut Context<Self>) {
+        self.s.language = choice;
+        crate::i18n::set(crate::i18n::resolve(choice));
+        data::relabel();
+        #[cfg(target_os = "macos")]
+        crate::set_menus(cx);
+        cx.notify();
+    }
+
+    /// Window title and text field placeholders after a language change.
+    fn relabel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.lang = crate::i18n::current();
+        window.set_window_title(t!("app.title"));
+        let search = search_placeholder(self.palette.unwrap_or(Mode::Exit));
+        for (input, text) in [(&self.search, search.as_str()), (&self.site_input, t!("app.add_site_placeholder"))] {
+            input.update(cx, |input, cx| {
+                input.set_placeholder(text);
+                cx.notify();
+            });
+        }
     }
 
     pub fn toggle_menu(&mut self, menu: Menu, cx: &mut Context<Self>) {
@@ -798,6 +821,15 @@ impl Hitori {
     }
 }
 
+fn search_placeholder(mode: Mode) -> String {
+    match mode {
+        Mode::Entry => t!("app.search.entry").to_owned(),
+        Mode::Rule(a) => t!("app.search.rule", name = data::app(a).name),
+        Mode::Site(s) => t!("app.search.rule", name = s),
+        Mode::Exit => t!("app.search.exit").to_owned(),
+    }
+}
+
 impl Focusable for Hitori {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
@@ -815,6 +847,9 @@ impl Render for Hitori {
         }
         if self.s != self.published {
             cx.defer_in(window, |this, _, cx| this.push(cx));
+        }
+        if self.lang != crate::i18n::current() {
+            self.relabel(window, cx);
         }
         self.ring.set(None);
         // Signed out (or without a subscription) every window shows only the sign-in screen.

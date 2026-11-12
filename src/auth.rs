@@ -46,20 +46,20 @@ pub enum Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            Error::Unauthorized => write!(f, "Your session has ended. Sign in again."),
-            Error::Cancelled => write!(f, "Sign-in cancelled"),
-            Error::TimedOut => write!(f, "Sign-in timed out. Try again."),
-            Error::Denied(slug) if slug == "access_denied" => write!(f, "Sign-in was cancelled in Telegram."),
-            Error::Denied(slug) => write!(f, "Telegram sign-in failed ({slug}). Try again."),
+            Error::Unauthorized => f.write_str(t!("auth.error.unauthorized")),
+            Error::Cancelled => f.write_str(t!("auth.error.cancelled")),
+            Error::TimedOut => f.write_str(t!("auth.error.timed_out")),
+            Error::Denied(slug) if slug == "access_denied" => f.write_str(t!("auth.error.denied_access")),
+            Error::Denied(slug) => write!(f, "{}", t!("auth.error.denied", slug = slug)),
             Error::Api { message, .. } if !message.is_empty() => write!(f, "{message}"),
-            Error::Api { status, .. } => write!(f, "The Hitori server answered {status}"),
-            Error::Net(e) => write!(f, "Cannot reach the Hitori server ({e})"),
+            Error::Api { status, .. } => write!(f, "{}", t!("auth.error.server_answered", status = status)),
+            Error::Net(e) => write!(f, "{}", t!("auth.error.unreachable", error = e)),
         }
     }
 }
 
 fn unexpected() -> Error {
-    Error::Api { status: 200, code: "bad_response".into(), message: "The Hitori server sent an unexpected answer".into() }
+    Error::Api { status: 200, code: "bad_response".into(), message: t!("auth.error.unexpected").into() }
 }
 
 fn net(e: impl std::fmt::Display) -> Error {
@@ -198,10 +198,10 @@ fn answer(mut stream: TcpStream) -> Option<Result<String, Error>> {
     }
     let got = parse_callback(&String::from_utf8_lossy(&buf));
     let (status, title, text) = match &got {
-        Callback::Code(_) => ("200 OK", "Signed in", "You can return to Hitori."),
-        Callback::Error(_) => ("200 OK", "Sign-in failed", "Return to Hitori and try again."),
-        Callback::NotFound => ("404 Not Found", "Not found", ""),
-        Callback::Bad => ("400 Bad Request", "Bad request", ""),
+        Callback::Code(_) => ("200 OK", t!("auth.page.signed_in"), t!("auth.page.return_to_app")),
+        Callback::Error(_) => ("200 OK", t!("auth.page.failed"), t!("auth.page.retry")),
+        Callback::NotFound => ("404 Not Found", t!("auth.page.not_found"), ""),
+        Callback::Bad => ("400 Bad Request", t!("auth.page.bad_request"), ""),
     };
     let page = PAGE.replace("{title}", title).replace("{text}", text);
     let _ = write!(

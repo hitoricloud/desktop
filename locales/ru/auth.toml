@@ -1,0 +1,17 @@
+[error]
+unauthorized = "Сеанс завершён. Войдите снова."
+cancelled = "Вход отменён"
+timed_out = "Время входа истекло. Попробуйте снова."
+denied_access = "Вход отменён в Telegram."
+denied = "Вход через Telegram не удался ({slug}). Попробуйте снова."
+server_answered = "Сервер Hitori ответил {status}"
+unreachable = "Не удаётся связаться с сервером Hitori ({error})"
+unexpected = "Сервер Hitori прислал неожиданный ответ"
+
+[page]
+signed_in = "Вход выполнен"
+return_to_app = "Можно вернуться в Hitori."
+failed = "Не удалось войти"
+retry = "Вернитесь в Hitori и попробуйте снова."
+not_found = "Не найдено"
+bad_request = "Неверный запрос"

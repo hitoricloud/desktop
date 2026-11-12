@@ -686,7 +686,7 @@ impl Hitori {
                             .xs()
                             .whitespace_nowrap()
                             .gap(px(4.))
-                            .child("You")
+                            .child(t!("map.you"))
                             .children(local("direct", t.muted_fg, &routes.direct))
                             .children(local("blocked", t.destructive, &routes.blocked)),
                     )
@@ -745,7 +745,7 @@ impl Hitori {
                 .text_color(if selected { t.foreground } else { t.muted_fg })
                 .when(selected, |d| d.medium())
                 .child(flag(s.code, false, window))
-                .child(if entry { format!("via {}", s.city) } else { s.city.to_owned() })
+                .child(if entry { t!("map.via", city = s.city) } else { s.city.to_owned() })
                 .when(!riders.is_empty(), |d| d.child(badges(riders, s.id, &t).ml(px(2.))))
         });
         let id = s.id;

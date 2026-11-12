@@ -1,0 +1,8 @@
+protected = "Protected · {country}"
+connecting = "Connecting to {country}…"
+unprotected = "Unprotected"
+connect = "Connect"
+disconnect = "Disconnect"
+location = "Location"
+open = "Open Hitori"
+quit = "Quit"

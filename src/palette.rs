@@ -87,12 +87,12 @@ impl Hitori {
                         let s = server(id);
                         Row { text: format!("recent {} {} {}", s.id, s.city, s.code), look: Look::Country { s, chosen: None }, disabled: false, act: act(s.id) }
                     });
-                    g.push(("Recents".to_owned(), rows.collect()));
+                    g.push((t!("palette.groups.recents").to_owned(), rows.collect()));
                 }
-                g.push((format!("All countries ({})", servers.len()), servers.into_iter().map(|s| country("", s, None, false, act(s.id))).collect()));
+                g.push((t!("palette.groups.all_countries", count = servers.len()), servers.into_iter().map(|s| country("", s, None, false, act(s.id))).collect()));
                 if mode == Mode::Exit {
-                    let hint = if self.s.testing { "Running…" } else { "Every server" };
-                    g.push(("Actions".to_owned(), vec![choice("test latency ping speed", "gauge", "Test latency", Some(hint.into()), false, self.s.testing, Act::Test)]));
+                    let hint = if self.s.testing { t!("palette.test_running") } else { t!("palette.test_every_server") };
+                    g.push((t!("palette.groups.actions").to_owned(), vec![choice("test latency ping speed", "gauge", t!("palette.test_latency"), Some(hint.into()), false, self.s.testing, Act::Test)]));
                 }
                 g
             }
@@ -124,10 +124,10 @@ impl Hitori {
                 _ => false,
             });
         let modes = [
-            (RuleMode::Auto, "Auto", "Direct first, VPN when it fails", "wand-sparkles"),
-            (RuleMode::Vpn, "Always VPN", "Never direct", "shield-check"),
-            (RuleMode::Direct, "Direct", "Bypasses VPN", "globe"),
-            (RuleMode::Block, "Block", if site { "Never opens" } else { "No network" }, "ban"),
+            (RuleMode::Auto, t!("data.mode.auto"), t!("data.mode_hint.auto"), "wand-sparkles"),
+            (RuleMode::Vpn, t!("palette.route.always_vpn"), t!("palette.route.never_direct"), "shield-check"),
+            (RuleMode::Direct, t!("data.mode.direct"), t!("palette.route.bypasses_vpn"), "globe"),
+            (RuleMode::Block, t!("data.mode.block"), if site { t!("palette.route.never_opens") } else { t!("palette.route.no_network") }, "ban"),
         ];
         let route = modes
             .iter()
@@ -136,24 +136,24 @@ impl Hitori {
                 let suggest = *m == RuleMode::Vpn && suggested;
                 Row {
                     text: format!("route {label}"),
-                    look: Look::Choice { icon, label: (*label).to_owned(), hint: Some(if suggest { "Suggested".into() } else { (*hint).to_owned() }), hint_primary: suggest, checked: rule.mode == *m },
+                    look: Look::Choice { icon, label: (*label).to_owned(), hint: Some(if suggest { t!("palette.route.suggested").into() } else { (*hint).to_owned() }), hint_primary: suggest, checked: rule.mode == *m },
                     disabled: false,
                     act: Act::Mode(*m),
                 }
             })
             .collect();
-        let mut exit = vec![choice("exit same as connection", "shield-check", "Same as connection", Some(main_exit.country.into()), rule.exit.is_none(), off, Act::Exit(None))];
+        let mut exit = vec![choice("exit same as connection", "shield-check", t!("palette.same_as_connection"), Some(main_exit.country.into()), rule.exit.is_none(), off, Act::Exit(None))];
         exit.extend(data::servers().into_iter().map(|s| country("exit ", s, Some(rule.exit == Some(s.id)), off, Act::Exit(Some(s.id)))));
-        let mut through = vec![choice("through straight to exit", "move-right", "Straight to exit", Some(server(exit_id).country.into()), rule.via.is_none(), off, Act::Through(None))];
+        let mut through = vec![choice("through straight to exit", "move-right", t!("palette.straight_to_exit"), Some(server(exit_id).country.into()), rule.via.is_none(), off, Act::Through(None))];
         through.extend(data::servers().into_iter().filter(|s| s.id != exit_id).map(|s| country("through ", s, Some(rule.via == Some(s.id)), off, Act::Through(Some(s.id)))));
-        let mut proto = vec![choice("protocol same as connection", "zap", "Same as connection", Some(self.s.protocol.label().into()), rule.protocol.is_none(), off, Act::Proto(None))];
+        let mut proto = vec![choice("protocol same as connection", "zap", t!("palette.same_as_connection"), Some(self.s.protocol.label().into()), rule.protocol.is_none(), off, Act::Proto(None))];
         proto.extend(Protocol::ALL.iter().map(|p| choice(&format!("protocol {}", p.label()), "zap", p.label(), None, rule.protocol == Some(*p), off, Act::Proto(Some(*p)))));
         let mut options = vec![Row { text: "option remove rule".into(), look: Look::Remove, disabled: false, act: Act::Remove }];
         if let Mode::Rule(a) = target {
-            let kill = Row { text: "option kill switch".into(), look: Look::Toggle { label: "Kill switch", sub: format!("Block {} while the tunnel is down", app(a).name), on: rule.kill }, disabled: rule.mode == RuleMode::Block, act: Act::Kill };
+            let kill = Row { text: "option kill switch".into(), look: Look::Toggle { label: t!("palette.kill_switch"), sub: t!("palette.kill_switch_hint", app = app(a).name), on: rule.kill }, disabled: rule.mode == RuleMode::Block, act: Act::Kill };
             options.insert(0, kill);
         }
-        vec![("Route".into(), route), ("Exit".into(), exit), ("Route through".into(), through), ("Protocol".into(), proto), ("Options".into(), options)]
+        vec![(t!("palette.groups.route").into(), route), (t!("palette.groups.exit").into(), exit), (t!("palette.groups.route_through").into(), through), (t!("palette.groups.protocol").into(), proto), (t!("palette.groups.options").into(), options)]
     }
 
     pub fn palette_rows(&self, mode: Mode, cx: &gpui::App) -> Vec<Row> {
@@ -278,7 +278,7 @@ impl Hitori {
         }
         if rows.is_empty() {
             list_h = 68.;
-            rows.push(div().py(px(24.)).flex().justify_center().sm().child(if rule { "No settings match." } else { "No countries match." }).into_any_element());
+            rows.push(div().py(px(24.)).flex().justify_center().sm().child(if rule { t!("palette.no_settings") } else { t!("palette.no_countries") }).into_any_element());
         }
         let list_h = list_h.min(if rule { PALETTE_MAX_H - 48. } else { 300. });
         let dialog_h = 48. + list_h;
@@ -358,7 +358,7 @@ impl Hitori {
             Look::Country { s, chosen } => {
                 let live = chosen.is_none() && self.s.server_id == s.id && self.s.conn != Conn::Off;
                 let entry = chosen.is_none() && self.s.entry_id == Some(s.id);
-                let ping = || div().xs().text_color(t.muted_fg).child(data::ping(s.id).map_or("—".to_owned(), |ms| format!("{ms} ms"))).into_any_element();
+                let ping = || div().xs().text_color(t.muted_fg).child(data::ping(s.id).map_or("—".to_owned(), |ms| t!("palette.ping", ms = ms))).into_any_element();
                 let mut v = vec![
                     flag(s.code, true, window).into_any_element(),
                     div()
@@ -383,11 +383,11 @@ impl Hitori {
                             .medium()
                             .text_color(t.primary)
                             .child(div().size(px(8.)).rounded_full().bg(t.primary))
-                            .child(if self.s.conn == Conn::On { "Connected" } else { "Connecting" })
+                            .child(if self.s.conn == Conn::On { t!("palette.connected") } else { t!("palette.connecting") })
                             .into_any_element(),
                     );
                 } else if entry {
-                    v.push(div().xs().text_color(t.muted_fg).child("Entry").into_any_element());
+                    v.push(div().xs().text_color(t.muted_fg).child(t!("palette.entry")).into_any_element());
                 } else {
                     v.push(ping());
                 }
@@ -413,8 +413,8 @@ impl Hitori {
             ],
             Look::Remove => vec![
                 icon("trash-2", 20., t.destructive).into_any_element(),
-                div().flex_1().child("Remove rule").into_any_element(),
-                div().xs().text_color(t.muted_fg).child(format!("Back to default · {}", self.s.default_route.label())).into_any_element(),
+                div().flex_1().child(t!("palette.remove_rule")).into_any_element(),
+                div().xs().text_color(t.muted_fg).child(t!("palette.back_to_default", route = self.s.default_route.label())).into_any_element(),
             ],
         };
         let act = row.act;

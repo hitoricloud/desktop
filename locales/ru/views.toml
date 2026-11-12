@@ -1,0 +1,113 @@
+via = "через"
+
+[route]
+exit = "Выход: {country}"
+always_vpn = "Всегда VPN"
+blocked = "Заблокировано"
+
+[reason]
+timed_out = "Напрямую: таймаут"
+reset = "Напрямую: сброс"
+refused = "Напрямую: отказ"
+blocked = "Напрямую: блокировка"
+
+[suggestion]
+worked_via = "через VPN ({server}) работает"
+hits = "{count}× сегодня"
+in_app = "в {app}"
+needs_vpn = "{subject}: нужен VPN"
+keep_auto = "Оставить авто"
+
+[review]
+button = "Проверить"
+need_vpn = { one = "{n} требует VPN", few = "{n} требуют VPN", many = "{n} требуют VPN" }
+more = "Ещё {count} · Проверить"
+
+[rules]
+active = "Активных: {count}"
+idle = "Неактивных: {count}"
+apps_idle = "Приложения · {apps} · неактивных: {idle}"
+websites = "Сайты · {count}"
+no_apps = "Правил для приложений пока нет. Добавьте запущенное приложение через +, или примите предложение."
+intro = "Приложения и сайты без правила идут по маршруту по умолчанию."
+manage = "Настроить правила"
+compact = "Компактный список"
+cards = "Карточки"
+
+[page]
+map = "Карта"
+rules = "Правила"
+
+[default_route]
+title = "По умолчанию"
+
+[dest]
+bypass = "В обход VPN"
+via = " · вход: {country}"
+auto = "Авто · {country}"
+
+[glyph]
+blocked = "Весь трафик заблокирован"
+direct = "Использует ваше настоящее подключение"
+exit = "Свой выход, отдельно от основного маршрута"
+cascade = "Каскадом через два сервера"
+encrypted = "Зашифровано"
+waiting = "Ожидание туннеля"
+
+[site]
+website = "сайт"
+add = "Добавить"
+
+[add_app]
+running = "Запущенные приложения"
+
+[status]
+view_log = "Журнал"
+view_log_tip = "Полный текст ошибки и вывод ядра"
+protected = "Защищено"
+connecting = "Подключение…"
+
+[field]
+connected_to = "Подключено"
+connecting_to = "Подключаемся"
+fastest = "Самый быстрый"
+add_entry = "Через другой сервер"
+go_direct = "Сразу на выход"
+
+[power]
+cancel = "Отменить"
+
+[metrics]
+latency_on = "Задержка через туннель"
+latency_off = "Задержка до этого сервера по последнему тесту"
+download = "Загрузка"
+upload = "Отдача"
+ms = "мс"
+mbits = "Мбит/с"
+
+[kill]
+on_blocks = "Kill switch включён · трафик блокируется, пока туннель не работает"
+on_tun = "Kill switch включён · работает в режиме TUN"
+on_system_wide = "Kill switch включён · работает в режиме для всей системы"
+off = "Kill switch выключен · блокировать трафик, пока туннель не работает"
+
+[servers]
+title = "Серверы"
+tested_now = "проверено только что"
+tested_ago = "проверено {ago} назад"
+sort = "Сортировать по задержке"
+sorted = "Сортировка по задержке"
+measure = "Измерить каждый сервер через его протокол"
+measuring = "Измеряем каждый сервер…"
+test = "Тест"
+sign_in = "Войдите, чтобы увидеть свои серверы."
+load = "Загрузка сервера {pct}%"
+offline = "нет ответа"
+show = "Показать серверы"
+hide = "Скрыть серверы"
+
+[account]
+not_signed_in = "Вход не выполнен"
+loading = "Загружаем подписку…"
+paste_link = "Вставьте ссылку на подписку"
+renews = "продлевается {date}"

@@ -156,6 +156,8 @@ pub struct Settings {
     pub proxy: crate::xray::LocalProxy,
     pub dns: crate::xray::Dns,
     pub dark: bool,
+    /// UI language: `system`, `en` or `ru`.
+    pub language: String,
     pub rules_big: bool,
     pub apps: Vec<Rule>,
     #[serde(deserialize_with = "sites")]
@@ -179,6 +181,7 @@ impl Default for Settings {
             proxy: Default::default(),
             dns: Default::default(),
             dark: true,
+            language: "system".into(),
             rules_big: true,
             apps: vec![],
             sites: vec![],
