@@ -45,6 +45,7 @@ pub enum Panel {
     Account,
     Settings,
     Routes,
+    Log,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -416,6 +417,7 @@ impl Hitori {
                     self.panel = Some(match value {
                         "account" => Panel::Account,
                         "routes" => Panel::Routes,
+                        "log" => Panel::Log,
                         _ => Panel::Settings,
                     })
                 }

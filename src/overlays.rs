@@ -78,6 +78,7 @@ impl Hitori {
                 _ => ("Sign in", "Paste the subscription link from the Hitori bot.".into()),
             },
             Panel::Routes => ("Routing rules", format!("Apps and sites without a rule follow the default route: {}.", self.s.default_route.label())),
+            Panel::Log => ("Connection log", "The last error and the core's recent output.".into()),
             Panel::Settings => unreachable!(),
         };
         // Sheet: overlay `fade-in-0` 150ms; content `slide-in-from-right` 500ms in / 300ms out, ease-in-out.
@@ -87,6 +88,7 @@ impl Hitori {
             Panel::Account => self.account_body(window, cx),
             Panel::Settings => unreachable!(),
             Panel::Routes => self.routes_body(window, cx),
+            Panel::Log => self.log_body(cx),
         };
         div()
             .absolute()
@@ -549,6 +551,42 @@ impl Hitori {
                     window,
                 )],
             ))
+            .into_any_element()
+    }
+
+    /// The full error the status line cuts off, the core's last lines, and a button copying both.
+    fn log_body(&self, cx: &mut Context<Self>) -> AnyElement {
+        let t = self.theme(cx);
+        let lines = self.vpn.read(cx).log_lines();
+        let error = self.s.error.clone();
+        let text = error.iter().cloned().chain(lines.iter().cloned()).collect::<Vec<_>>().join("\n");
+        let empty = lines.is_empty();
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(16.))
+            .children(error.map(|e| div().p(px(12.)).rounded(px(LG)).bg(t.destructive.opacity(0.1)).sm().text_color(t.destructive).child(e)))
+            .child(
+                div().flex().child(
+                    button("log-copy", Variant::Outline, Size::Sm, true, &t)
+                        .child(icon("copy", 16., t.foreground))
+                        .child("Copy")
+                        .on_click(move |_, _, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()))),
+                ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .p(px(12.))
+                    .rounded(px(LG))
+                    .bg(t.muted.opacity(0.5))
+                    .xs()
+                    .text_color(t.muted_fg)
+                    .when(empty, |d| d.child("No core output yet."))
+                    .children(lines.into_iter().map(|l| div().child(l))),
+            )
             .into_any_element()
     }
 
