@@ -1099,6 +1099,11 @@ impl Vpn {
         cx.notify();
     }
 
+    /// Bytes down and up through the running core since it started.
+    pub fn traffic(&self) -> Option<(u64, u64)> {
+        self.bytes.map(|(_, down, up)| (down, up))
+    }
+
     pub fn toggle(&mut self, cx: &mut Context<Self>) {
         if self.s.conn == Conn::Off { self.connect(cx) } else { self.disconnect(cx) }
     }

@@ -1179,6 +1179,11 @@ pub(crate) struct WindowParams {
     pub display_id: Option<DisplayId>,
 
     pub window_min_size: Option<Size<Pixels>>,
+
+    /// Wayland: set on the toplevel before its first commit, so compositors can match window rules at map time.
+    #[cfg_attr(not(any(target_os = "linux", target_os = "freebsd")), allow(dead_code))]
+    pub app_id: Option<String>,
+
     #[cfg(target_os = "macos")]
     pub tabbing_identifier: Option<String>,
 }
