@@ -426,7 +426,7 @@ pub fn config(plan: &Plan, ports: Ports) -> Result<Value, String> {
         "inbounds": inbounds,
         "outbounds": out.list,
         "routing": {"domainStrategy": "IPIfNonMatch", "domainMatcher": "hybrid", "rules": rules},
-        "observatory": {"subjectSelector": ["proxy"], "probeUrl": PROBE_URL, "probeInterval": "30s"},
+        "observatory": {"subjectSelector": ["proxy"], "probeUrl": PROBE_URL, "probeInterval": "5s"},
         "stats": {},
         "policy": {"system": {"statsOutboundUplink": true, "statsOutboundDownlink": true}},
         "metrics": {"tag": "metrics", "listen": format!("127.0.0.1:{}", ports.metrics)},
