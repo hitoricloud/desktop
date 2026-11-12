@@ -1,5 +1,6 @@
 # Tests on every push and pull request. Packages (Linux tar.gz, Windows zip, macOS DMG) on main, on tags and on
-# manual runs; tags vX.Y.Z also publish a GitHub release. Linux and macOS run on Namespace runners.
+# manual runs; tags vX.Y.Z also publish a GitHub release, tags vX.Y.Z-macos build and release only the macOS DMG.
+# Linux and macOS run on Namespace runners.
 # The Xray core comes from a release of github.com/hitoricloud/Xray-core (XRAY_TAG in scripts/fetch-xray.sh).
 # macOS: set the MACOS_SIGN_IDENTITY variable (certificate in the runner keychain) for a Developer ID signature.
 name: Build
@@ -52,6 +53,7 @@ jobs:
 
   linux:
     needs: xray
+    if: ${{ !endsWith(github.ref, '-macos') }}
     runs-on: namespace-profile-linux
     container: rust:1-bookworm
     steps:
@@ -74,6 +76,7 @@ jobs:
 
   windows:
     needs: xray
+    if: ${{ !endsWith(github.ref, '-macos') }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -174,7 +177,10 @@ jobs:
           path: dist/
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Linux and Windows are skipped on -macos tags; any failure or cancellation still blocks the release.
+    if: >-
+      always() && startsWith(github.ref, 'refs/tags/v') && needs.test.result == 'success' && needs.macos.result == 'success'
+      && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
     needs: [test, linux, windows, macos]
     runs-on: namespace-profile-linux
     permissions:
