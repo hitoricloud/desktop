@@ -109,6 +109,8 @@ pub enum Menu {
     NavUser,
     TrayAccount,
     AddApp,
+    /// A settings dropdown, by its id.
+    Select(&'static str),
 }
 
 /// Where the isolated ping ring goes this frame, in window pixels: centre and the map rect that clips it.
@@ -430,6 +432,7 @@ impl Hitori {
                 "light" => self.set_dark(false, cx),
                 "lang" => self.set_language(crate::i18n::Lang::parse(value), cx),
                 "tab" => self.settings_tab = SettingsTab::ALL.into_iter().find(|k| k.icon() == value).unwrap_or(SettingsTab::Connection),
+                "select" => self.menu = Some(Menu::Select(leak(value))),
                 "small" => self.s.rules_big = false,
                 "route" => self.s.default_route = RuleMode::parse(value),
                 "page" => self.page = if value == "rules" { Page::Rules } else { Page::Map },
@@ -715,20 +718,28 @@ impl Hitori {
     pub fn typed_dns(&self, cx: &App) -> Result<crate::xray::Dns, String> {
         let text = self.dns_input.read(cx).content.trim().to_owned();
         let mut dns = self.s.dns.clone();
-        match dns.mode {
-            crate::xray::DnsMode::Https => dns.https = text,
-            crate::xray::DnsMode::Tls => dns.tls = text,
-            crate::xray::DnsMode::Subscription => {}
+        if dns.mode != crate::xray::DnsMode::Subscription {
+            dns.set_server(&text);
         }
-        dns.check().map(|_| dns)
+        dns.check().map(|_| dns).map_err(|_| t!("xray.error.dns_server").into())
     }
 
-    /// Show `dns`, its server in the field.
-    pub fn set_dns(&mut self, dns: crate::xray::Dns, cx: &mut Context<Self>) {
-        self.dns_input.update(cx, |input, cx| {
-            input.set_content(dns_server(&dns));
-            cx.notify();
-        });
+    /// Own DNS server on: the typed one, or Cloudflare's DoH when the field holds nothing valid. Off: the subscription's.
+    pub fn set_custom_dns(&mut self, on: bool, cx: &mut Context<Self>) {
+        let mut dns = self.s.dns.clone();
+        if !on {
+            dns.mode = crate::xray::DnsMode::Subscription;
+        } else {
+            dns.set_server(&self.dns_input.read(cx).content);
+            if dns.check().is_err() {
+                let fallback = crate::xray::DNS_PRESETS[0].1;
+                dns.set_server(fallback);
+                self.dns_input.update(cx, |input, cx| {
+                    input.set_content(fallback);
+                    cx.notify();
+                });
+            }
+        }
         self.s.dns = dns;
     }
 

@@ -1,18 +1,14 @@
 //! Sheet (Account, Settings, Routing rules) and the location palette.
 use gpui::{AnyElement, Context, Div, Entity, Focusable, MouseButton, SharedString, Window, div, hsla, prelude::*, px};
 
-use crate::app::{Hitori, Panel, Place, Protocol, SettingsTab};
+use crate::app::{Hitori, Menu, Panel, Place, Protocol, SettingsTab};
 use crate::data;
 use crate::input::TextInput;
 use crate::theme::{Theme, shadow_lg};
-use crate::ui::{LG, MD, Size, Tw, Variant, XL, badge_secondary, button, icon, progress, switch};
+use crate::ui::{LG, MD, Size, Tw, Variant, XL, badge_secondary, button, icon, menu, menu_item, progress, switch, tip};
+use crate::views::{Placement, popover};
 
 type Pick = Box<dyn Fn(&mut Hitori, &mut Context<Hitori>)>;
-
-/// Width of a segmented control with these labels.
-fn segmented_width<'a>(labels: impl IntoIterator<Item = &'a str>, window: &Window) -> f32 {
-    8. + labels.into_iter().map(|l| crate::ui::text_width(l, 14., gpui::FontWeight::MEDIUM, window) + 24.).sum::<f32>()
-}
 
 /// Single-line field around a `TextInput`; `invalid` gives it the destructive border.
 fn text_field(id: &'static str, input: &Entity<TextInput>, w: f32, invalid: bool, t: &Theme, cx: &gpui::App) -> impl IntoElement {
@@ -49,18 +45,39 @@ fn hint_room(control: f32) -> f32 {
     448. - 1. - 32. - 32. - 16. - control
 }
 
-/// Content width of a settings-page row next to a control of this width: card width − border − item padding − gap.
-fn page_room(card: f32, control: f32) -> f32 {
-    card - 2. - 32. - 16. - control
-}
-
 /// Section heading above a bordered card whose rows are split by dividers.
 fn page_section(title: &str, t: &Theme, rows: Vec<AnyElement>) -> AnyElement {
-    let mut card = div().flex().flex_col().rounded(px(XL)).border_1().border_color(t.border).bg(t.muted.opacity(0.3)).overflow_hidden();
+    let mut card = div().flex().flex_col().rounded(px(XL)).border_1().border_color(t.border).bg(t.muted.opacity(0.3));
     for (i, r) in rows.into_iter().enumerate() {
         card = card.child(div().when(i > 0, |d| d.border_t_1().border_color(t.border)).child(r));
     }
-    div().flex().flex_col().gap(px(12.)).child(div().px(px(4.)).base().semibold().child(title.to_owned())).child(card).into_any_element()
+    div().flex().flex_col().gap(px(8.)).child(div().px(px(4.)).sm().semibold().child(title.to_owned())).child(card).into_any_element()
+}
+
+/// Settings row: the label with an ⓘ that explains it on hover, a note under it (status or error), the control on the right.
+fn setting(id: &str, label: &str, info: Option<&str>, note: Option<(&str, gpui::Hsla)>, control: impl IntoElement, t: &Theme) -> AnyElement {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(16.))
+        .min_h(px(56.))
+        .px(px(16.))
+        .py(px(10.))
+        .sm()
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .gap(px(2.))
+                .child(div().flex().items_center().gap(px(6.)).child(div().medium().child(label.to_owned())).children(info.map(|i| {
+                    div().id(SharedString::from(format!("info-{id}"))).flex_none().child(icon("info", 14., t.muted_fg)).tooltip(tip(i.to_owned(), t))
+                })))
+                .children(note.map(|(n, color)| div().xs().text_color(color).line_clamp(2).child(n.to_owned()))),
+        )
+        .child(div().flex().flex_none().items_center().gap(px(8.)).child(control))
+        .into_any_element()
 }
 
 /// `<Item>` row: title and hint on the left, a control on the right. `room` balances the hint's lines.
@@ -173,7 +190,7 @@ impl Hitori {
         let dh = (f32::from(vp.height) - 32.).min(640.);
         let wide = dw >= 640.;
         let side = if wide { 220. } else { 0. };
-        let cw = (dw - side - 48.).min(760.);
+        let cw = (dw - side - 48.).min(640.);
         let tab = self.settings_tab;
         let mut nav = div().flex().gap(px(4.)).when(wide, |d| d.flex_col().w(px(side)).flex_none().p(px(12.)).border_r_1().border_color(t.border)).when(!wide, |d| d.px(px(12.)).py(px(8.)).border_b_1().border_color(t.border));
         for k in SettingsTab::ALL {
@@ -199,20 +216,17 @@ impl Hitori {
                         cx.notify();
                     }))
                     .child(icon(k.icon(), 16., if on { t.foreground } else { t.muted_fg }))
-                    .child(k.label()),
+                    .when(wide || on, |d| d.child(k.label())),
             );
         }
         let content = match tab {
-            SettingsTab::Connection => self.connection_sections(cw, window, cx),
-            SettingsTab::Network => self.network_sections(cw, window, cx),
-            SettingsTab::Location => vec![page_section(t!("overlays.settings.location"), &t, vec![self.region_row(cw, window, cx)])],
+            SettingsTab::Connection => self.connection_sections(window, cx),
+            SettingsTab::Network => self.network_sections(window, cx),
+            SettingsTab::Location => vec![page_section(t!("overlays.settings.location"), &t, vec![self.region_row(cx)])],
             SettingsTab::Appearance => {
                 let dark = t.dark;
-                let room = page_room(cw, 32.);
-                vec![
-                    page_section(t!("overlays.settings.theme"), &t, vec![row(t!("overlays.settings.dark"), Some(t!("overlays.settings.dark_hint")), room, switch("dark", dark, &t).on_click(cx.listener(move |this, _, _, cx| this.set_dark(!dark, cx))), &t, window)]),
-                    page_section(t!("overlays.settings.language"), &t, vec![self.language_row(cw, window, cx)]),
-                ]
+                let theme = setting("dark", t!("overlays.settings.dark"), None, None, switch("dark", dark, &t).on_click(cx.listener(move |this, _, _, cx| this.set_dark(!dark, cx))), &t);
+                vec![page_section(SettingsTab::Appearance.label(), &t, vec![theme, self.language_row(window, cx)])]
             }
         };
         let dialog = div()
@@ -276,7 +290,7 @@ impl Hitori {
                     .child(nav)
                     .child(
                         div().id("settings-scroll").flex_1().min_w_0().min_h_0().overflow_y_scroll().child(
-                            div().w(px(cw)).mx_auto().py(px(24.)).flex().flex_col().gap(px(32.)).children(content),
+                            div().w(px(cw)).mx_auto().py(px(20.)).flex().flex_col().gap(px(20.)).children(content),
                         ),
                     ),
             )
@@ -299,237 +313,226 @@ impl Hitori {
             .into_any_element()
     }
 
-    /// Segmented control: one button per item, the `on` one highlighted.
-    fn segmented(&self, id: &str, items: Vec<(String, bool, Pick)>, cx: &mut Context<Self>) -> Div {
+    /// Select: a trigger with the current value; the options drop below it, the current one checked.
+    fn select(&self, id: &'static str, items: Vec<(String, bool, Pick)>, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let t = self.theme(cx);
-        let mut group = div().flex().bg(t.background).rounded(px(MD)).p(px(4.));
-        let n = items.len();
-        for (i, (label, on, pick)) in items.into_iter().enumerate() {
-            let (muted, muted_fg) = (t.muted, t.muted_fg);
-            group = group.child(
-                div()
-                    .id(SharedString::from(format!("{id}-{label}")))
-                    .h(px(32.))
-                    .px(px(12.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .sm()
-                    .medium()
-                    .cursor_pointer()
-                    .when(i == 0, |d| d.rounded_l(px(MD)))
-                    .when(i == n - 1, |d| d.rounded_r(px(MD)))
-                    .when(on, |d| d.bg(t.accent))
-                    .when(!on, |d| d.hover(move |s| s.bg(muted).text_color(muted_fg)))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        pick(this, cx);
-                        cx.notify();
-                    }))
-                    .child(label),
-            );
-        }
-        group
-    }
-
-    fn connection_sections(&self, cw: f32, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let t = self.theme(cx);
-        let proto_items = Protocol::ALL.into_iter().map(|p| (p.label().to_owned(), self.s.protocol == p, Box::new(move |this: &mut Self, _: &mut Context<Self>| this.s.protocol = p) as Pick)).collect();
-        let group = self.segmented("proto", proto_items, cx);
-        let toggle_w = segmented_width(Protocol::ALL.iter().map(|p| p.label()), window);
-        let mode = (crate::os::SYSTEM_PROXY && self.s.system_wide).then(|| self.mode_row(cw, window, cx));
-        let room = page_room(cw, 32.);
-        let p = &self.s.proxy;
-        let proxy_hint = t!("overlays.connection.system_wide_off", host = p.host(), socks = p.socks, http = p.http);
-        vec![page_section(
-            t!("overlays.connection.title"),
-            &t,
-            [row(t!("overlays.connection.protocol"), Some(t!("overlays.connection.protocol_hint")), page_room(cw, toggle_w), group, &t, window)]
+        let widest = items.iter().map(|(l, ..)| crate::ui::text_width(l, 14., gpui::FontWeight::NORMAL, window)).fold(0., f32::max);
+        let w = (widest + 2. + 24. + 8. + 16.).max(120.);
+        let current = items.iter().find(|i| i.1).map_or(String::new(), |i| i.0.clone());
+        let muted = t.muted;
+        let trigger = div()
+            .id(SharedString::from(format!("select-{id}")))
+            .w(px(w))
+            .h(px(36.))
+            .px(px(12.))
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(8.))
+            .rounded(px(MD))
+            .border_1()
+            .border_color(t.border)
+            .bg(t.background)
+            .cursor_pointer()
+            .hover(move |s| s.bg(muted))
+            .on_click(cx.listener(move |this, _, _, cx| this.toggle_menu(Menu::Select(id), cx)))
+            .child(div().min_w_0().truncate().child(current))
+            .child(icon("chevron-down", 16., t.muted_fg));
+        let popup = self.menu_phase(Menu::Select(id)).map(|ph| {
+            let options = items
                 .into_iter()
-                .chain([row(
-                    t!("overlays.connection.system_wide"),
-                    Some(if !self.s.system_wide {
-                        &proxy_hint
-                    } else if crate::os::SYSTEM_PROXY {
-                        t!("overlays.connection.system_wide_proxy")
-                    } else {
-                        t!("overlays.connection.system_wide_tun")
-                    }),
-                    room,
-                    switch("system-wide", self.s.system_wide, &t).on_click(cx.listener(|this, _, _, cx| {
-                        this.s.system_wide = !this.s.system_wide;
-                        cx.notify();
-                    })),
-                    &t,
-                    window,
-                )])
-                .chain(mode)
-                .chain([
-                    row(
-                        t!("overlays.connection.startup"),
-                        Some(t!("overlays.connection.startup_hint")),
-                        room,
-                        switch("startup", self.s.auto_connect, &t).on_click(cx.listener(|this, _, _, cx| {
-                            this.s.auto_connect = !this.s.auto_connect;
+                .enumerate()
+                .map(|(i, (label, on, pick))| {
+                    menu_item(SharedString::from(format!("{id}-option-{i}")), &t, false)
+                        .child(div().flex_1().child(label))
+                        .when(on, |d| d.child(icon("check", 16., t.foreground)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            pick(this, cx);
+                            this.menu = None;
                             cx.notify();
-                        })),
-                        &t,
-                        window,
-                    ),
-                    row(
-                        t!("overlays.connection.kill_switch"),
-                        Some(if !self.s.system_wide {
-                            t!("overlays.connection.kill_switch_needs_system_wide")
-                        } else if crate::os::SYSTEM_PROXY && !self.s.tun {
-                            t!("overlays.connection.kill_switch_needs_tun")
-                        } else {
-                            t!("overlays.connection.kill_switch_hint")
-                        }),
-                        room,
-                        switch("kill-switch", self.s.kill_switch, &t).on_click(cx.listener(|this, _, _, cx| {
-                            this.s.kill_switch = !this.s.kill_switch;
-                            cx.notify();
-                        })),
-                        &t,
-                        window,
-                    ),
-                ])
-                .collect(),
-        )]
-    }
-
-    /// DNS: the subscription's servers or a DoH/DoT server, through the tunnel or not.
-    fn dns_section(&self, cw: f32, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        use crate::xray::{DNS_PRESETS, DnsMode};
-        let t = self.theme(cx);
-        let dns = self.s.dns.clone();
-        let modes = [(DnsMode::Subscription, t!("overlays.dns.subscription")), (DnsMode::Https, "HTTPS"), (DnsMode::Tls, "TLS")];
-        let width = segmented_width(modes.iter().map(|(_, l)| *l), window);
-        let items = modes
-            .into_iter()
-            .map(|(m, label)| {
-                let pick = move |this: &mut Self, cx: &mut Context<Self>| this.set_dns(crate::xray::Dns { mode: m, ..this.s.dns.clone() }, cx);
-                (label.to_owned(), dns.mode == m, Box::new(pick) as Pick)
-            })
-            .collect();
-        let hint = match dns.mode {
-            DnsMode::Subscription => t!("overlays.dns.subscription_hint"),
-            DnsMode::Https => t!("overlays.dns.https_hint"),
-            DnsMode::Tls => t!("overlays.dns.tls_hint"),
-        };
-        let mut rows = vec![row(t!("overlays.dns.servers"), Some(hint), page_room(cw, width), self.segmented("dns-mode", items, cx), &t, window)];
-        if dns.mode != DnsMode::Subscription {
-            let tls = dns.mode == DnsMode::Tls;
-            let typed = self.dns_input.read(cx).content.trim().to_owned();
-            let width = segmented_width(DNS_PRESETS.iter().map(|p| p.0), window);
-            let presets = DNS_PRESETS
-                .iter()
-                .map(|&(name, https, dot)| {
-                    let pick = move |this: &mut Self, cx: &mut Context<Self>| {
-                        let mut d = this.s.dns.clone();
-                        if tls { d.tls = dot.into() } else { d.https = https.into() }
-                        this.set_dns(d, cx);
-                    };
-                    (name.to_owned(), typed == if tls { dot } else { https }, Box::new(pick) as Pick)
+                        }))
+                        .into_any_element()
                 })
                 .collect();
-            rows.push(row(t!("overlays.dns.provider"), Some(t!("overlays.dns.provider_hint")), page_room(cw, width), self.segmented("dns-preset", presets, cx), &t, window));
-            let error = self.typed_dns(cx).err();
-            let hint = match (&error, tls) {
-                (Some(e), _) => format!("{e}."),
-                (None, false) => t!("overlays.dns.https_server_hint").to_owned(),
-                (None, true) => t!("overlays.dns.tls_server_hint").to_owned(),
-            };
-            rows.push(row(t!("overlays.dns.server"), Some(&hint), page_room(cw, 260.), text_field("dns-server", &self.dns_input, 260., error.is_some(), &t, cx), &t, window));
+            popover(Placement::BelowEnd, ph, menu(w.max(widest + 56.), &t, options))
+        });
+        div().relative().child(trigger).children(popup).into_any_element()
+    }
+
+    fn connection_sections(&self, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let t = self.theme(cx);
+        let protocols = Protocol::ALL.into_iter().map(|p| (p.label().to_owned(), self.s.protocol == p, Box::new(move |this: &mut Self, _: &mut Context<Self>| this.s.protocol = p) as Pick)).collect();
+        let p = &self.s.proxy;
+        let proxy_info = t!("overlays.connection.system_wide_off", host = p.host(), socks = p.socks, http = p.http);
+        let system_info = if !self.s.system_wide {
+            proxy_info.as_str()
+        } else if crate::os::SYSTEM_PROXY {
+            t!("overlays.connection.system_wide_proxy")
+        } else {
+            t!("overlays.connection.system_wide_tun")
+        };
+        let kill_info = if !self.s.system_wide {
+            t!("overlays.connection.kill_switch_needs_system_wide")
+        } else if crate::os::SYSTEM_PROXY && !self.s.tun {
+            t!("overlays.connection.kill_switch_needs_tun")
+        } else {
+            t!("overlays.connection.kill_switch_hint")
+        };
+        let mut rows = vec![
+            setting("protocol", t!("overlays.connection.protocol"), Some(t!("overlays.connection.protocol_hint")), None, self.select("protocol", protocols, window, cx), &t),
+            setting(
+                "system-wide",
+                t!("overlays.connection.system_wide"),
+                Some(system_info),
+                None,
+                switch("system-wide", self.s.system_wide, &t).on_click(cx.listener(|this, _, _, cx| {
+                    this.s.system_wide = !this.s.system_wide;
+                    cx.notify();
+                })),
+                &t,
+            ),
+        ];
+        if crate::os::SYSTEM_PROXY && self.s.system_wide {
+            rows.push(self.mode_row(window, cx));
         }
-        let direct = dns.direct;
-        rows.push(row(
-            t!("overlays.dns.through_vpn"),
-            Some(if direct { t!("overlays.dns.direct_hint") } else { t!("overlays.dns.tunnel_hint") }),
-            page_room(cw, 32.),
-            switch("dns-direct", !direct, &t).on_click(cx.listener(move |this, _, _, cx| {
-                this.s.dns.direct = !direct;
+        rows.push(setting(
+            "startup",
+            t!("overlays.connection.startup"),
+            None,
+            None,
+            switch("startup", self.s.auto_connect, &t).on_click(cx.listener(|this, _, _, cx| {
+                this.s.auto_connect = !this.s.auto_connect;
                 cx.notify();
             })),
             &t,
-            window,
         ));
+        rows.push(setting(
+            "kill-switch",
+            t!("overlays.connection.kill_switch"),
+            Some(kill_info),
+            None,
+            switch("kill-switch", self.s.kill_switch, &t).on_click(cx.listener(|this, _, _, cx| {
+                this.s.kill_switch = !this.s.kill_switch;
+                cx.notify();
+            })),
+            &t,
+        ));
+        vec![page_section(t!("overlays.connection.title"), &t, rows)]
+    }
+
+    /// DNS: the subscription's servers, or one typed server (DoH URL or DoT host:port), through the tunnel or not.
+    fn dns_section(&self, cx: &mut Context<Self>) -> AnyElement {
+        let t = self.theme(cx);
+        let custom = self.s.dns.mode != crate::xray::DnsMode::Subscription;
+        let mut rows = vec![setting(
+            "dns-custom",
+            t!("overlays.dns.custom"),
+            Some(t!("overlays.dns.custom_info")),
+            None,
+            switch("dns-custom", custom, &t).on_click(cx.listener(move |this, _, _, cx| {
+                this.set_custom_dns(!custom, cx);
+                cx.notify();
+            })),
+            &t,
+        )];
+        if custom {
+            let error = self.typed_dns(cx).err();
+            let field = text_field("dns-server", &self.dns_input, 240., error.is_some(), &t, cx);
+            rows.push(setting("dns-server", t!("overlays.dns.server"), Some(t!("overlays.dns.server_info")), error.as_deref().map(|e| (e, t.destructive)), field, &t));
+            let direct = self.s.dns.direct;
+            rows.push(setting(
+                "dns-direct",
+                t!("overlays.dns.through_vpn"),
+                Some(if direct { t!("overlays.dns.direct_hint") } else { t!("overlays.dns.tunnel_hint") }),
+                None,
+                switch("dns-direct", !direct, &t).on_click(cx.listener(move |this, _, _, cx| {
+                    this.s.dns.direct = !direct;
+                    cx.notify();
+                })),
+                &t,
+            ));
+        }
         page_section(t!("overlays.dns.title"), &t, rows)
     }
 
-    /// Local proxy and DNS.
-    fn network_sections(&self, cw: f32, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    /// Local proxy (who may connect, which ports) and DNS.
+    fn network_sections(&self, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let t = self.theme(cx);
-        let listen = self.s.proxy.listen.clone();
+        let proxy = &self.s.proxy;
+        let (listen, shared) = (proxy.listen.clone(), proxy.lan());
         let lan = self.s.lan.map(|a| a.to_string());
-        // Loopback, the LAN address, a saved address from another network, every network.
-        let mut choices: Vec<String> = vec![];
-        for c in ["127.0.0.1".to_owned()].into_iter().chain(lan.clone()).chain([listen.clone(), "0.0.0.0".into()]) {
-            if !choices.contains(&c) {
-                choices.push(c);
+        let mut rows = vec![setting(
+            "lan-access",
+            t!("overlays.network.lan_access"),
+            Some(t!("overlays.network.lan_access_info")),
+            None,
+            switch("lan-access", shared, &t).on_click(cx.listener(move |this, _, _, cx| {
+                this.s.proxy.listen = if shared { "127.0.0.1".into() } else { this.s.lan.map_or("0.0.0.0".into(), |a| a.to_string()) };
+                cx.notify();
+            })),
+            &t,
+        )];
+        if shared {
+            // The LAN address, a saved address from another network, every network.
+            let mut choices: Vec<String> = vec![];
+            for c in lan.clone().into_iter().chain([listen.clone(), "0.0.0.0".into()]) {
+                if !choices.contains(&c) {
+                    choices.push(c);
+                }
             }
+            let items = choices
+                .into_iter()
+                .map(|c| {
+                    let on = c == listen;
+                    let pick = c.clone();
+                    (c, on, Box::new(move |this: &mut Self, _: &mut Context<Self>| this.s.proxy.listen = pick.clone()) as Pick)
+                })
+                .collect();
+            let info = match listen.as_str() {
+                "0.0.0.0" => t!("overlays.network.listen_any").to_owned(),
+                ip if Some(ip) == lan.as_deref() => t!("overlays.network.listen_lan").to_owned(),
+                ip => t!("overlays.network.listen_other", ip = ip),
+            };
+            rows.push(setting("listen", t!("overlays.network.listen_on"), Some(&info), None, self.select("listen", items, window, cx), &t));
         }
-        let width = segmented_width(choices.iter().map(String::as_str), window);
-        let items = choices
-            .into_iter()
-            .map(|c| {
-                let on = c == listen;
-                let pick = c.clone();
-                (c, on, Box::new(move |this: &mut Self, _: &mut Context<Self>| this.s.proxy.listen = pick.clone()) as Pick)
-            })
-            .collect();
-        let listen_hint = match listen.as_str() {
-            "127.0.0.1" => t!("overlays.network.listen_loopback").to_owned(),
-            "0.0.0.0" => t!("overlays.network.listen_any").to_owned(),
-            ip if Some(ip) == lan.as_deref() => t!("overlays.network.listen_lan").to_owned(),
-            ip => t!("overlays.network.listen_other", ip = ip),
-        };
         let error = self.ports_error(cx);
         let (socks, http) = (crate::app::port(&self.socks_input, cx), crate::app::port(&self.http_input, cx));
         let same = socks.is_some() && socks == http;
-        let (socks_bad, http_bad) = (socks.is_none() || same, http.is_none() || same);
-        let caption = |s: &str| div().sm().text_color(t.muted_fg).child(s.to_owned());
+        let caption = |s: &str| div().text_color(t.muted_fg).child(s.to_owned());
         let ports = div()
             .flex()
             .items_center()
             .gap(px(8.))
             .child(caption("SOCKS5"))
-            .child(text_field("socks-port", &self.socks_input, 80., socks_bad, &t, cx))
+            .child(text_field("socks-port", &self.socks_input, 80., socks.is_none() || same, &t, cx))
             .child(caption("HTTP"))
-            .child(text_field("http-port", &self.http_input, 80., http_bad, &t, cx));
-        let ports_w = 3. * 8. + 2. * 80. + ["SOCKS5", "HTTP"].iter().map(|s| crate::ui::text_width(s, 14., gpui::FontWeight::NORMAL, window)).sum::<f32>();
-        let p = &self.s.proxy;
-        let ports_hint = match error {
-            Some(e) => format!("{e}."),
-            None if self.s.uses_tun() => t!("overlays.network.ports_tun").to_owned(),
-            None => t!("overlays.network.ports_hint", host = p.host(), socks = p.socks, http = p.http),
+            .child(text_field("http-port", &self.http_input, 80., http.is_none() || same, &t, cx));
+        let ports_info = if self.s.uses_tun() && !shared {
+            t!("overlays.network.ports_tun").to_owned()
+        } else {
+            t!("overlays.network.ports_hint", host = proxy.host(), socks = proxy.socks, http = proxy.http)
         };
+        rows.push(setting("ports", t!("overlays.network.ports"), Some(&ports_info), error.as_deref().map(|e| (e, t.destructive)), ports, &t));
         vec![
-            page_section(
-                t!("overlays.network.local_proxy"),
-                &t,
-                vec![
-                    row(t!("overlays.network.listen_on"), Some(&listen_hint), page_room(cw, width), self.segmented("listen", items, cx), &t, window),
-                    row(t!("overlays.network.ports"), Some(&ports_hint), page_room(cw, ports_w), ports, &t, window),
-                ],
-            ),
-            self.dns_section(cw, window, cx),
-            div().px(px(4.)).sm().text_color(t.muted_fg).child(t!("overlays.network.apply")).into_any_element(),
+            page_section(t!("overlays.network.local_proxy"), &t, rows),
+            self.dns_section(cx),
+            div().px(px(4.)).xs().text_color(t.muted_fg).child(t!("overlays.network.apply")).into_any_element(),
         ]
     }
 
     /// Detected country, how much of it is routed through the VPN, and a recheck button.
-    fn region_row(&self, cw: f32, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    fn region_row(&self, cx: &mut Context<Self>) -> AnyElement {
         let t = self.theme(cx);
         let r = &self.s.region;
         let busy = r.status == crate::region::Status::Computing;
-        let hint = match (&r.country, &r.status) {
+        let failed = matches!(r.status, crate::region::Status::Failed(_));
+        let status = match (&r.country, &r.status) {
             (Some(_), crate::region::Status::Failed(e)) if r.domains + r.subnets > 0 => t!("overlays.region.failed_saved", place = r.place(), error = e),
             (Some(_), crate::region::Status::Failed(e)) => t!("overlays.region.failed", place = r.place(), error = e),
             (Some(_), _) => format!("{} · {}", r.place(), r.line()),
             (None, _) => r.line(),
         };
         let label = if busy { t!("overlays.region.checking") } else { t!("overlays.region.recheck") };
-        let w = 2. + 24. + 16. + 8. + crate::ui::text_width(label, 14., gpui::FontWeight::MEDIUM, window);
         let button = button("region-recheck", Variant::Outline, Size::Sm, true, &t)
             .when(busy, |b| b.opacity(0.5))
             .child(if busy { crate::ui::spinner("region-spin", 16., t.foreground).into_any_element() } else { icon("refresh-cw", 16., t.foreground).into_any_element() })
@@ -539,76 +542,32 @@ impl Hitori {
                     this.recheck_region(cx);
                 }
             }));
-        row(t!("overlays.region.detected"), Some(&hint), page_room(cw, w), button, &t, window)
+        setting("region", t!("overlays.region.detected"), None, Some((&status, if failed { t.destructive } else { t.muted_fg })), button, &t)
     }
 
     /// System, English, Русский: switches every window and the tray right away.
-    fn language_row(&self, cw: f32, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    fn language_row(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let t = self.theme(cx);
-        let choices: Vec<(Option<crate::i18n::Lang>, &str)> =
-            std::iter::once((None, t!("overlays.settings.language_system"))).chain(crate::i18n::Lang::ALL.map(|l| (Some(l), l.name()))).collect();
-        let n = choices.len();
-        let mut group = div().flex().bg(t.background).rounded(px(MD)).p(px(4.));
-        for (i, (choice, label)) in choices.iter().copied().enumerate() {
-            let (muted, muted_fg) = (t.muted, t.muted_fg);
-            let on = self.s.language == choice;
-            group = group.child(
-                div()
-                    .id(SharedString::from(format!("language-{}", choice.map_or("system", |l| l.code()))))
-                    .h(px(32.))
-                    .px(px(12.))
-                    .flex()
-                    .items_center()
-                    .sm()
-                    .medium()
-                    .cursor_pointer()
-                    .when(i == 0, |d| d.rounded_l(px(MD)))
-                    .when(i == n - 1, |d| d.rounded_r(px(MD)))
-                    .when(on, |d| d.bg(t.accent))
-                    .when(!on, |d| d.hover(move |s| s.bg(muted).text_color(muted_fg)))
-                    .on_click(cx.listener(move |this, _, _, cx| this.set_language(choice, cx)))
-                    .child(label),
-            );
-        }
-        let w = 8. + choices.iter().map(|(_, l)| crate::ui::text_width(l, 14., gpui::FontWeight::MEDIUM, window) + 24.).sum::<f32>();
-        row(t!("overlays.settings.language_row"), Some(t!("overlays.settings.language_hint")), page_room(cw, w), group, &t, window)
+        let items = std::iter::once((None, t!("overlays.settings.language_system")))
+            .chain(crate::i18n::Lang::ALL.map(|l| (Some(l), l.name())))
+            .map(|(choice, label)| (label.to_owned(), self.s.language == choice, Box::new(move |this: &mut Self, cx: &mut Context<Self>| this.set_language(choice, cx)) as Pick))
+            .collect();
+        setting("language", t!("overlays.settings.language_row"), None, None, self.select("language", items, window, cx), &t)
     }
 
     /// Windows and macOS: how system-wide mode works, the system proxy or a TUN.
-    fn mode_row(&self, cw: f32, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    fn mode_row(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let t = self.theme(cx);
-        let modes = [(false, t!("overlays.mode.system_proxy")), (true, "TUN")];
-        let mut group = div().flex().bg(t.background).rounded(px(MD)).p(px(4.));
-        for (i, (tun, label)) in modes.into_iter().enumerate() {
-            let (muted, muted_fg) = (t.muted, t.muted_fg);
-            group = group.child(
-                div()
-                    .id(SharedString::from(format!("mode-{tun}")))
-                    .h(px(32.))
-                    .px(px(12.))
-                    .flex()
-                    .items_center()
-                    .sm()
-                    .medium()
-                    .cursor_pointer()
-                    .when(i == 0, |d| d.rounded_l(px(MD)))
-                    .when(i == 1, |d| d.rounded_r(px(MD)))
-                    .when(self.s.tun == tun, |d| d.bg(t.accent))
-                    .when(self.s.tun != tun, |d| d.hover(move |s| s.bg(muted).text_color(muted_fg)))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.s.tun = tun;
-                        cx.notify();
-                    }))
-                    .child(label),
-            );
-        }
-        let w = 8. + modes.iter().map(|(_, l)| crate::ui::text_width(l, 14., gpui::FontWeight::MEDIUM, window) + 24.).sum::<f32>();
-        let hint = match (self.s.tun, cfg!(windows)) {
+        let items = [(false, t!("overlays.mode.system_proxy")), (true, "TUN")]
+            .into_iter()
+            .map(|(tun, label)| (label.to_owned(), self.s.tun == tun, Box::new(move |this: &mut Self, _: &mut Context<Self>| this.s.tun = tun) as Pick))
+            .collect();
+        let info = match (self.s.tun, cfg!(windows)) {
             (false, _) => t!("overlays.mode.proxy_hint"),
             (true, true) => t!("overlays.mode.tun_hint_windows"),
             (true, false) => t!("overlays.mode.tun_hint"),
         };
-        row(t!("overlays.mode.title"), Some(hint), page_room(cw, w), group, &t, window)
+        setting("mode", t!("overlays.mode.title"), Some(info), None, self.select("mode", items, window, cx), &t)
     }
 
     pub fn sign_in_body(&self, cx: &mut Context<Self>) -> AnyElement {

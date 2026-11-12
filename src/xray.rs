@@ -44,6 +44,11 @@ impl LocalProxy {
         Ok(())
     }
 
+    /// Other devices may connect: the listeners are not on loopback, and stay up in TUN mode too.
+    pub fn lan(&self) -> bool {
+        self.listen != "127.0.0.1"
+    }
+
     /// Where apps on this computer reach the listeners.
     pub fn host(&self) -> &str {
         if self.listen == "0.0.0.0" { "127.0.0.1" } else { &self.listen }
@@ -109,6 +114,16 @@ impl Dns {
     pub fn tls_target(&self) -> Option<(&str, u16)> {
         let s = self.tls.trim();
         host_port(s.strip_prefix("tls://").unwrap_or(s).trim_end_matches('/'), 853)
+    }
+
+    /// A typed server: an `https://` URL is DoH, anything else (`host`, `host:port`, `tls://…`) DoT.
+    pub fn set_server(&mut self, server: &str) {
+        let server = server.trim();
+        if server.starts_with("https://") {
+            (self.mode, self.https) = (DnsMode::Https, server.into());
+        } else {
+            (self.mode, self.tls) = (DnsMode::Tls, server.into());
+        }
     }
 
     pub fn check(&self) -> Result<(), String> {
@@ -397,7 +412,8 @@ pub fn config(plan: &Plan, ports: Ports) -> Result<Value, String> {
     let mut inbounds = vec![json!({"tag": "probe-in", "listen": "127.0.0.1", "port": ports.probe, "protocol": "http"}), ping_in];
     if tun {
         inbounds.push(json!({"tag": "tun", "port": 0, "protocol": "tun", "settings": tun_settings(&plan.dns.resolver(&plan.sub_dns)), "sniffing": sniff}));
-    } else {
+    }
+    if !tun || plan.proxy.lan() {
         let p = &plan.proxy;
         inbounds.push(json!({"tag": "socks", "listen": p.listen, "port": p.socks, "protocol": "socks", "settings": {"udp": true}, "sniffing": sniff}));
         inbounds.push(json!({"tag": "http", "listen": p.listen, "port": p.http, "protocol": "http", "sniffing": sniff}));
@@ -1207,6 +1223,23 @@ mod tests {
         assert_eq!(c["routing"]["rules"][0]["outboundTag"], "dns-out");
         assert!(c["inbounds"].as_array().unwrap().iter().any(|i| i["protocol"] == "tun" && i["settings"]["name"] == TUN_NAME));
         assert!(!c["inbounds"].as_array().unwrap().iter().any(|i| i["port"] == LocalProxy::default().socks));
+        p.proxy.listen = "192.168.1.248".into();
+        let c = config(&p, Ports { probe: 1, metrics: 2, ping: 3 }).unwrap();
+        let socks = c["inbounds"].as_array().unwrap().iter().find(|i| i["tag"] == "socks").expect("LAN listeners stay up in TUN mode");
+        assert_eq!(socks["listen"], "192.168.1.248");
+    }
+
+    #[test]
+    fn a_typed_dns_server_picks_doh_or_dot() {
+        let mut d = Dns::default();
+        d.set_server(" https://dns.google/dns-query ");
+        assert_eq!((d.mode, d.https.as_str()), (DnsMode::Https, "https://dns.google/dns-query"));
+        d.set_server("1.1.1.1:853");
+        assert_eq!((d.mode, d.tls_target()), (DnsMode::Tls, Some(("1.1.1.1", 853))));
+        d.set_server("tls://dns.quad9.net");
+        assert_eq!(d.tls_target(), Some(("dns.quad9.net", 853)));
+        d.set_server("http://x/");
+        assert!(d.check().is_err());
     }
 
     /// Against the real subscription and core: HITORI_TEST_SUB=<subscription JSON> cargo test live -- --ignored --nocapture

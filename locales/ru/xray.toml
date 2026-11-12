@@ -1,4 +1,5 @@
 [error]
+dns_server = "Введите https://… или хост:порт"
 not_ipv4 = "{ip} — не IPv4-адрес"
 ports_range = "Порт — число от 1 до 65535"
 ports_different = "Для SOCKS5 и HTTP нужны разные порты"

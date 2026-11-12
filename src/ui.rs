@@ -270,6 +270,7 @@ impl Render for Tip {
             .relative()
             .px(px(12.))
             .py(px(8.))
+            .max_w(px(280.))
             .rounded(px(MD))
             .bg(self.theme.foreground)
             .text_color(self.theme.background)
