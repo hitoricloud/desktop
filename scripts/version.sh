@@ -2,7 +2,8 @@
 # Package version: the tag without its "v", else Cargo.toml's version and the short commit.
 set -euo pipefail
 if [[ "${GITHUB_REF_TYPE:-}" == tag ]]; then
-  echo "${GITHUB_REF_NAME#v}"
+  name="${GITHUB_REF_NAME#v}"
+  echo "${name%-macos}"
   exit
 fi
 root="$(cd "$(dirname "$0")/.." && pwd)"

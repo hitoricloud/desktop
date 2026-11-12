@@ -2803,6 +2803,7 @@ dependencies = [
  "libc",
  "mvt-reader",
  "netstat2",
+ "percent-encoding",
  "resvg",
  "rust-embed",
  "serde",

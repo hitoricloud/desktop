@@ -114,6 +114,12 @@ fn os_version() -> String {
     v.map(|s| s.trim().to_owned()).unwrap_or_default()
 }
 
+/// Header values must be visible ASCII (ureq rejects the rest with `BadHeader`): percent-encode UTF-8, controls and `%`.
+fn header_value(s: &str) -> String {
+    const SET: &percent_encoding::AsciiSet = &percent_encoding::CONTROLS.add(b'%');
+    percent_encoding::utf8_percent_encode(s, SET).to_string()
+}
+
 fn request(url: &str) -> ureq::Request {
     ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(25))
@@ -122,8 +128,8 @@ fn request(url: &str) -> ureq::Request {
         .set("User-Agent", &format!("Hitori/{} ({OS})", env!("CARGO_PKG_VERSION")))
         .set("x-hwid", &hwid())
         .set("x-device-os", OS)
-        .set("x-ver-os", &os_version())
-        .set("x-device-model", &hostname())
+        .set("x-ver-os", &header_value(&os_version()))
+        .set("x-device-model", &header_value(&hostname()))
 }
 
 fn decode_title(v: &str) -> String {
@@ -304,5 +310,13 @@ mod tests {
         assert_eq!(flag_code("🇨🇭 Швейцария #7").unwrap(), ("CH".to_owned(), "Швейцария #7"));
         assert!(flag_code("Автоматический").is_none());
         assert_eq!(decode_title("base64:aGl0b3JpdnBu"), "hitorivpn");
+    }
+
+    #[test]
+    fn header_values_are_ascii() {
+        assert_eq!(header_value("MacBook Air — oki"), "MacBook Air %E2%80%94 oki");
+        assert_eq!(header_value("ПК"), "%D0%9F%D0%9A");
+        assert_eq!(header_value("100% Mac\t1"), "100%25 Mac%091");
+        assert_eq!(header_value("MacBook-Pro"), "MacBook-Pro");
     }
 }
