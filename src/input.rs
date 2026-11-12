@@ -641,6 +641,13 @@ impl TextInput {
     pub fn set_placeholder(&mut self, text: &str) {
         self.placeholder = text.to_owned().into();
     }
+
+    /// Replace the text, caret at the end.
+    pub fn set_content(&mut self, text: &str) {
+        self.reset();
+        self.content = text.to_owned().into();
+        self.selected_range = self.content.len()..self.content.len();
+    }
 }
 
 pub fn bindings() -> Vec<KeyBinding> {

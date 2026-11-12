@@ -44,7 +44,8 @@ pub struct Net {
 }
 
 impl Net {
-    pub fn up(_: &Peer, xray: &Path, kill: bool) -> Result<Net, String> {
+    /// The core sets the adapter's resolver itself.
+    pub fn up(_: &Peer, xray: &Path, kill: bool, _: &str) -> Result<Net, String> {
         if !xray.with_file_name("wintun.dll").is_file() {
             return Err("wintun.dll is missing next to xray.exe".into());
         }

@@ -1,5 +1,6 @@
 //! The VPN model every window and the tray mirror: account, servers, the running core and its numbers.
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -16,7 +17,7 @@ use crate::region::{self, Location};
 use crate::store::{self, Login, Rule, Settings};
 use crate::sub;
 use crate::suggest::Tracker;
-use crate::xray::{self, Core, Plan};
+use crate::xray::{self, Core, Dns, LocalProxy, Plan};
 
 #[derive(Clone, PartialEq)]
 pub struct Me {
@@ -59,6 +60,10 @@ pub struct Shared {
     pub default_route: RuleMode,
     pub system_wide: bool,
     pub tun: bool,
+    pub proxy: LocalProxy,
+    pub dns: Dns,
+    /// This computer's address on the LAN, which the local proxy can listen on.
+    pub lan: Option<Ipv4Addr>,
     pub app_routes: Vec<(&'static str, AppRule)>,
     pub sites: Vec<(&'static str, AppRule)>,
     pub suggestions: Vec<Suggestion>,
@@ -115,6 +120,7 @@ impl Shared {
         self.pending = model.pending.clone();
         self.tested_at = model.tested_at;
         self.region = model.region.clone();
+        self.lan = model.lan;
         if !data::has_server(self.server_id) {
             self.server_id = model.server_id;
         }
@@ -131,6 +137,8 @@ impl Shared {
             route: self.default_route.key().into(),
             system_wide: self.system_wide,
             tun: self.tun,
+            proxy: self.proxy.clone(),
+            dns: self.dns.clone(),
             dark: self.dark,
             rules_big: self.rules_big,
             apps: self.app_routes.iter().map(|(a, r)| Rule::from_app(a, r)).collect(),
@@ -154,6 +162,14 @@ struct Exit {
     city: Option<String>,
     lat: f64,
     lon: f64,
+}
+
+/// A private IPv4 address of this computer, not the tunnel's.
+fn lan(addr: Option<IpAddr>) -> Option<Ipv4Addr> {
+    match addr? {
+        IpAddr::V4(a) if a.is_private() => Some(a),
+        _ => None,
+    }
 }
 
 fn exits_path() -> std::path::PathBuf {
@@ -222,6 +238,7 @@ impl Vpn {
         let location: Option<Location> = store::load(&Location::path());
         let auth = Arc::new(auth::Client::new(auth::api(), auth::session_path()));
         let session = auth.session();
+        let net_addr = region::local_addr();
         let i = data::intern;
         let s = Shared {
             conn: Conn::Off,
@@ -236,6 +253,9 @@ impl Vpn {
             default_route: RuleMode::parse(&saved.route),
             system_wide: saved.system_wide,
             tun: saved.tun,
+            proxy: saved.proxy.clone(),
+            dns: saved.dns.clone(),
+            lan: lan(net_addr),
             app_routes: saved.apps.iter().map(Rule::to_app).collect(),
             sites: saved.sites(),
             suggestions: vec![],
@@ -288,7 +308,7 @@ impl Vpn {
             region_rules: Arc::default(),
             checking: None,
             last_check: None,
-            net_addr: region::local_addr(),
+            net_addr,
             _region_watch: Self::region_watch(cx),
             live: None,
             revs: live::Revs::default(),
@@ -466,6 +486,11 @@ impl Vpn {
                     let changed = std::mem::replace(&mut this.net_addr, addr) != addr;
                     if changed {
                         this.kick_live();
+                    }
+                    // Through a TUN the address is the tunnel's.
+                    if this.direct() && this.s.lan != lan(addr) {
+                        this.s.lan = lan(addr);
+                        cx.notify();
                     }
                     let backoff = this.last_check.is_some_and(|t| t.elapsed() < Duration::from_secs(120));
                     if this.direct() && (changed || !backoff) && region::due(this.location.as_ref(), region::now(), changed) {
@@ -852,6 +877,7 @@ impl Vpn {
             tun: self.s.uses_tun(),
             system_proxy: self.s.system_wide && !self.s.tun && crate::os::SYSTEM_PROXY,
             kill_switch: self.s.kill_switch,
+            proxy: self.s.proxy.clone(),
             apps: self.s.app_routes.clone(),
             sites: self.s.sites.clone(),
             servers: data::servers(),
@@ -861,7 +887,8 @@ impl Vpn {
                 Arc::new(self.lists.tunnel.iter().chain(self.region_rules.iter()).cloned().collect())
             },
             base_rules: self.lists.base.clone(),
-            dns: self.lists.dns.clone(),
+            sub_dns: self.lists.dns.clone(),
+            dns: self.s.dns.clone(),
         }
     }
 
