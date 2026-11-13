@@ -51,13 +51,13 @@ pub enum Panel {
 #[derive(Clone, Copy, PartialEq)]
 pub enum SettingsTab {
     Connection,
-    Network,
     Location,
+    Network,
     Appearance,
 }
 
 impl SettingsTab {
-    pub const ALL: [SettingsTab; 4] = [Self::Connection, Self::Network, Self::Location, Self::Appearance];
+    pub const ALL: [SettingsTab; 4] = [Self::Connection, Self::Location, Self::Network, Self::Appearance];
 
     pub fn label(self) -> &'static str {
         match self {

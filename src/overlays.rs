@@ -226,7 +226,7 @@ impl Hitori {
             SettingsTab::Appearance => {
                 let dark = t.dark;
                 let theme = setting("dark", t!("overlays.settings.dark"), None, None, switch("dark", dark, &t).on_click(cx.listener(move |this, _, _, cx| this.set_dark(!dark, cx))), &t);
-                vec![page_section(SettingsTab::Appearance.label(), &t, vec![theme, self.language_row(window, cx)])]
+                vec![page_section(SettingsTab::Appearance.label(), &t, vec![self.language_row(window, cx), theme])]
             }
         };
         let dialog = div()
@@ -385,6 +385,17 @@ impl Hitori {
         let mut rows = vec![
             setting("protocol", t!("overlays.connection.protocol"), Some(t!("overlays.connection.protocol_hint")), None, self.select("protocol", protocols, window, cx), &t),
             setting(
+                "startup",
+                t!("overlays.connection.startup"),
+                None,
+                None,
+                switch("startup", self.s.auto_connect, &t).on_click(cx.listener(|this, _, _, cx| {
+                    this.s.auto_connect = !this.s.auto_connect;
+                    cx.notify();
+                })),
+                &t,
+            ),
+            setting(
                 "system-wide",
                 t!("overlays.connection.system_wide"),
                 Some(system_info),
@@ -399,17 +410,6 @@ impl Hitori {
         if crate::os::SYSTEM_PROXY && self.s.system_wide {
             rows.push(self.mode_row(window, cx));
         }
-        rows.push(setting(
-            "startup",
-            t!("overlays.connection.startup"),
-            None,
-            None,
-            switch("startup", self.s.auto_connect, &t).on_click(cx.listener(|this, _, _, cx| {
-                this.s.auto_connect = !this.s.auto_connect;
-                cx.notify();
-            })),
-            &t,
-        ));
         rows.push(setting(
             "kill-switch",
             t!("overlays.connection.kill_switch"),
@@ -459,13 +459,31 @@ impl Hitori {
         page_section(t!("overlays.dns.title"), &t, rows)
     }
 
-    /// Local proxy (who may connect, which ports) and DNS.
+    /// DNS and the local proxy (which ports, who may connect).
     fn network_sections(&self, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let t = self.theme(cx);
         let proxy = &self.s.proxy;
         let (listen, shared) = (proxy.listen.clone(), proxy.lan());
         let lan = self.s.lan.map(|a| a.to_string());
-        let mut rows = vec![setting(
+        let error = self.ports_error(cx);
+        let (socks, http) = (crate::app::port(&self.socks_input, cx), crate::app::port(&self.http_input, cx));
+        let same = socks.is_some() && socks == http;
+        let caption = |s: &str| div().text_color(t.muted_fg).child(s.to_owned());
+        let ports = div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .child(caption("SOCKS5"))
+            .child(text_field("socks-port", &self.socks_input, 80., socks.is_none() || same, &t, cx))
+            .child(caption("HTTP"))
+            .child(text_field("http-port", &self.http_input, 80., http.is_none() || same, &t, cx));
+        let ports_info = if self.s.uses_tun() && !shared {
+            t!("overlays.network.ports_tun").to_owned()
+        } else {
+            t!("overlays.network.ports_hint", host = proxy.host(), socks = proxy.socks, http = proxy.http)
+        };
+        let mut rows = vec![setting("ports", t!("overlays.network.ports"), Some(&ports_info), error.as_deref().map(|e| (e, t.destructive)), ports, &t)];
+        rows.push(setting(
             "lan-access",
             t!("overlays.network.lan_access"),
             Some(t!("overlays.network.lan_access_info")),
@@ -475,7 +493,7 @@ impl Hitori {
                 cx.notify();
             })),
             &t,
-        )];
+        ));
         if shared {
             // The LAN address, a saved address from another network, every network.
             let mut choices: Vec<String> = vec![];
@@ -499,27 +517,9 @@ impl Hitori {
             };
             rows.push(setting("listen", t!("overlays.network.listen_on"), Some(&info), None, self.select("listen", items, window, cx), &t));
         }
-        let error = self.ports_error(cx);
-        let (socks, http) = (crate::app::port(&self.socks_input, cx), crate::app::port(&self.http_input, cx));
-        let same = socks.is_some() && socks == http;
-        let caption = |s: &str| div().text_color(t.muted_fg).child(s.to_owned());
-        let ports = div()
-            .flex()
-            .items_center()
-            .gap(px(8.))
-            .child(caption("SOCKS5"))
-            .child(text_field("socks-port", &self.socks_input, 80., socks.is_none() || same, &t, cx))
-            .child(caption("HTTP"))
-            .child(text_field("http-port", &self.http_input, 80., http.is_none() || same, &t, cx));
-        let ports_info = if self.s.uses_tun() && !shared {
-            t!("overlays.network.ports_tun").to_owned()
-        } else {
-            t!("overlays.network.ports_hint", host = proxy.host(), socks = proxy.socks, http = proxy.http)
-        };
-        rows.push(setting("ports", t!("overlays.network.ports"), Some(&ports_info), error.as_deref().map(|e| (e, t.destructive)), ports, &t));
         vec![
-            page_section(t!("overlays.network.local_proxy"), &t, rows),
             self.dns_section(cx),
+            page_section(t!("overlays.network.local_proxy"), &t, rows),
             div().px(px(4.)).xs().text_color(t.muted_fg).child(t!("overlays.network.apply")).into_any_element(),
         ]
     }
