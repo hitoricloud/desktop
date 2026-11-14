@@ -4,7 +4,6 @@ add_site_placeholder = "Добавьте сайт, например youtube.com"
 
 [settings_tab]
 connection = "Подключение"
-network = "Сеть"
 location = "Регион"
 appearance = "Оформление"
 

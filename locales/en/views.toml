@@ -105,6 +105,9 @@ load = "Server load {pct}%"
 offline = "offline"
 show = "Show servers"
 hide = "Hide servers"
+search = "Search countries and servers"
+nothing = "No countries or servers found"
+clear = "Clear search"
 
 [account]
 not_signed_in = "Not signed in"
