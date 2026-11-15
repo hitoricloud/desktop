@@ -331,6 +331,7 @@ impl Vpn {
             this.refresh(None, cx);
         }
         this.check_region(false, cx);
+        cx.background_executor().spawn(async { crate::geo::refresh() }).detach();
         cx.observe_self(|this, cx| this.changed(cx)).detach();
         cx.on_app_quit(|this, _| {
             let core = this.core.take();

@@ -16,6 +16,7 @@ mod store;
 mod sub;
 mod xray;
 mod fx;
+mod geo;
 mod input;
 mod ipc;
 mod live;

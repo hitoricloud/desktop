@@ -1,4 +1,4 @@
-//! Root half of system-wide mode, run through pkexec as `hitori --tun-helper <xray> <config> <uid> <gid> <kill 0|1>`.
+//! Root half of system-wide mode, run through pkexec as `hitori --tun-helper <xray> <config> <uid> <gid> <kill 0|1> <assets>`.
 //! It runs the core with only network capabilities and routes everything the core did not send itself into `hitori0`.
 //! Protocol with `helper.rs`: stdout lines `ready`, `down <code>`, `error <message>`, `idle`; stdin lines `restart`, `kill 0|1`,
 //! `idle` (core and routing gone, the helper waits for the next `restart`), `stop`/EOF.
@@ -58,10 +58,14 @@ struct Args {
     uid: u32,
     gid: u32,
     kill_switch: bool,
+    /// geoip.dat and geosite.dat for the core (`XRAY_LOCATION_ASSET`).
+    assets: PathBuf,
 }
 
 fn parse(args: &[String]) -> Result<Args, String> {
-    let [xray, config, uid, gid, kill] = args else { return Err("usage: --tun-helper <xray> <config> <uid> <gid> <kill 0|1>".into()) };
+    let [xray, config, uid, gid, kill, assets] = args else {
+        return Err("usage: --tun-helper <xray> <config> <uid> <gid> <kill 0|1> <assets>".into());
+    };
     let file = |p: &str| {
         let path = PathBuf::from(p);
         if path.is_absolute() && path.is_file() { Ok(path) } else { Err(format!("not an absolute path to a file: {p}")) }
@@ -72,7 +76,11 @@ fn parse(args: &[String]) -> Result<Args, String> {
         "1" => true,
         _ => return Err(format!("kill switch must be 0 or 1: {kill}")),
     };
-    Ok(Args { xray: file(xray)?, config: file(config)?, uid: id(uid)?, gid: id(gid)?, kill_switch })
+    let assets = PathBuf::from(assets);
+    if !assets.is_absolute() {
+        return Err(format!("not an absolute path: {}", assets.display()));
+    }
+    Ok(Args { xray: file(xray)?, config: file(config)?, uid: id(uid)?, gid: id(gid)?, kill_switch, assets })
 }
 
 fn find(tool: &str) -> Result<PathBuf, String> {
@@ -246,7 +254,7 @@ impl Session {
         };
         // Core logs go to our stderr (the app's log); our stdout is the protocol.
         let log = std::io::stderr().as_fd().try_clone_to_owned().map_err(|e| e.to_string())?;
-        cmd.args(["run", "-c"]).arg(&a.config).stdin(Stdio::null()).stdout(log).stderr(Stdio::inherit());
+        cmd.args(["run", "-c"]).arg(&a.config).env("XRAY_LOCATION_ASSET", &a.assets).stdin(Stdio::null()).stdout(log).stderr(Stdio::inherit());
         // SAFETY: prctl is async-signal-safe; this runs between fork and exec.
         unsafe {
             cmd.pre_exec(|| {

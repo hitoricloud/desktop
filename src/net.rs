@@ -61,7 +61,17 @@ pub fn bytes(url: &str) -> Option<Vec<u8>> {
 
 /// At most `limit` bytes of a successful response.
 pub fn download(url: &str, limit: u64) -> Option<Vec<u8>> {
-    let resp = agent().get(url).call().ok()?;
+    read(&agent(), url, limit)
+}
+
+/// A large file: no overall time limit, only a stalled connection gives up.
+pub fn large(url: &str, limit: u64) -> Option<Vec<u8>> {
+    let agent = ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(20)).timeout_read(Duration::from_secs(30)).user_agent("hitori/0.1").build();
+    read(&agent, url, limit)
+}
+
+fn read(agent: &ureq::Agent, url: &str, limit: u64) -> Option<Vec<u8>> {
+    let resp = agent.get(url).call().ok()?;
     let mut buf = Vec::new();
     resp.into_reader().take(limit).read_to_end(&mut buf).ok()?;
     Some(buf)
