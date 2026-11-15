@@ -244,11 +244,18 @@ pub fn parse(body: &[u8]) -> Result<Subscription, String> {
         let Some(proto) = protocol(outbound) else { continue };
         base_rules.get_or_insert(rules);
         dns.get_or_insert(c["dns"].clone());
+        // A cascade variant (Hitori backend): the same exit reached through another server, kept as its own entry.
+        let via = c["meta"]["hitori"]["via"].as_str().filter(|v| !v.is_empty());
+        let rest = rest.split(" ⇢ ").next().unwrap_or(rest);
         let name = rest.split(" - ").next().unwrap_or(rest).trim();
         let number = name.rsplit_once('#').and_then(|(_, n)| n.trim().parse::<u32>().ok());
-        let id = data::intern(&match number {
+        let base = match number {
             Some(n) => format!("{}-{n}", code.to_lowercase()),
             None => code.to_lowercase(),
+        };
+        let id = data::intern(&match via {
+            Some(v) => format!("{base}@{}", v.to_lowercase()),
+            None => base,
         });
         let mut outbound = outbound.clone();
         outbound.as_object_mut().map(|o| o.remove("tag"));
@@ -260,7 +267,11 @@ pub fn parse(body: &[u8]) -> Result<Subscription, String> {
         }
         let (country, lat, lon) = data::country(&code).unwrap_or(("", 50., 10.));
         let country = if country.is_empty() { data::intern(name.split('#').next().unwrap_or(name).trim()) } else { country };
-        let city = data::intern(&number.map(|n| t!("sub.label.server_number", n = n)).unwrap_or_else(|| t!("sub.label.server").into()));
+        let label: String = number.map(|n| t!("sub.label.server_number", n = n).into()).unwrap_or_else(|| t!("sub.label.server").into());
+        let city = data::intern(&match via {
+            Some(v) => format!("{label} ⇢ {v}"),
+            None => label,
+        });
         servers.push(Server { id, country, code: data::intern(&code), city, ip: "", lat, lon, variants: vec![(proto, outbound)] });
     }
     if servers.is_empty() {
@@ -279,6 +290,21 @@ mod tests {
     fn host(remarks: &str, outbound: Value) -> Value {
         json!({"remarks": remarks, "dns": {"servers": ["1.1.1.1"]}, "routing": {"rules": [{"type": "field", "protocol": ["bittorrent"], "outboundTag": "direct"}]},
                "outbounds": [outbound, {"tag": "direct", "protocol": "freedom"}]})
+    }
+
+    #[test]
+    fn cascade_variants_are_separate_servers() {
+        let tcp = json!({"tag": "proxy", "protocol": "vless", "streamSettings": {"network": "tcp", "security": "reality"}});
+        let hy = json!({"tag": "proxy", "protocol": "hysteria", "streamSettings": {"network": "hysteria"}});
+        let mut direct = host("🇫🇷 Франция #10", tcp.clone());
+        direct["meta"] = json!({"hitori": {"node": "FR-10", "via": null}});
+        let mut relayed = host("🇫🇷 Франция #10 ⇢ RU-5", tcp);
+        relayed["meta"] = json!({"hitori": {"node": "FR-10", "via": "RU-5"}});
+        let mut relayed_hy = host("🇫🇷 Франция #10 - Hysteria2 ⇢ RU-5", hy);
+        relayed_hy["meta"] = json!({"hitori": {"node": "FR-10", "via": "RU-5"}});
+        let sub = parse(&serde_json::to_vec(&json!([direct, relayed, relayed_hy])).unwrap()).unwrap();
+        let got: Vec<_> = sub.servers.iter().map(|s| (s.id, s.city, s.variants.len())).collect();
+        assert_eq!(got, [("fr-10", "Server #10", 1), ("fr-10@ru-5", "Server #10 ⇢ RU-5", 2)]);
     }
 
     #[test]
