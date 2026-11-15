@@ -213,7 +213,17 @@ pub fn parse(body: &[u8]) -> Result<Subscription, String> {
     let mut dns = None;
     for c in configs {
         let remarks = c["remarks"].as_str().unwrap_or_default();
-        let rules = c["routing"]["rules"].as_array().cloned().unwrap_or_default();
+        // The core refuses a ruleTag twice, and the tunnel and base rules (copied per app) may carry the same ones.
+        let rules: Vec<Value> = c["routing"]["rules"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|mut r| {
+                r.as_object_mut().map(|o| o.remove("ruleTag"));
+                r
+            })
+            .collect();
         if c["routing"]["balancers"].as_array().is_some_and(|b| !b.is_empty()) {
             if tunnel_rules.is_empty() {
                 tunnel_rules = rules
@@ -302,6 +312,18 @@ mod tests {
         assert_eq!(lv.variant(Protocol::Hy2).unwrap().0, Protocol::Grpc);
         assert_eq!(sub.tunnel_rules, vec![json!({"type": "field", "domain": ["domain:ua"], "outboundTag": "proxy"})]);
         assert_eq!(sub.base_rules[0]["protocol"][0], "bittorrent");
+    }
+
+    #[test]
+    fn provider_rule_tags_are_dropped() {
+        let tls = json!({"tag": "proxy", "protocol": "vless", "streamSettings": {"network": "tcp"}});
+        let dns = json!({"type": "field", "ruleTag": "DNS via Tunnel", "ip": ["1.1.1.1"], "outboundTag": "proxy"});
+        let auto = json!({"remarks": "🇪🇺 Auto", "routing": {"balancers": [{"tag": "b"}], "rules": [{"type": "field", "ruleTag": "DNS via Tunnel", "ip": ["1.1.1.1"], "balancerTag": "b"}]}, "outbounds": []});
+        let mut de = host("🇩🇪 Germany", tls);
+        de["routing"]["rules"] = json!([dns]);
+        let sub = parse(&serde_json::to_vec(&json!([auto, de])).unwrap()).unwrap();
+        assert_eq!(sub.tunnel_rules, vec![json!({"type": "field", "ip": ["1.1.1.1"], "outboundTag": "proxy"})]);
+        assert_eq!(sub.base_rules, vec![json!({"type": "field", "ip": ["1.1.1.1"], "outboundTag": "proxy"})]);
     }
 
     #[test]
