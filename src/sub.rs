@@ -204,6 +204,16 @@ fn protocol(outbound: &Value) -> Option<Protocol> {
     }
 }
 
+/// A rule for one of the provider's balancers goes to `proxy` instead: the app's config has no balancers.
+fn to_proxy(rule: &mut Value) -> bool {
+    let Some(obj) = rule.as_object_mut() else { return false };
+    if obj.remove("balancerTag").is_none() {
+        return false;
+    }
+    obj.insert("outboundTag".into(), json!("proxy"));
+    true
+}
+
 pub fn parse(body: &[u8]) -> Result<Subscription, String> {
     let configs: Value = serde_json::from_slice(body).map_err(|_| t!("sub.error.no_profiles").to_owned())?;
     let configs = configs.as_array().ok_or(t!("sub.error.no_profiles"))?;
@@ -224,25 +234,25 @@ pub fn parse(body: &[u8]) -> Result<Subscription, String> {
                 r
             })
             .collect();
-        if c["routing"]["balancers"].as_array().is_some_and(|b| !b.is_empty()) {
-            if tunnel_rules.is_empty() {
-                tunnel_rules = rules
-                    .into_iter()
-                    .filter_map(|mut r| {
-                        let obj = r.as_object_mut()?;
-                        obj.remove("balancerTag")?;
-                        obj.insert("outboundTag".into(), json!("proxy"));
-                        Some(r)
-                    })
-                    .collect();
+        let balanced = c["routing"]["balancers"].as_array().is_some_and(|b| !b.is_empty());
+        // Balancers without a real country (no flag, or 🇪🇺) make the Auto profile: its balanced rules need the tunnel.
+        // A country's profile may balance its own servers too; it is still that country's server.
+        let Some((code, rest)) = flag_code(remarks).filter(|(code, _)| !balanced || data::country(code).is_some()) else {
+            if balanced && tunnel_rules.is_empty() {
+                tunnel_rules = rules.into_iter().filter_map(|mut r| to_proxy(&mut r).then_some(r)).collect();
             }
+            // Other hosts without a country flag are dividers or special-purpose (e.g. mobile-only) profiles.
             continue;
-        }
-        // Hosts without a country flag are dividers or special-purpose (e.g. mobile-only) profiles.
-        let Some((code, rest)) = flag_code(remarks) else { continue };
+        };
         let Some(outbound) = c["outbounds"].as_array().and_then(|o| o.iter().find(|o| o["tag"] == "proxy")) else { continue };
         let Some(proto) = protocol(outbound) else { continue };
-        base_rules.get_or_insert(rules);
+        base_rules.get_or_insert_with(|| {
+            let mut rules = rules;
+            rules.iter_mut().for_each(|r| {
+                to_proxy(r);
+            });
+            rules
+        });
         dns.get_or_insert(c["dns"].clone());
         let name = rest.split(" - ").next().unwrap_or(rest).trim();
         let number = name.rsplit_once('#').and_then(|(_, n)| n.trim().parse::<u32>().ok());
@@ -312,6 +322,29 @@ mod tests {
         assert_eq!(lv.variant(Protocol::Hy2).unwrap().0, Protocol::Grpc);
         assert_eq!(sub.tunnel_rules, vec![json!({"type": "field", "domain": ["domain:ua"], "outboundTag": "proxy"})]);
         assert_eq!(sub.base_rules[0]["protocol"][0], "bittorrent");
+    }
+
+    #[test]
+    fn country_profiles_with_balancers_are_servers() {
+        let out = |proto: &str, net: &str| json!({"tag": "proxy", "protocol": proto, "streamSettings": {"network": net}});
+        let balanced = |remarks: &str, outbound: Value, balancer: &str| {
+            json!({"remarks": remarks, "routing": {"balancers": [{"tag": balancer, "selector": ["proxy"]}],
+                   "rules": [{"type": "field", "domain": ["domain:example.org"], "balancerTag": balancer}, {"type": "field", "protocol": ["bittorrent"], "outboundTag": "direct"}]},
+                   "outbounds": [outbound, {"tag": "proxy-2", "protocol": "vless"}, {"tag": "direct", "protocol": "freedom"}]})
+        };
+        let body = serde_json::to_vec(&json!([
+            balanced("🇪🇺 Автовыбор", out("vless", "tcp"), "auto"),
+            balanced("🇩🇪 Германия", out("vless", "tcp"), "de"),
+            balanced("🇫🇮 Финляндия", out("vless", "tcp"), "fi"),
+            balanced("🇫🇮 Финляндия (Hysteria2)", out("hysteria", "hysteria"), "fi-hy2"),
+        ]))
+        .unwrap();
+        let sub = parse(&body).unwrap();
+        assert_eq!(sub.servers.iter().map(|s| s.id).collect::<Vec<_>>(), ["de", "fi"]);
+        assert_eq!(sub.servers[1].variants.iter().map(|v| v.0).collect::<Vec<_>>(), [Protocol::Tls, Protocol::Hy2]);
+        assert_eq!(sub.tunnel_rules, vec![json!({"type": "field", "domain": ["domain:example.org"], "outboundTag": "proxy"})]);
+        assert_eq!(sub.base_rules[0], json!({"type": "field", "domain": ["domain:example.org"], "outboundTag": "proxy"}));
+        assert_eq!(sub.base_rules[1]["outboundTag"], "direct");
     }
 
     #[test]
