@@ -614,13 +614,14 @@ impl Core {
         let ports = Ports { probe: free_port(), metrics: free_port(), ping: free_port() };
         let path = crate::store::runtime_dir().join("core.json");
         let config = config(plan, ports)?;
+        let assets = crate::geo::ensure(&config);
         if plan.tun {
-            let helper = crate::helper::Link::open(&xray, &path, &config, plan.kill_switch, &log)?;
+            let helper = crate::helper::Link::open(&xray, &path, &config, plan.kill_switch, &assets, &log)?;
             return Ok(Core { child: None, helper: Some(helper), ports, tun: true, proxy: plan.proxy.clone(), system_proxy: None, log, path });
         }
         write_config(&path, &config)?;
         let mut cmd = Command::new(&xray);
-        cmd.args(["run", "-c"]).arg(&path).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        cmd.args(["run", "-c"]).arg(&path).env("XRAY_LOCATION_ASSET", &assets).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut child = crate::os::spawn_core(&mut cmd).map_err(|e| t!("xray.error.cannot_start_core", error = e))?;
         // The core logs to stdout; stderr carries Go panics.
         log.follow(child.stdout.take().unwrap());
@@ -656,6 +657,8 @@ impl Core {
         }
         let config = config(plan, self.ports)?;
         if let Some(helper) = self.helper.as_mut() {
+            // The helper has the directory since it started; the files may only be needed now.
+            crate::geo::ensure(&config);
             return helper.reload(&self.path, &config);
         }
         self.stop_child();
@@ -1350,8 +1353,9 @@ mod tests {
             let mut p = plan.clone();
             (p.tun, p.entry, p.default_route, p.protocol) = (tun, entry, route, proto);
             let path = std::env::temp_dir().join(format!("hitori-test-{}.json", std::process::id()));
-            crate::store::write(&path, &serde_json::to_vec(&config(&p, Ports { probe: free_port(), metrics: free_port(), ping: free_port() }).unwrap()).unwrap(), true).unwrap();
-            let out = Command::new(&xray).args(["run", "-test", "-c"]).arg(&path).output().unwrap();
+            let c = config(&p, Ports { probe: free_port(), metrics: free_port(), ping: free_port() }).unwrap();
+            crate::store::write(&path, &serde_json::to_vec(&c).unwrap(), true).unwrap();
+            let out = Command::new(&xray).args(["run", "-test", "-c"]).arg(&path).env("XRAY_LOCATION_ASSET", crate::geo::ensure(&c)).output().unwrap();
             std::fs::remove_file(&path).unwrap();
             assert!(out.status.success(), "tun={tun} entry={} route={route:?}: {}", entry.is_some(), String::from_utf8_lossy(&out.stdout));
         }

@@ -101,6 +101,7 @@ fn serve(out: &Out, commands: Receiver<String>, peer: &sys::Peer) -> Result<(), 
     sys::cleanup(peer);
     let mut kill = false;
     let mut config: Option<Value> = None;
+    let mut assets: Option<PathBuf> = None;
     let mut net: Option<sys::Net> = None;
     // Declared after `net`, so it is stopped before the routing goes.
     let mut core: Option<Running> = None;
@@ -120,6 +121,7 @@ fn serve(out: &Out, commands: Receiver<String>, peer: &sys::Peer) -> Result<(), 
                         out.say(&format!("error bad config: {e}"));
                     }
                 },
+                ("assets", dir) => assets = Some(PathBuf::from(dir)).filter(|d| d.is_absolute()),
                 ("restart", _) => restart = true,
                 ("kill", on) => {
                     kill = on == "1";
@@ -153,7 +155,7 @@ fn serve(out: &Out, commands: Receiver<String>, peer: &sys::Peer) -> Result<(), 
                     Some(n) => n,
                     None => net.insert(sys::Net::up(peer, &xray, kill, resolver(config))?),
                 };
-                core = Some(start(n, &xray, config, out)?);
+                core = Some(start(n, &xray, config, assets.as_deref(), out)?);
                 Ok::<(), String>(())
             })();
             // Back to idle: the helper stays for the next connection.
@@ -174,7 +176,7 @@ fn resolver(config: &Value) -> &str {
 }
 
 /// Start the core and report `ready` once it serves inside the TUN (or let the main loop report it `down`).
-fn start(net: &mut sys::Net, xray: &Path, config: &Value, out: &Out) -> Result<Running, String> {
+fn start(net: &mut sys::Net, xray: &Path, config: &Value, assets: Option<&Path>, out: &Out) -> Result<Running, String> {
     let mut config = config.clone();
     // A privileged core writes no files.
     if let Some(log) = config.get_mut("log").and_then(Value::as_object_mut) {
@@ -186,6 +188,9 @@ fn start(net: &mut sys::Net, xray: &Path, config: &Value, out: &Out) -> Result<R
     }
     let mut cmd = net.command(xray);
     cmd.args(["run", "-c", "stdin:"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    if let Some(dir) = assets {
+        cmd.env("XRAY_LOCATION_ASSET", dir);
+    }
     let mut core = net.spawn(&mut cmd).map_err(|e| format!("cannot start the core: {e}"))?;
     let written = core.child.stdin.take().map(|mut s| s.write_all(&serde_json::to_vec(&config).unwrap()));
     written.transpose().map_err(|e| format!("cannot pass the config to the core: {e}"))?;

@@ -3,7 +3,7 @@
 //! macOS: an administrator prompt through osascript, over a Unix socket in the user's private runtime dir.
 //! From the helper: `ready`, `down <code>`, `error <message>`, `idle` and (Windows, macOS) `log <core log line>`.
 //! To it: `restart`, `kill 0|1`, `idle`, `stop`, and (Windows, macOS) `config <json>`: the config of a privileged core is
-//! never a file the user could change under it.
+//! never a file the user could change under it; `assets <dir>`: where the core finds geoip.dat and geosite.dat.
 //! Between connections the helper stays idle (no core, no routing), so rights are asked once per app run.
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -83,7 +83,7 @@ fn read_lines(stream: impl Read + Send + 'static, log: Option<Shared>) -> Receiv
 impl Link {
     /// The core behind the TUN: under the idle helper of an earlier connection, or a new one (asking for rights).
     /// On failure the helper is kept idle for the next attempt.
-    pub fn open(xray: &Path, path: &PathBuf, config: &Value, kill_switch: bool, log: &Log) -> Result<Link, String> {
+    pub fn open(xray: &Path, path: &PathBuf, config: &Value, kill_switch: bool, assets: &Path, log: &Log) -> Result<Link, String> {
         let spare = {
             let slot = SLOT.lock().unwrap();
             let (mut slot, _) = FREED.wait_timeout_while(slot, Duration::from_secs(30), |s| s.busy).unwrap();
@@ -92,7 +92,7 @@ impl Link {
         };
         let (mut link, fresh) = match spare.and_then(|mut l| l.running().then_some(l)) {
             Some(link) => (link, false),
-            None => match Link::start(xray, path, config, kill_switch, log) {
+            None => match Link::start(xray, path, config, kill_switch, assets, log) {
                 Ok(link) => (link, true),
                 Err(e) => {
                     release(None);
@@ -101,7 +101,7 @@ impl Link {
             },
         };
         *link.log.lock().unwrap() = log.clone();
-        let result = if fresh { link.begin(config, kill_switch) } else { link.resume(path, config, kill_switch) };
+        let result = if fresh { link.begin(config, kill_switch, assets) } else { link.resume(path, config, kill_switch) };
         match result {
             Ok(()) => Ok(link),
             Err(e) => {
@@ -145,7 +145,7 @@ impl Link {
 
     /// Linux: the app itself as root (`--tun-helper`, through pkexec) runs the core behind a TUN device.
     #[cfg(target_os = "linux")]
-    fn start(xray: &Path, path: &PathBuf, config: &Value, kill_switch: bool, log: &Log) -> Result<Link, String> {
+    fn start(xray: &Path, path: &PathBuf, config: &Value, kill_switch: bool, assets: &Path, log: &Log) -> Result<Link, String> {
         crate::xray::write_config(path, config)?;
         // Tests run the built app as the helper.
         let exe = if cfg!(test) { PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/debug/hitori") } else { std::env::current_exe().map_err(|e| e.to_string())? };
@@ -162,6 +162,7 @@ impl Link {
             .arg(xray)
             .arg(path)
             .args([uid.to_string(), gid.to_string(), (kill_switch as u8).to_string()])
+            .arg(assets)
             // pkexec refuses to run when SHELL is not in /etc/shells (e.g. launched from a nix shell).
             .env_remove("SHELL")
             .stdin(Stdio::piped())
@@ -182,13 +183,13 @@ impl Link {
 
     /// Linux: the helper starts the core by itself, once the password is in.
     #[cfg(target_os = "linux")]
-    fn begin(&mut self, _config: &Value, _kill_switch: bool) -> Result<(), String> {
+    fn begin(&mut self, _config: &Value, _kill_switch: bool, _assets: &Path) -> Result<(), String> {
         self.wait_ready(Duration::from_secs(180), true)
     }
 
     /// macOS: `hitori --tun-helper <socket>` as root through an administrator prompt; it connects back to the socket.
     #[cfg(target_os = "macos")]
-    fn start(_xray: &Path, _path: &PathBuf, _config: &Value, _kill_switch: bool, log: &Log) -> Result<Link, String> {
+    fn start(_xray: &Path, _path: &PathBuf, _config: &Value, _kill_switch: bool, _assets: &Path, log: &Log) -> Result<Link, String> {
         use std::os::unix::net::UnixListener;
         let sock = crate::store::runtime_dir().join("helper.sock");
         let _ = std::fs::remove_file(&sock);
@@ -241,7 +242,7 @@ impl Link {
 
     /// Windows: `hitori --tun-helper <port> <token>` elevated through UAC; it connects back to 127.0.0.1:<port>.
     #[cfg(windows)]
-    fn start(_xray: &Path, _path: &PathBuf, _config: &Value, _kill_switch: bool, log: &Log) -> Result<Link, String> {
+    fn start(_xray: &Path, _path: &PathBuf, _config: &Value, _kill_switch: bool, _assets: &Path, log: &Log) -> Result<Link, String> {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| t!("helper.error.cannot_start_helper", error = e))?;
         let port = listener.local_addr().map_err(|e| e.to_string())?.port();
         let token = elevate::token()?;
@@ -277,7 +278,8 @@ impl Link {
     }
 
     #[cfg(not(target_os = "linux"))]
-    fn begin(&mut self, config: &Value, kill_switch: bool) -> Result<(), String> {
+    fn begin(&mut self, config: &Value, kill_switch: bool, assets: &Path) -> Result<(), String> {
+        self.send(&format!("assets {}", assets.display()))?;
         self.send(if kill_switch { "kill 1" } else { "kill 0" })?;
         self.send(&format!("config {config}"))?;
         self.send("restart")?;
@@ -355,7 +357,7 @@ pub fn selftest() -> i32 {
         let xray = crate::xray::xray_path().ok_or("the Xray core is missing")?;
         let metrics = crate::xray::free_port();
         #[allow(unused_mut)]
-        let mut link = Link::open(&xray, &PathBuf::new(), &crate::xray::selftest_config(metrics), true, &log)?;
+        let mut link = Link::open(&xray, &PathBuf::new(), &crate::xray::selftest_config(metrics), true, &crate::geo::dir(), &log)?;
         println!("tun selftest: up");
         if let Err(e) = fetch("https://1.1.1.1/cdn-cgi/trace") {
             #[cfg(target_os = "macos")]
@@ -382,7 +384,7 @@ pub fn selftest() -> i32 {
         // Idle: no routes, resolver or kill switch left behind; then the same helper serves the next connection.
         link.park();
         fetch("https://one.one.one.one/cdn-cgi/trace").map_err(|e| format!("while idle: {e}"))?;
-        let link = Link::open(&xray, &PathBuf::new(), &crate::xray::selftest_config(metrics), true, &log)?;
+        let link = Link::open(&xray, &PathBuf::new(), &crate::xray::selftest_config(metrics), true, &crate::geo::dir(), &log)?;
         println!("tun selftest: up again");
         fetch("https://one.one.one.one/cdn-cgi/trace").map_err(|e| format!("after resuming: {e}"))?;
         drop(link);
