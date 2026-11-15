@@ -252,16 +252,39 @@ pub fn parse(body: &[u8]) -> Result<Subscription, String> {
         });
         let mut outbound = outbound.clone();
         outbound.as_object_mut().map(|o| o.remove("tag"));
+        // Hitori backend: the exit's node and the nodes that carry it as a cascade entry.
+        let hitori = &c["meta"]["hitori"];
+        let node = hitori["node"].as_str().map(data::intern).unwrap_or("");
+        let entries: Vec<data::Entry> = hitori["entries"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|e| {
+                        Some(data::Entry {
+                            protocol: proto,
+                            node: data::intern(e["node"].as_str()?),
+                            address: e["address"].as_str()?.to_owned(),
+                            port: u16::try_from(e["port"].as_u64()?).ok()?,
+                            sni: e["sni"].as_str()?.to_owned(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         if let Some(s) = servers.iter_mut().find(|s| s.id == id) {
             if s.variants.iter().all(|(p, _)| *p != proto) {
                 s.variants.push((proto, outbound));
+                s.entries.extend(entries);
+            }
+            if s.node.is_empty() {
+                s.node = node;
             }
             continue;
         }
         let (country, lat, lon) = data::country(&code).unwrap_or(("", 50., 10.));
         let country = if country.is_empty() { data::intern(name.split('#').next().unwrap_or(name).trim()) } else { country };
         let city = data::intern(&number.map(|n| t!("sub.label.server_number", n = n)).unwrap_or_else(|| t!("sub.label.server").into()));
-        servers.push(Server { id, country, code: data::intern(&code), city, ip: "", lat, lon, variants: vec![(proto, outbound)] });
+        servers.push(Server { id, country, code: data::intern(&code), city, ip: "", lat, lon, variants: vec![(proto, outbound)], node, entries });
     }
     if servers.is_empty() {
         return Err(t!("sub.error.no_servers").into());
@@ -279,6 +302,32 @@ mod tests {
     fn host(remarks: &str, outbound: Value) -> Value {
         json!({"remarks": remarks, "dns": {"servers": ["1.1.1.1"]}, "routing": {"rules": [{"type": "field", "protocol": ["bittorrent"], "outboundTag": "direct"}]},
                "outbounds": [outbound, {"tag": "direct", "protocol": "freedom"}]})
+    }
+
+    /// France through Estonia: one server per exit; the entry is how the app dials, one tunnel when the backend
+    /// lists the entry, two (chained) otherwise.
+    #[test]
+    fn server_side_cascade_entries() {
+        let fr = json!({"tag": "proxy", "protocol": "vless", "settings": {"vnext": [{"address": "185.253.54.133", "port": 443, "users": [{"id": "u"}]}]},
+            "streamSettings": {"network": "tcp", "security": "reality", "realitySettings": {"serverName": "instance-100.prismix.cc", "publicKey": "k"}}});
+        let ee = json!({"tag": "proxy", "protocol": "vless", "settings": {"vnext": [{"address": "217.60.100.139", "port": 443, "users": [{"id": "u"}]}]},
+            "streamSettings": {"network": "tcp", "security": "reality", "realitySettings": {"serverName": "ee3.meph.space"}}});
+        let lv = ee.clone();
+        let mut fr_c = host("🇫🇷 Франция #10", fr);
+        fr_c["meta"] = json!({"hitori": {"node": "FR-10", "entries": [{"node": "EE-3", "address": "217.60.100.139", "port": 443, "sni": "spare.example"}]}});
+        let mut ee_c = host("🇪🇪 Эстония #3", ee);
+        ee_c["meta"] = json!({"hitori": {"node": "EE-3", "entries": []}});
+        let mut lv_c = host("🇱🇻 Латвия #1", lv);
+        lv_c["meta"] = json!({"hitori": {"node": "LV-1", "entries": []}});
+        let sub = parse(&serde_json::to_vec(&json!([fr_c, ee_c, lv_c])).unwrap()).unwrap();
+        assert_eq!(sub.servers.iter().map(|s| (s.id, s.node)).collect::<Vec<_>>(), [("fr-10", "FR-10"), ("ee-3", "EE-3"), ("lv-1", "LV-1")]);
+        let (fr, ee, lv) = (Box::leak(Box::new(sub.servers[0].clone())), &sub.servers[1], &sub.servers[2]);
+        let relayed = fr.relayed(ee, Protocol::Tls).expect("EE-3 carries FR-10");
+        assert_eq!(relayed["settings"]["vnext"][0]["address"], "217.60.100.139");
+        assert_eq!(relayed["settings"]["vnext"][0]["port"], 443);
+        assert_eq!(relayed["streamSettings"]["realitySettings"]["serverName"], "spare.example");
+        assert_eq!(relayed["streamSettings"]["realitySettings"]["publicKey"], "k");
+        assert!(fr.relayed(lv, Protocol::Tls).is_none(), "LV-1 is not an entry for FR-10");
     }
 
     #[test]
