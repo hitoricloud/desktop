@@ -5,6 +5,7 @@ use crate::app::{Conn, Hitori, Menu, Mode, Page, Panel, Place};
 use crate::data::{self, AppInfo, AppRule, RuleMode, Scope, Suggestion, ago, app, fixed1, js_num, server};
 use crate::theme::{AMBER, EMERALD};
 use crate::map::Padding;
+use crate::score::has_words;
 use crate::fx::{Fx, fx};
 use crate::theme::{Theme, color};
 use crate::ui::{
@@ -1260,27 +1261,42 @@ impl Hitori {
             .child(t!("views.servers.test"))
             .on_click(cx.listener(|this, _, _, cx| this.test_pings(cx)));
         let n = servers.len();
+        let q = self.server_search.read(cx).content.trim().to_owned();
         // Servers under their country, in latency order when sorted (so countries by their best server). Servers that did
-        // not answer the last test are left out, except the one in use.
+        // not answer the last test are left out, except the one in use, unless searched for.
         let mut groups: Vec<Vec<&'static data::Server>> = vec![];
-        for s in servers.into_iter().filter(|s| s.id == self.s.server_id || !data::timed_out(s.id) || self.s.pending.contains(&s.id)) {
+        for s in servers.into_iter().filter(|s| !q.is_empty() || s.id == self.s.server_id || !data::timed_out(s.id) || self.s.pending.contains(&s.id)) {
             match groups.iter_mut().find(|g| g[0].code == s.code) {
                 Some(g) => g.push(s),
                 None => groups.push(vec![s]),
             }
         }
+        // A search that names the country keeps all of it; one that names servers (city, number, address) shows them open.
         let mut rows: Vec<AnyElement> = vec![];
-        for g in &groups {
+        for g in &mut groups {
+            let whole = has_words(&format!("{} {}", g[0].country, g[0].code), &q);
+            if !whole {
+                g.retain(|s| has_words(&format!("{} {} {} {} {}", s.country, s.code, s.city, s.tag(), s.ip), &q));
+                if g.is_empty() {
+                    continue;
+                }
+            }
             rows.push(self.country_row(g, window, cx).into_any_element());
-            if self.open_countries.contains(&g[0].code) {
+            if self.open_countries.contains(&g[0].code) || !whole {
                 rows.extend(g.iter().map(|s| self.server_row(s, cx).into_any_element()));
             }
         }
+        let empty = match (n, rows.is_empty()) {
+            (0, _) => Some(t!("views.servers.sign_in")),
+            (_, true) => Some(t!("views.servers.nothing")),
+            _ => None,
+        };
         div()
             .flex_1()
             .min_h_0()
             .flex()
             .flex_col()
+            .when(n > 0, |d| d.child(div().flex_none().px(px(16.)).pt(px(12.)).child(self.server_search_field(&t, cx))))
             .child(
                 div()
                     .h(px(40.))
@@ -1316,9 +1332,43 @@ impl Hitori {
                     .gap(px(4.))
                     .px(px(8.))
                     .pb(px(8.))
-                    .when(n == 0, |d| d.child(div().px(px(8.)).py(px(8.)).sm().text_color(t.muted_fg).child(t!("views.servers.sign_in"))))
+                    .children(empty.map(|e| div().px(px(8.)).py(px(8.)).sm().text_color(t.muted_fg).child(e)))
                     .children(rows),
             )
+    }
+
+    /// Search over the server list; the × clears it.
+    fn server_search_field(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let focus = self.server_search.read(cx).focus_handle(cx);
+        let typed = !self.server_search.read(cx).content.is_empty();
+        div()
+            .id("server-search")
+            .h(px(36.))
+            .pl(px(12.))
+            .pr(px(4.))
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .rounded(px(MD))
+            .border_1()
+            .border_color(t.border)
+            .bg(t.background)
+            .sm()
+            .cursor_text()
+            .on_mouse_down(MouseButton::Left, move |_, window, _| window.focus(&focus))
+            .child(icon("search", 16., t.muted_fg))
+            .child(div().flex_1().min_w_0().child(self.server_search.clone()))
+            .when(typed, |d| {
+                d.child(
+                    button("server-search-clear", Variant::Ghost, Size::IconXs, true, t)
+                        .tooltip(tip(t!("views.servers.clear"), t))
+                        .child(icon("x", 12., t.muted_fg))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.server_search.update(cx, |input, _| input.reset());
+                            cx.notify();
+                        })),
+                )
+            })
     }
 
     /// Load ring, like Proton's, in the flag column; empty when the provider does not report load.

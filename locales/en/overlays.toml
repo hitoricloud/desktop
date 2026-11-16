@@ -38,6 +38,9 @@ location = "Location"
 dark = "Dark theme"
 language_row = "Interface language"
 language_system = "System"
+search = "Search settings"
+results = "Search"
+nothing = "No settings found"
 
 [connection]
 title = "Connection"

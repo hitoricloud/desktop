@@ -38,6 +38,9 @@ location = "Регион"
 dark = "Тёмная тема"
 language_row = "Язык интерфейса"
 language_system = "Системный"
+search = "Поиск настроек"
+results = "Поиск"
+nothing = "Ничего не найдено"
 
 [connection]
 title = "Подключение"

@@ -4,6 +4,7 @@ use gpui::{AnyElement, Context, Div, Entity, Focusable, MouseButton, SharedStrin
 use crate::app::{Hitori, Menu, Panel, Place, SettingsTab};
 use crate::data;
 use crate::input::TextInput;
+use crate::score::has_words;
 use crate::theme::{Theme, shadow_lg};
 use crate::ui::{LG, MD, Size, Tw, Variant, XL, badge_secondary, button, icon, menu, menu_item, progress, switch, tip};
 use crate::views::{Placement, popover};
@@ -45,18 +46,45 @@ fn hint_room(control: f32) -> f32 {
     448. - 1. - 32. - 32. - 16. - control
 }
 
-/// Section heading above a bordered card whose rows are split by dividers.
-fn page_section(title: &str, t: &Theme, rows: Vec<AnyElement>) -> AnyElement {
-    let mut card = div().flex().flex_col().rounded(px(XL)).border_1().border_color(t.border).bg(t.muted.opacity(0.3));
-    for (i, r) in rows.into_iter().enumerate() {
-        card = card.child(div().when(i > 0, |d| d.border_t_1().border_color(t.border)).child(r));
+/// A settings row and the words the settings search finds it by.
+struct Item {
+    words: String,
+    el: AnyElement,
+}
+
+/// A titled card of rows, with an optional line under it.
+struct Section {
+    title: String,
+    items: Vec<Item>,
+    footer: Option<&'static str>,
+}
+
+impl Section {
+    fn new(title: &str, items: Vec<Item>) -> Self {
+        Self { title: title.to_owned(), items, footer: None }
     }
-    div().flex().flex_col().gap(px(8.)).child(div().px(px(4.)).sm().semibold().child(title.to_owned())).child(card).into_any_element()
+}
+
+/// Section heading above a bordered card whose rows are split by dividers.
+fn page_section(s: Section, t: &Theme) -> AnyElement {
+    let mut card = div().flex().flex_col().rounded(px(XL)).border_1().border_color(t.border).bg(t.muted.opacity(0.3));
+    for (i, r) in s.items.into_iter().enumerate() {
+        card = card.child(div().when(i > 0, |d| d.border_t_1().border_color(t.border)).child(r.el));
+    }
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(8.))
+        .child(div().px(px(4.)).sm().semibold().child(s.title))
+        .child(card)
+        .children(s.footer.map(|f| div().px(px(4.)).xs().text_color(t.muted_fg).child(f)))
+        .into_any_element()
 }
 
 /// Settings row: the label with an ⓘ that explains it on hover, a note under it (status or error), the control on the right.
-fn setting(id: &str, label: &str, info: Option<&str>, note: Option<(&str, gpui::Hsla)>, control: impl IntoElement, t: &Theme) -> AnyElement {
-    div()
+fn setting(id: &str, label: &str, info: Option<&str>, note: Option<(&str, gpui::Hsla)>, control: impl IntoElement, t: &Theme) -> Item {
+    let words = format!("{} {label} {}", id.replace('-', " "), info.unwrap_or_default());
+    let el = div()
         .flex()
         .items_center()
         .gap(px(16.))
@@ -77,7 +105,8 @@ fn setting(id: &str, label: &str, info: Option<&str>, note: Option<(&str, gpui::
                 .children(note.map(|(n, color)| div().xs().text_color(color).line_clamp(2).child(n.to_owned()))),
         )
         .child(div().flex().flex_none().items_center().gap(px(8.)).child(control))
-        .into_any_element()
+        .into_any_element();
+    Item { words, el }
 }
 
 /// `<Item>` row: title and hint on the left, a control on the right. `room` balances the hint's lines.
@@ -192,9 +221,11 @@ impl Hitori {
         let side = if wide { 220. } else { 0. };
         let cw = (dw - side - 48.).min(640.);
         let tab = self.settings_tab;
+        let q = self.settings_search.read(cx).content.trim().to_owned();
+        let searching = !q.is_empty();
         let mut nav = div().flex().gap(px(4.)).when(wide, |d| d.flex_col().w(px(side)).flex_none().p(px(12.)).border_r_1().border_color(t.border)).when(!wide, |d| d.px(px(12.)).py(px(8.)).border_b_1().border_color(t.border));
         for k in SettingsTab::ALL {
-            let on = k == tab;
+            let on = k == tab && !searching;
             let (muted, muted_fg) = (t.muted, t.muted_fg);
             nav = nav.child(
                 div()
@@ -213,22 +244,65 @@ impl Hitori {
                     .when(!on, |d| d.text_color(t.muted_fg).hover(move |s| s.bg(muted).text_color(muted_fg)))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.settings_tab = k;
+                        this.settings_search.update(cx, |input, _| input.reset());
                         cx.notify();
                     }))
                     .child(icon(k.icon(), 16., if on { t.foreground } else { t.muted_fg }))
                     .when(wide || on, |d| d.child(k.label())),
             );
         }
-        let content = match tab {
-            SettingsTab::Connection => self.connection_sections(window, cx),
-            SettingsTab::Network => self.network_sections(window, cx),
-            SettingsTab::Location => vec![page_section(t!("overlays.settings.location"), &t, vec![self.region_row(cx)])],
-            SettingsTab::Appearance => {
-                let dark = t.dark;
-                let theme = setting("dark", t!("overlays.settings.dark"), None, None, switch("dark", dark, &t).on_click(cx.listener(move |this, _, _, cx| this.set_dark(!dark, cx))), &t);
-                vec![page_section(SettingsTab::Appearance.label(), &t, vec![theme, self.language_row(window, cx)])]
+        // Searching shows the matching rows of every tab; a match on a tab or section name keeps the whole section.
+        let sections: Vec<Section> = if searching {
+            let mut found = vec![];
+            for k in SettingsTab::ALL {
+                for mut s in self.tab_sections(k, window, cx) {
+                    let head = format!("{} {}", k.label(), s.title);
+                    s.items.retain(|i| has_words(&format!("{head} {}", i.words), &q));
+                    if !s.items.is_empty() {
+                        found.push(s);
+                    }
+                }
             }
+            found
+        } else {
+            self.tab_sections(tab, window, cx)
         };
+        let content: Vec<AnyElement> = if sections.is_empty() {
+            vec![div().py(px(24.)).flex().justify_center().sm().text_color(t.muted_fg).child(t!("overlays.settings.nothing")).into_any_element()]
+        } else {
+            sections.into_iter().map(|s| page_section(s, &t)).collect()
+        };
+        let search_focus = self.settings_search.read(cx).focus_handle(cx);
+        let search = div()
+            .id("settings-search")
+            .flex_1()
+            .min_w(px(120.))
+            .max_w(px(240.))
+            .h(px(32.))
+            .pl(px(10.))
+            .pr(px(4.))
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .rounded(px(MD))
+            .border_1()
+            .border_color(t.border)
+            .bg(t.background)
+            .sm()
+            .cursor_text()
+            .on_mouse_down(MouseButton::Left, move |_, window, _| window.focus(&search_focus))
+            .child(icon("search", 16., t.muted_fg))
+            .child(div().flex_1().min_w_0().child(self.settings_search.clone()))
+            .when(searching, |d| {
+                d.child(
+                    button("settings-search-clear", Variant::Ghost, Size::IconXs, true, &t)
+                        .child(icon("x", 12., t.muted_fg))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.settings_search.update(cx, |input, _| input.reset());
+                            cx.notify();
+                        })),
+                )
+            });
         let dialog = div()
             .id("settings-page")
             .occlude()
@@ -249,19 +323,23 @@ impl Hitori {
                     .px(px(16.))
                     .flex()
                     .items_center()
-                    .justify_between()
+                    .gap(px(12.))
                     .border_b_1()
                     .border_color(t.border)
                     .child(
                         div()
                             .flex()
+                            .flex_1()
+                            .min_w_0()
                             .items_center()
                             .gap(px(8.))
                             .sm()
+                            .whitespace_nowrap()
                             .child(div().text_color(t.muted_fg).child(t!("overlays.settings.title")))
                             .child(div().text_color(t.muted_fg).child("/"))
-                            .child(div().medium().child(tab.label())),
+                            .child(div().min_w_0().truncate().medium().child(if searching { t!("overlays.settings.results") } else { tab.label() })),
                     )
+                    .child(search)
                     .child(
                         div()
                             .id("settings-close")
@@ -359,7 +437,22 @@ impl Hitori {
         div().relative().child(trigger).children(popup).into_any_element()
     }
 
-    fn connection_sections(&self, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    /// What a settings tab shows, top to bottom.
+    fn tab_sections(&self, tab: SettingsTab, window: &Window, cx: &mut Context<Self>) -> Vec<Section> {
+        let t = self.theme(cx);
+        match tab {
+            SettingsTab::Connection => vec![self.connection_section(window, cx), self.dns_section(cx), self.proxy_section(window, cx)],
+            SettingsTab::Location => vec![Section::new(t!("overlays.settings.location"), vec![self.region_row(cx)])],
+            SettingsTab::Appearance => {
+                let dark = t.dark;
+                let theme = setting("dark", t!("overlays.settings.dark"), None, None, switch("dark", dark, &t).on_click(cx.listener(move |this, _, _, cx| this.set_dark(!dark, cx))), &t);
+                vec![Section::new(SettingsTab::Appearance.label(), vec![self.language_row(window, cx), theme])]
+            }
+        }
+    }
+
+    /// How to connect: protocol, at startup, system-wide (and its mode), kill switch.
+    fn connection_section(&self, window: &Window, cx: &mut Context<Self>) -> Section {
         let t = self.theme(cx);
         let mut offered = crate::data::protocols();
         if !offered.contains(&self.s.protocol) {
@@ -385,6 +478,17 @@ impl Hitori {
         let mut rows = vec![
             setting("protocol", t!("overlays.connection.protocol"), Some(t!("overlays.connection.protocol_hint")), None, self.select("protocol", protocols, window, cx), &t),
             setting(
+                "startup",
+                t!("overlays.connection.startup"),
+                None,
+                None,
+                switch("startup", self.s.auto_connect, &t).on_click(cx.listener(|this, _, _, cx| {
+                    this.s.auto_connect = !this.s.auto_connect;
+                    cx.notify();
+                })),
+                &t,
+            ),
+            setting(
                 "system-wide",
                 t!("overlays.connection.system_wide"),
                 Some(system_info),
@@ -400,17 +504,6 @@ impl Hitori {
             rows.push(self.mode_row(window, cx));
         }
         rows.push(setting(
-            "startup",
-            t!("overlays.connection.startup"),
-            None,
-            None,
-            switch("startup", self.s.auto_connect, &t).on_click(cx.listener(|this, _, _, cx| {
-                this.s.auto_connect = !this.s.auto_connect;
-                cx.notify();
-            })),
-            &t,
-        ));
-        rows.push(setting(
             "kill-switch",
             t!("overlays.connection.kill_switch"),
             Some(kill_info),
@@ -421,11 +514,11 @@ impl Hitori {
             })),
             &t,
         ));
-        vec![page_section(t!("overlays.connection.title"), &t, rows)]
+        Section::new(t!("overlays.connection.title"), rows)
     }
 
     /// DNS: the subscription's servers, or one typed server (DoH URL or DoT host:port), through the tunnel or not.
-    fn dns_section(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn dns_section(&self, cx: &mut Context<Self>) -> Section {
         let t = self.theme(cx);
         let custom = self.s.dns.mode != crate::xray::DnsMode::Subscription;
         let mut rows = vec![setting(
@@ -456,16 +549,34 @@ impl Hitori {
                 &t,
             ));
         }
-        page_section(t!("overlays.dns.title"), &t, rows)
+        Section::new(t!("overlays.dns.title"), rows)
     }
 
-    /// Local proxy (who may connect, which ports) and DNS.
-    fn network_sections(&self, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    /// The local proxy: which ports, who may connect. Like DNS, it applies on the next connection.
+    fn proxy_section(&self, window: &Window, cx: &mut Context<Self>) -> Section {
         let t = self.theme(cx);
         let proxy = &self.s.proxy;
         let (listen, shared) = (proxy.listen.clone(), proxy.lan());
         let lan = self.s.lan.map(|a| a.to_string());
-        let mut rows = vec![setting(
+        let error = self.ports_error(cx);
+        let (socks, http) = (crate::app::port(&self.socks_input, cx), crate::app::port(&self.http_input, cx));
+        let same = socks.is_some() && socks == http;
+        let caption = |s: &str| div().text_color(t.muted_fg).child(s.to_owned());
+        let ports = div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .child(caption("SOCKS5"))
+            .child(text_field("socks-port", &self.socks_input, 80., socks.is_none() || same, &t, cx))
+            .child(caption("HTTP"))
+            .child(text_field("http-port", &self.http_input, 80., http.is_none() || same, &t, cx));
+        let ports_info = if self.s.uses_tun() && !shared {
+            t!("overlays.network.ports_tun").to_owned()
+        } else {
+            t!("overlays.network.ports_hint", host = proxy.host(), socks = proxy.socks, http = proxy.http)
+        };
+        let mut rows = vec![setting("ports", t!("overlays.network.ports"), Some(&ports_info), error.as_deref().map(|e| (e, t.destructive)), ports, &t)];
+        rows.push(setting(
             "lan-access",
             t!("overlays.network.lan_access"),
             Some(t!("overlays.network.lan_access_info")),
@@ -475,7 +586,7 @@ impl Hitori {
                 cx.notify();
             })),
             &t,
-        )];
+        ));
         if shared {
             // The LAN address, a saved address from another network, every network.
             let mut choices: Vec<String> = vec![];
@@ -499,33 +610,11 @@ impl Hitori {
             };
             rows.push(setting("listen", t!("overlays.network.listen_on"), Some(&info), None, self.select("listen", items, window, cx), &t));
         }
-        let error = self.ports_error(cx);
-        let (socks, http) = (crate::app::port(&self.socks_input, cx), crate::app::port(&self.http_input, cx));
-        let same = socks.is_some() && socks == http;
-        let caption = |s: &str| div().text_color(t.muted_fg).child(s.to_owned());
-        let ports = div()
-            .flex()
-            .items_center()
-            .gap(px(8.))
-            .child(caption("SOCKS5"))
-            .child(text_field("socks-port", &self.socks_input, 80., socks.is_none() || same, &t, cx))
-            .child(caption("HTTP"))
-            .child(text_field("http-port", &self.http_input, 80., http.is_none() || same, &t, cx));
-        let ports_info = if self.s.uses_tun() && !shared {
-            t!("overlays.network.ports_tun").to_owned()
-        } else {
-            t!("overlays.network.ports_hint", host = proxy.host(), socks = proxy.socks, http = proxy.http)
-        };
-        rows.push(setting("ports", t!("overlays.network.ports"), Some(&ports_info), error.as_deref().map(|e| (e, t.destructive)), ports, &t));
-        vec![
-            page_section(t!("overlays.network.local_proxy"), &t, rows),
-            self.dns_section(cx),
-            div().px(px(4.)).xs().text_color(t.muted_fg).child(t!("overlays.network.apply")).into_any_element(),
-        ]
+        Section { footer: Some(t!("overlays.network.apply")), ..Section::new(t!("overlays.network.local_proxy"), rows) }
     }
 
     /// Detected country, how much of it is routed through the VPN, and a recheck button.
-    fn region_row(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn region_row(&self, cx: &mut Context<Self>) -> Item {
         let t = self.theme(cx);
         let r = &self.s.region;
         let busy = r.status == crate::region::Status::Computing;
@@ -550,7 +639,7 @@ impl Hitori {
     }
 
     /// System, English, Русский: switches every window and the tray right away.
-    fn language_row(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    fn language_row(&self, window: &Window, cx: &mut Context<Self>) -> Item {
         let t = self.theme(cx);
         let items = std::iter::once((None, t!("overlays.settings.language_system")))
             .chain(crate::i18n::Lang::ALL.map(|l| (Some(l), l.name())))
@@ -560,7 +649,7 @@ impl Hitori {
     }
 
     /// Windows and macOS: how system-wide mode works, the system proxy or a TUN.
-    fn mode_row(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    fn mode_row(&self, window: &Window, cx: &mut Context<Self>) -> Item {
         let t = self.theme(cx);
         let items = [(false, t!("overlays.mode.system_proxy")), (true, "TUN")]
             .into_iter()
