@@ -259,6 +259,13 @@ impl Outbounds {
             }
             return Some(tag);
         };
+        let tag = format!("c-{}-{}", via.id, exit.id);
+        if let Some(outbound) = exit.relayed(via, protocol) {
+            if !self.has(&tag) {
+                self.list.push(tagged(outbound, &tag));
+            }
+            return Some(tag);
+        }
         let hop = format!("h-{}", via.id);
         if !self.has(&hop) {
             self.list.push(tagged(via.chainable(protocol)?.1.clone(), &hop));
@@ -292,6 +299,7 @@ pub fn config(plan: &Plan, ports: Ports) -> Result<Value, String> {
     let entry = plan.entry.filter(|e| e.id != exit.id);
     let mut out = Outbounds { list: vec![], protocol: plan.protocol };
     let main = match entry {
+        Some(e) if exit.relayed(e, plan.protocol).is_some() => tagged(exit.relayed(e, plan.protocol).unwrap(), "proxy"),
         Some(e) => {
             let hop = e.chainable(plan.protocol).ok_or(t!("xray.error.first_no_transport"))?.1.clone();
             out.list.push(tagged(hop, "entry"));
@@ -890,7 +898,7 @@ mod tests {
                 (*p, o)
             })
             .collect();
-        Box::leak(Box::new(Server { id, country: "X", code: "XX", city: "", ip: "", lat: 0., lon: 0., variants }))
+        Box::leak(Box::new(Server { id, country: "X", code: "XX", city: "", ip: "", lat: 0., lon: 0., variants, node: "", entries: vec![] }))
     }
 
     fn plan() -> Plan {
@@ -973,7 +981,7 @@ mod tests {
     fn local(id: &'static str, port: u16) -> &'static Server {
         let user = json!({"id": UUID, "encryption": "none"});
         let o = json!({"protocol": "vless", "settings": {"vnext": [{"address": "127.0.0.1", "port": port, "users": [user]}]}, "streamSettings": {"network": "tcp"}});
-        Box::leak(Box::new(Server { id, country: "X", code: "XX", city: "", ip: "", lat: 0., lon: 0., variants: vec![(Protocol::Tls, o)] }))
+        Box::leak(Box::new(Server { id, country: "X", code: "XX", city: "", ip: "", lat: 0., lon: 0., variants: vec![(Protocol::Tls, o)], node: "", entries: vec![] }))
     }
 
     /// A VLESS server core on this machine and a target answering 204 (loopback allowed), for latency tests offline.
@@ -1091,7 +1099,7 @@ mod tests {
         };
         let (_hmc, outbound) = hmc_fixture(&xray);
         let dead = local("de-2", free_port()).variants[0].1.clone();
-        let de: &'static Server = Box::leak(Box::new(Server { id: "de-2", country: "X", code: "XX", city: "", ip: "", lat: 0., lon: 0., variants: vec![(Protocol::Tls, dead), (Protocol::Hmc, outbound)] }));
+        let de: &'static Server = Box::leak(Box::new(Server { id: "de-2", country: "X", code: "XX", city: "", ip: "", lat: 0., lon: 0., variants: vec![(Protocol::Tls, dead), (Protocol::Hmc, outbound)], node: "", entries: vec![] }));
         let got = results(ping(vec![de], Protocol::Hmc, None, target));
         assert!(got["de-2"].is_some_and(|ms| ms < 5000), "HMC handshake answers: {got:?}");
 
@@ -1252,6 +1260,33 @@ mod tests {
         p.default_route = RuleMode::Auto;
         let c = config(&p, Ports { probe: 1, metrics: 2, ping: 3 }).unwrap();
         assert!(rule_for(&c, "process", "steam").is_none(), "follows the Auto default without rules");
+    }
+
+    /// When the backend lists the entry node for the exit, the cascade is one tunnel dialled at the entry.
+    #[test]
+    fn server_side_cascade_is_one_hop() {
+        let mut p = plan();
+        let mut fr = Server { node: "FR-10", ..p.exit.clone() };
+        fr.variants[0].1 = json!({"protocol": "vless", "settings": {"vnext": [{"address": "fr", "port": 443}]},
+            "streamSettings": {"network": "tcp", "security": "reality", "realitySettings": {"serverName": "fr.example"}}});
+        let plain: &'static Server = Box::leak(Box::new(fr.clone()));
+        fr.entries = vec![crate::data::Entry { protocol: Protocol::Tls, node: "EE-3", address: "ee".into(), port: 443, sni: "fr-via.example".into() }];
+        let fr: &'static Server = Box::leak(Box::new(fr));
+        let ee: &'static Server = Box::leak(Box::new(Server { node: "EE-3", ..p.servers[1].clone() }));
+        (p.exit, p.entry, p.servers) = (fr, Some(ee), vec![fr, ee]);
+        p.sites = vec![("video.example", AppRule { exit: Some(fr.id), ..AppRule::mode(RuleMode::Vpn) })];
+        let c = config(&p, Ports { probe: 1, metrics: 2, ping: 3 }).unwrap();
+        let outs = c["outbounds"].as_array().unwrap();
+        let proxy = outs.iter().find(|o| o["tag"] == "proxy").unwrap();
+        assert_eq!(proxy["settings"]["vnext"][0]["address"], "ee");
+        assert_eq!(proxy["streamSettings"]["realitySettings"]["serverName"], "fr-via.example");
+        assert!(proxy["streamSettings"]["sockopt"]["dialerProxy"].is_null());
+        assert!(outs.iter().all(|o| o["tag"] != "entry"), "no second tunnel");
+        // Without a listed entry the old chained cascade stays.
+        (p.exit, p.servers) = (plain, vec![plain, ee]);
+        let c = config(&p, Ports { probe: 1, metrics: 2, ping: 3 }).unwrap();
+        let proxy = c["outbounds"].as_array().unwrap().iter().find(|o| o["tag"] == "proxy").unwrap().clone();
+        assert_eq!(proxy["streamSettings"]["sockopt"]["dialerProxy"], "entry");
     }
 
     #[test]
