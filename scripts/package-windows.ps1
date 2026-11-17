@@ -17,5 +17,15 @@ Copy-Item (Join-Path $root "LICENSE"), (Join-Path $root "NOTICE") $stage
 $zip = Join-Path $root "dist\$name.zip"
 if (Test-Path $zip) { Remove-Item -Force $zip }
 Compress-Archive -Path $stage -DestinationPath $zip
+
+# Our own offline GPUI installer embeds this exact portable package.
+$env:HITORI_INSTALL_PAYLOAD = $zip
+try {
+    cargo build --release --locked --bin hitori-setup
+    if ($LASTEXITCODE -ne 0) { throw "GPUI installer build failed" }
+    Copy-Item (Join-Path $root "target\release\hitori-setup.exe") (Join-Path $root "dist\$name-setup.exe")
+} finally {
+    Remove-Item Env:HITORI_INSTALL_PAYLOAD -ErrorAction SilentlyContinue
+}
 Remove-Item -Recurse -Force (Join-Path $root "dist\stage")
 Write-Output "package-windows: dist\$name.zip"

@@ -1,0 +1,2 @@
+action = "Update to v{version}"
+interrupted = "The last update did not finish. Check the installation and its .hitori-previous backups before trying again."

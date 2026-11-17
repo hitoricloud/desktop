@@ -56,6 +56,9 @@ codesign --force --options runtime $timestamp --sign "$identity" "$app/Contents/
 codesign --force --options runtime $timestamp --sign "$identity" "$app"
 codesign --verify --strict "$app"
 
+# The updater consumes a plain archive of the complete signed bundle (no DMG mounting or scripts).
+COPYFILE_DISABLE=1 tar -C "$stage" -czf "$root/dist/hitori-$version-macos-universal.tar.gz" "Hitori VPN.app"
+
 ln -s /Applications "$stage/Applications"
 dmg="$root/dist/hitori-$version-macos-universal.dmg"
 rm -f "$dmg"

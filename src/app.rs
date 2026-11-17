@@ -247,6 +247,8 @@ pub struct Hitori {
     pub s: Shared,
     published: Shared,
     pub vpn: Entity<Vpn>,
+    pub updater: Entity<crate::updater::Updater>,
+    _updater_changes: Subscription,
     pub sidebar_open: bool,
     pub panel: Option<Panel>,
     pub palette: Option<Mode>,
@@ -351,6 +353,8 @@ impl Hitori {
             }
             cx.notify();
         });
+        let updater = cx.global::<crate::updater::Updates>().0.clone();
+        let updater_changes = cx.observe(&updater, |_, _, cx| cx.notify());
         let shared = vpn.read(cx).s.clone();
         let mut this = Self {
             focus,
@@ -360,6 +364,8 @@ impl Hitori {
             s: shared.clone(),
             published: shared,
             vpn,
+            updater,
+            _updater_changes: updater_changes,
             sidebar_open: true,
             panel: None,
             palette: None,

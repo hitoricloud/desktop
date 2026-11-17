@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2024"
 license-file = "LICENSE"
 publish = false
+default-run = "hitori"
+
+[[bin]]
+name = "hitori-setup"
+path = "src/setup.rs"
 
 [dependencies]
 gpui = { version = "0.2.2", default-features = false, features = ["wayland", "x11"] }
@@ -21,6 +26,9 @@ percent-encoding = "2"
 rust-embed = "8"
 serde_json = "1"
 sha2 = "0.10"
+semver = "1"
+tar = "0.4"
+zip = { version = "4", default-features = false, features = ["deflate"] }
 getrandom = "0.2"
 ureq = { version = "2", features = ["json"] }
 # Same rustls 0.23 (ring) and webpki-roots 0.26 as ureq.

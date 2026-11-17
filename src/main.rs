@@ -18,6 +18,9 @@ mod xray;
 mod fx;
 mod geo;
 mod input;
+mod install;
+mod release;
+mod updater;
 mod ipc;
 mod live;
 mod map;
@@ -100,6 +103,11 @@ fn skip_software_vulkan() {
 /// `status|connect|disconnect|servers|select <id>|watch`: control the running instance, see docs/ipc.md.
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("--apply-update") {
+        let result = args.get(2).ok_or_else(|| "Missing update plan.".to_owned()).and_then(|p| install::worker(std::path::Path::new(p)));
+        if let Err(e) = result { eprintln!("Hitori update: {e}"); std::process::exit(1); }
+        return;
+    }
     if args.get(1).map(String::as_str) == Some("--tun-helper") {
         #[cfg(target_os = "linux")]
         std::process::exit(tun::helper(&args[2..]));
@@ -140,6 +148,8 @@ fn main() {
             cx.open_window(WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() }, |_, cx| cx.new(|_| TextTest)).expect("window");
             return;
         }
+        let updater = cx.new(updater::Updater::new);
+        cx.set_global(updater::Updates(updater));
         let vpn = cx.new(app::Vpn::new);
         cx.set_global(tray::Windows { vpn: Some(vpn.clone()), ..Default::default() });
         if let Some(listener) = control {

@@ -10,7 +10,7 @@ use crate::fx::{Fx, fx};
 use crate::theme::{Theme, color};
 use crate::ui::{
     LG, MD, SM, Size, Tw, Variant, XL, avatar, button, button_icon, flag, icon, menu, menu_item, menu_label, menu_separator, meter,
-    pulse, skeleton, spinner, tip,
+    pulse, spinner, tip,
 };
 
 pub const SIDEBAR: f32 = 288.;
@@ -1019,6 +1019,32 @@ impl Hitori {
             )
             .child(div().flex_none().h(px(1.)).bg(t.border))
             .child(self.server_list(window, cx))
+            .children(self.update_button(cx))
+    }
+
+    /// Only while a newer release is out: an accent strip across the inspector's bottom edge.
+    fn update_button(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let t = self.theme(cx);
+        let state = &self.updater.read(cx).state;
+        let release = state.release()?;
+        let busy = state.busy();
+        let blocked = busy || self.s.conn == Conn::Connecting;
+        let glyph = match (busy, state.error()) {
+            (true, _) => spinner("update-spinner", 16., t.primary_fg).into_any_element(),
+            (false, Some(_)) => icon("info", 16., t.primary_fg).into_any_element(),
+            (false, None) => icon("download", 16., t.primary_fg).into_any_element(),
+        };
+        Some(
+            button("update", Variant::Default, Size::Lg, true, &t)
+                .w_full()
+                .h(px(48.))
+                .rounded(px(0.))
+                .when(blocked, |d| d.opacity(0.5).cursor_default())
+                .child(glyph)
+                .child(t!("update.action", version = release.version))
+                .when_some(state.error().map(str::to_owned), |d, e| d.tooltip(tip(e, &t)))
+                .when(!blocked, |d| d.on_click(cx.listener(|this, _, _, cx| this.updater.update(cx, |updater, cx| updater.click(cx))))),
+        )
     }
 
     pub fn status(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1036,10 +1062,7 @@ impl Hitori {
             Conn::On if s.ip.is_empty() => Some(format!("{}, {}", s.city, s.country)),
             Conn::On => Some(format!("{} · {}, {}", s.ip, s.city, s.country)),
             Conn::Connecting => Some(format!("{}, {}", s.city, s.country)),
-            Conn::Off => self.s.me.as_ref().map(|m| {
-                let place = m.geo.as_ref().map(|g| [g.city.clone(), g.country.clone()].into_iter().flatten().collect::<Vec<_>>().join(", ")).filter(|p| !p.is_empty());
-                [Some(m.ip.clone()), place].into_iter().flatten().collect::<Vec<_>>().join(" · ")
-            }),
+            Conn::Off => None,
         };
         let shield = icon(if self.s.conn == Conn::On { "shield-check" } else { "shield-alert" }, 24., tone);
         div()
@@ -1055,10 +1078,10 @@ impl Hitori {
                     .flex_1()
                     .min_w_0()
                     .child(div().base().semibold().tight().text_color(tone).child(title))
-                    .child(match (error, where_) {
-                        (Some(e), _) => div().h(px(16.)).truncate().xs().text_color(t.destructive).child(e).into_any_element(),
-                        (None, Some(w)) => div().h(px(16.)).truncate().xs().text_color(t.muted_fg).child(w).into_any_element(),
-                        (None, None) => div().h(px(16.)).child(skeleton("status-skeleton", 144., 16., &t)).into_any_element(),
+                    .children(match (error, where_) {
+                        (Some(e), _) => Some(div().h(px(16.)).truncate().xs().text_color(t.destructive).child(e).into_any_element()),
+                        (None, Some(w)) => Some(div().h(px(16.)).truncate().xs().text_color(t.muted_fg).child(w).into_any_element()),
+                        (None, None) => None,
                     }),
             )
             .when(failed, |d| {
