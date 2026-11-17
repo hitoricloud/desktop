@@ -200,6 +200,8 @@ pub struct Vpn {
     ticker: Option<Task<()>>,
     reload: Option<Task<()>>,
     pinger: Option<Task<()>>,
+    /// Cascade entry the last latency test went through.
+    pinged_via: Option<&'static str>,
     tester: Option<Task<()>>,
     /// Output of the cores started this session, kept after one stops or fails for the log sheet.
     log: xray::Log,
@@ -294,6 +296,7 @@ impl Vpn {
             ticker: None,
             reload: None,
             pinger: None,
+            pinged_via: None,
             log: xray::Log::default(),
             tester: None,
             login,
@@ -976,6 +979,7 @@ impl Vpn {
                 self.bytes = None;
                 self.connected(cx);
                 self.lookup_exit(probe, cx);
+                self.retest_if_moved(cx);
             }
             Err(e) => {
                 self.s.conn = Conn::Off;
@@ -1220,8 +1224,12 @@ impl Vpn {
         if self.s.testing || servers.is_empty() {
             return;
         }
-        let via = self.core.as_ref().map(|c| c.ports.ping);
-        let rx = xray::ping_all(servers.clone(), self.s.protocol, via);
+        let (via, entry) = match self.core.as_ref() {
+            Some(c) => (Some(c.ports.ping), c.entry),
+            None => (None, self.s.entry_id.filter(|e| *e != self.s.server_id).map(data::server)),
+        };
+        let rx = xray::ping_all(servers.clone(), self.s.protocol, entry, via);
+        self.pinged_via = entry.map(|e| e.id);
         self.s.testing = true;
         self.s.pending = servers.iter().map(|s| s.id).collect();
         self.tester = Some(cx.spawn(async move |this, cx| {
@@ -1264,5 +1272,15 @@ impl Vpn {
         }
         self.s.servers_gen += 1;
         cx.notify();
+        self.retest_if_moved(cx);
+    }
+
+    /// Latencies are measured through the running core's first hop; another one makes them stale.
+    fn retest_if_moved(&mut self, cx: &mut Context<Self>) {
+        if let Some(core) = self.core.as_ref()
+            && self.pinged_via != core.entry.map(|e| e.id)
+        {
+            self.test_pings(cx);
+        }
     }
 }
