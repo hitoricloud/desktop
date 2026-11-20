@@ -5,11 +5,12 @@ use crate::app::{Conn, Hitori, Menu, Mode, Page, Panel, Place};
 use crate::data::{self, AppInfo, AppRule, RuleMode, Scope, Suggestion, ago, app, fixed1, js_num, server};
 use crate::theme::{AMBER, EMERALD};
 use crate::map::Padding;
+use crate::score::has_words;
 use crate::fx::{Fx, fx};
 use crate::theme::{Theme, color};
 use crate::ui::{
     LG, MD, SM, Size, Tw, Variant, XL, avatar, button, button_icon, flag, icon, menu, menu_item, menu_label, menu_separator, meter,
-    pulse, skeleton, spinner, tip,
+    pulse, spinner, tip,
 };
 
 pub const SIDEBAR: f32 = 288.;
@@ -1018,6 +1019,32 @@ impl Hitori {
             )
             .child(div().flex_none().h(px(1.)).bg(t.border))
             .child(self.server_list(window, cx))
+            .children(self.update_button(cx))
+    }
+
+    /// Only while a newer release is out: an accent strip across the inspector's bottom edge.
+    fn update_button(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let t = self.theme(cx);
+        let state = &self.updater.read(cx).state;
+        let release = state.release()?;
+        let busy = state.busy();
+        let blocked = busy || self.s.conn == Conn::Connecting;
+        let glyph = match (busy, state.error()) {
+            (true, _) => spinner("update-spinner", 16., t.primary_fg).into_any_element(),
+            (false, Some(_)) => icon("info", 16., t.primary_fg).into_any_element(),
+            (false, None) => icon("download", 16., t.primary_fg).into_any_element(),
+        };
+        Some(
+            button("update", Variant::Default, Size::Lg, true, &t)
+                .w_full()
+                .h(px(48.))
+                .rounded(px(0.))
+                .when(blocked, |d| d.opacity(0.5).cursor_default())
+                .child(glyph)
+                .child(t!("update.action", version = release.version))
+                .when_some(state.error().map(str::to_owned), |d, e| d.tooltip(tip(e, &t)))
+                .when(!blocked, |d| d.on_click(cx.listener(|this, _, _, cx| this.updater.update(cx, |updater, cx| updater.click(cx))))),
+        )
     }
 
     pub fn status(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1035,10 +1062,7 @@ impl Hitori {
             Conn::On if s.ip.is_empty() => Some(format!("{}, {}", s.city, s.country)),
             Conn::On => Some(format!("{} · {}, {}", s.ip, s.city, s.country)),
             Conn::Connecting => Some(format!("{}, {}", s.city, s.country)),
-            Conn::Off => self.s.me.as_ref().map(|m| {
-                let place = m.geo.as_ref().map(|g| [g.city.clone(), g.country.clone()].into_iter().flatten().collect::<Vec<_>>().join(", ")).filter(|p| !p.is_empty());
-                [Some(m.ip.clone()), place].into_iter().flatten().collect::<Vec<_>>().join(" · ")
-            }),
+            Conn::Off => None,
         };
         let shield = icon(if self.s.conn == Conn::On { "shield-check" } else { "shield-alert" }, 24., tone);
         div()
@@ -1054,10 +1078,10 @@ impl Hitori {
                     .flex_1()
                     .min_w_0()
                     .child(div().base().semibold().tight().text_color(tone).child(title))
-                    .child(match (error, where_) {
-                        (Some(e), _) => div().h(px(16.)).truncate().xs().text_color(t.destructive).child(e).into_any_element(),
-                        (None, Some(w)) => div().h(px(16.)).truncate().xs().text_color(t.muted_fg).child(w).into_any_element(),
-                        (None, None) => div().h(px(16.)).child(skeleton("status-skeleton", 144., 16., &t)).into_any_element(),
+                    .children(match (error, where_) {
+                        (Some(e), _) => Some(div().h(px(16.)).truncate().xs().text_color(t.destructive).child(e).into_any_element()),
+                        (None, Some(w)) => Some(div().h(px(16.)).truncate().xs().text_color(t.muted_fg).child(w).into_any_element()),
+                        (None, None) => None,
                     }),
             )
             .when(failed, |d| {
@@ -1260,27 +1284,42 @@ impl Hitori {
             .child(t!("views.servers.test"))
             .on_click(cx.listener(|this, _, _, cx| this.test_pings(cx)));
         let n = servers.len();
+        let q = self.server_search.read(cx).content.trim().to_owned();
         // Servers under their country, in latency order when sorted (so countries by their best server). Servers that did
-        // not answer the last test are left out, except the one in use.
+        // not answer the last test are left out, except the one in use, unless searched for.
         let mut groups: Vec<Vec<&'static data::Server>> = vec![];
-        for s in servers.into_iter().filter(|s| s.id == self.s.server_id || !data::timed_out(s.id) || self.s.pending.contains(&s.id)) {
+        for s in servers.into_iter().filter(|s| !q.is_empty() || s.id == self.s.server_id || !data::timed_out(s.id) || self.s.pending.contains(&s.id)) {
             match groups.iter_mut().find(|g| g[0].code == s.code) {
                 Some(g) => g.push(s),
                 None => groups.push(vec![s]),
             }
         }
+        // A search that names the country keeps all of it; one that names servers (city, number, address) shows them open.
         let mut rows: Vec<AnyElement> = vec![];
-        for g in &groups {
+        for g in &mut groups {
+            let whole = has_words(&format!("{} {}", g[0].country, g[0].code), &q);
+            if !whole {
+                g.retain(|s| has_words(&format!("{} {} {} {} {}", s.country, s.code, s.city, s.tag(), s.ip), &q));
+                if g.is_empty() {
+                    continue;
+                }
+            }
             rows.push(self.country_row(g, window, cx).into_any_element());
-            if self.open_countries.contains(&g[0].code) {
+            if self.open_countries.contains(&g[0].code) || !whole {
                 rows.extend(g.iter().map(|s| self.server_row(s, cx).into_any_element()));
             }
         }
+        let empty = match (n, rows.is_empty()) {
+            (0, _) => Some(t!("views.servers.sign_in")),
+            (_, true) => Some(t!("views.servers.nothing")),
+            _ => None,
+        };
         div()
             .flex_1()
             .min_h_0()
             .flex()
             .flex_col()
+            .when(n > 0, |d| d.child(div().flex_none().px(px(16.)).pt(px(12.)).child(self.server_search_field(&t, cx))))
             .child(
                 div()
                     .h(px(40.))
@@ -1316,9 +1355,43 @@ impl Hitori {
                     .gap(px(4.))
                     .px(px(8.))
                     .pb(px(8.))
-                    .when(n == 0, |d| d.child(div().px(px(8.)).py(px(8.)).sm().text_color(t.muted_fg).child(t!("views.servers.sign_in"))))
+                    .children(empty.map(|e| div().px(px(8.)).py(px(8.)).sm().text_color(t.muted_fg).child(e)))
                     .children(rows),
             )
+    }
+
+    /// Search over the server list; the × clears it.
+    fn server_search_field(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let focus = self.server_search.read(cx).focus_handle(cx);
+        let typed = !self.server_search.read(cx).content.is_empty();
+        div()
+            .id("server-search")
+            .h(px(36.))
+            .pl(px(12.))
+            .pr(px(4.))
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .rounded(px(MD))
+            .border_1()
+            .border_color(t.border)
+            .bg(t.background)
+            .sm()
+            .cursor_text()
+            .on_mouse_down(MouseButton::Left, move |_, window, _| window.focus(&focus))
+            .child(icon("search", 16., t.muted_fg))
+            .child(div().flex_1().min_w_0().child(self.server_search.clone()))
+            .when(typed, |d| {
+                d.child(
+                    button("server-search-clear", Variant::Ghost, Size::IconXs, true, t)
+                        .tooltip(tip(t!("views.servers.clear"), t))
+                        .child(icon("x", 12., t.muted_fg))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.server_search.update(cx, |input, _| input.reset());
+                            cx.notify();
+                        })),
+                )
+            })
     }
 
     /// Load ring, like Proton's, in the flag column; empty when the provider does not report load.

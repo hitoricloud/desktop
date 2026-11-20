@@ -98,3 +98,24 @@ pub fn command_score(value: &str, search: &str) -> f64 {
     let mut cx = Ctx { string: &string, abbr: &abbr, lower_string: &ls, lower_abbr: &la, memo: HashMap::new() };
     score(&mut cx, 0, 0)
 }
+
+/// Every word of the search is somewhere in the text, ignoring case (and ё/е).
+pub fn has_words(text: &str, search: &str) -> bool {
+    let fold = |s: &str| s.to_lowercase().replace('ё', "е");
+    let text = fold(text);
+    fold(search).split_whitespace().all(|w| text.contains(w))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::has_words;
+
+    #[test]
+    fn has_words_matches_every_word_in_any_order() {
+        assert!(has_words("Эстония EE Таллин EE-4821", "таллин 48"));
+        assert!(has_words("Kill switch", "SWITCH"));
+        assert!(has_words("Тёмная тема", "темная"));
+        assert!(has_words("anything", "  "));
+        assert!(!has_words("Эстония EE", "эстония fi"));
+    }
+}

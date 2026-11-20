@@ -1,0 +1,8 @@
+# Desktop installer and updates
+
+- Keep the existing UI. Add an outlined Update button at the bottom of the 320 px inspector, 16 px inset, full available width, 48 px high. Show checking/downloading/ready/current/error states next to the action; use the existing light/dark theme and font.
+- Fetch stable GitHub releases from hitoricloud/desktop. Select the matching OS/architecture asset and a newer semantic version. Require GitHub's SHA-256 asset digest. Bound downloads and extraction; reject traversal, links and unexpected archive entries.
+- Stage updates without touching the running installation. A second click confirms installation and restart. Spawn a worker outside the installation; quit through GPUI's existing VPN cleanup hook. The worker must observe parent process exit before replacing files. Keep backups and roll back replacement errors.
+- Windows: standalone offline GPUI setup executable, bundled ZIP payload, per-user installation, Start Menu shortcut and uninstall entry. No Inno Setup and no administrator rights. Continue publishing the portable ZIP.
+- Linux: update the existing tarball layout, not /nix/store or development builds. macOS: update the complete signed app bundle from a separate updater tarball; keep the DMG for first installation. Read-only installations report an actionable error rather than elevating automatically.
+- Tests: version/asset selection, checksum rejection, archive traversal and size limits, file replacement and rollback, unsupported layouts. Build and run Rust tests on Linux; extend CI for installer payload checks and native Windows/macOS builds. Native installation, restart and UI checks must be reported separately from Linux checks.

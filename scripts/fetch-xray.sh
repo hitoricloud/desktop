@@ -2,7 +2,8 @@
 # Installs the Xray core from a release of the public fork (github.com/hitoricloud/Xray-core) into bin/.
 # Each release asset is checked against the SHA-256 in its .dgst file.
 #
-#   scripts/fetch-xray.sh [tag]        the pinned release (XRAY_TAG) -> bin/xray
+#   scripts/fetch-xray.sh [tag]        the pinned release (XRAY_TAG) for this machine -> bin/xray[.exe]
+#                                      (also run by build.rs when bin/xray is missing)
 #   XRAY_TARGETS="linux-amd64 windows-amd64 darwin-arm64 darwin-amd64" scripts/fetch-xray.sh
 #                                      several cores -> bin/xray-<target>[.exe] (CI packaging)
 # windows-amd64 also fetches the signed wintun.dll (TUN mode) from wintun.net -> bin/wintun.dll, checked against WINTUN_SHA256.
@@ -26,6 +27,18 @@ asset() {
   esac
 }
 
+# This machine's target, for the default bin/xray.
+host() {
+  case "$(uname -sm)" in
+    "Linux x86_64") echo linux-amd64 ;;
+    "Darwin arm64") echo darwin-arm64 ;;
+    "Darwin x86_64") echo darwin-amd64 ;;
+    MINGW*x86_64 | MSYS*x86_64 | CYGWIN*x86_64) echo windows-amd64 ;;
+    *) echo "fetch-xray: no Xray build for $(uname -sm)" >&2; return 1 ;;
+  esac
+}
+targets="${XRAY_TARGETS:-$(host)}"
+
 sha256() { if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1; }
 
 tmp="$(mktemp -d)"
@@ -33,7 +46,7 @@ trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$out"
 cores='{}'
 linux=""
-for target in ${XRAY_TARGETS:-linux-amd64}; do
+for target in $targets; do
   zip="Xray-$(asset "$target").zip"
   url="https://github.com/$repo/releases/download/$tag/$zip"
   curl -fsSL --retry 2 -o "$tmp/$zip" "$url"
@@ -48,7 +61,7 @@ for target in ${XRAY_TARGETS:-linux-amd64}; do
   mkdir "$tmp/$target"
   unzip -q -o "$tmp/$zip" "xray$ext" -d "$tmp/$target"
   dest="$out/xray-$target$ext"
-  [[ -n "${XRAY_TARGETS:-}" ]] || dest="$out/xray"
+  [[ -n "${XRAY_TARGETS:-}" ]] || dest="$out/xray$ext"
   install -m 755 "$tmp/$target/xray$ext" "$dest"
   [[ "$target" == linux-amd64 ]] && linux="$dest"
   cores="$(jq --arg t "$target" --arg sha256 "$got" '. + {($t): {zip: $sha256}}' <<<"$cores")"
@@ -67,4 +80,4 @@ version=""
 [[ -n "$linux" && "$(uname -sm)" == "Linux x86_64" ]] && version="$("$linux" version | head -n1)"
 jq -n --arg repo "$repo" --arg tag "$tag" --arg version "$version" --argjson sha256 "$cores" --arg fetched "$(date -u +%FT%TZ)" \
   '{repo: $repo, tag: $tag, version: $version, sha256: $sha256, fetched: $fetched}' >"$out/xray.json"
-echo "fetch-xray: ${version:-Xray} ($repo $tag) -> bin/ [${XRAY_TARGETS:-linux-amd64}]"
+echo "fetch-xray: ${version:-Xray} ($repo $tag) -> bin/ [$targets]"

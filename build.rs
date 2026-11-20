@@ -16,6 +16,42 @@ fn main() {
         embed_resource::compile("packaging/windows/hitori.rc", embed_resource::NONE).manifest_required().unwrap();
     }
     locales();
+    fetch_xray();
+    println!("cargo:rerun-if-env-changed=VERSION");
+    println!("cargo:rerun-if-env-changed=HITORI_INSTALL_PAYLOAD");
+    // Without VERSION (local builds) a pre-release, so the updater never offers a release over a dev build.
+    let version = std::env::var("VERSION").unwrap_or_else(|_| format!("{}-dev", std::env::var("CARGO_PKG_VERSION").unwrap()));
+    println!("cargo:rustc-env=HITORI_VERSION={version}");
+    let payload = match std::env::var("HITORI_INSTALL_PAYLOAD") {
+        Ok(path) => {
+            let path = std::fs::canonicalize(path).expect("installer payload");
+            println!("cargo:rerun-if-changed={}", path.display());
+            format!("pub static PAYLOAD: &[u8] = include_bytes!({:?});", path.to_string_lossy())
+        }
+        Err(_) => "pub static PAYLOAD: &[u8] = &[];".into(),
+    };
+    std::fs::write(Path::new(&std::env::var("OUT_DIR").unwrap()).join("payload.rs"), payload).unwrap();
+}
+
+/// A fresh checkout has no core in `bin/` (git ignores it): fetch the pinned one for this machine, as
+/// `xray::xray_path` looks for it. Not in CI or cross builds (CI fetches every target itself); `HITORI_FETCH_XRAY=0`
+/// skips it.
+fn fetch_xray() {
+    println!("cargo:rerun-if-env-changed=HITORI_FETCH_XRAY");
+    println!("cargo:rerun-if-env-changed=CI");
+    if std::env::var_os("CI").is_some() {
+        return;
+    }
+    let exe = if cfg!(windows) { "xray.exe" } else { "xray" };
+    let core = Path::new("bin").join(exe);
+    println!("cargo:rerun-if-changed={}", core.display());
+    if core.is_file() || std::env::var("HITORI_FETCH_XRAY").as_deref() == Ok("0") || std::env::var("TARGET").ok() != std::env::var("HOST").ok() {
+        return;
+    }
+    let fetched = std::process::Command::new("bash").arg("scripts/fetch-xray.sh").env_remove("XRAY_TARGETS").status();
+    if !matches!(fetched, Ok(s) if s.success()) || !core.is_file() {
+        println!("cargo:warning=no Xray core in bin/ and scripts/fetch-xray.sh failed ({fetched:?}); the app cannot connect until it is there");
+    }
 }
 
 /// `locales/<lang>/<area>.toml` → key tables and the `t!` macro, one arm per English key (unknown keys do not compile).
@@ -60,11 +96,13 @@ fn locales() {
 
 /// Every message of one language: `<area>.<path>` → forms; a plain string is the `other` form.
 fn load(dir: &Path) -> BTreeMap<String, Forms> {
+    println!("cargo:rerun-if-changed={}", dir.display());
     let mut all = BTreeMap::new();
     let Ok(entries) = std::fs::read_dir(dir) else { return all };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().is_some_and(|e| e == "toml") {
+            println!("cargo:rerun-if-changed={}", path.display());
             let text = std::fs::read_to_string(&path).unwrap();
             let table: toml::Table = text.parse().unwrap_or_else(|e| panic!("{}: {e}", path.display()));
             walk(&path.file_stem().unwrap().to_string_lossy(), &table, &path, &mut all);

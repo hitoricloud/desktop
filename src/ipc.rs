@@ -446,7 +446,7 @@ mod tests {
 
     #[test]
     fn server_json() {
-        let s = Server { id: "n1", country: "Estonia", code: "EE", city: "Tallinn", ip: "", lat: 0., lon: 0., variants: vec![] };
+        let s = Server { id: "n1", country: "Estonia", code: "EE", city: "Tallinn", ip: "", lat: 0., lon: 0., variants: vec![], node: "", entries: vec![] };
         assert_eq!(server(&s), json!({ "id": "n1", "name": "Estonia · Tallinn", "country": "Estonia", "code": "EE", "city": "Tallinn" }));
     }
 

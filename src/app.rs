@@ -51,18 +51,16 @@ pub enum Panel {
 #[derive(Clone, Copy, PartialEq)]
 pub enum SettingsTab {
     Connection,
-    Network,
     Location,
     Appearance,
 }
 
 impl SettingsTab {
-    pub const ALL: [SettingsTab; 4] = [Self::Connection, Self::Network, Self::Location, Self::Appearance];
+    pub const ALL: [SettingsTab; 3] = [Self::Connection, Self::Location, Self::Appearance];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Connection => t!("app.settings_tab.connection"),
-            Self::Network => t!("app.settings_tab.network"),
             Self::Location => t!("app.settings_tab.location"),
             Self::Appearance => t!("app.settings_tab.appearance"),
         }
@@ -71,7 +69,6 @@ impl SettingsTab {
     pub fn icon(self) -> &'static str {
         match self {
             Self::Connection => "shield-check",
-            Self::Network => "globe",
             Self::Location => "map",
             Self::Appearance => "wand-sparkles",
         }
@@ -250,6 +247,8 @@ pub struct Hitori {
     pub s: Shared,
     published: Shared,
     pub vpn: Entity<Vpn>,
+    pub updater: Entity<crate::updater::Updater>,
+    _updater_changes: Subscription,
     pub sidebar_open: bool,
     pub panel: Option<Panel>,
     pub palette: Option<Mode>,
@@ -262,7 +261,11 @@ pub struct Hitori {
     pub paste_link: bool,
     /// New website rule on the rules page and sheet.
     pub site_input: Entity<TextInput>,
-    /// Local proxy ports in Settings › Network.
+    /// Filters the inspector's server list by country, city or server.
+    pub server_search: Entity<TextInput>,
+    /// Filters Settings across every tab.
+    pub settings_search: Entity<TextInput>,
+    /// Local proxy ports in Settings › Connection.
     pub socks_input: Entity<TextInput>,
     pub http_input: Entity<TextInput>,
     /// The DoH URL or DoT server, whichever the DNS mode uses.
@@ -287,6 +290,7 @@ pub struct Hitori {
     lang: crate::i18n::Lang,
     _search_changes: Subscription,
     _site_changes: Subscription,
+    _filter_changes: Vec<Subscription>,
     /// What the Network fields held at the last edit; caret blinks notify too.
     network_typed: Vec<gpui::SharedString>,
     _network_changes: Vec<Subscription>,
@@ -310,6 +314,9 @@ impl Hitori {
         let link = cx.new(|cx| TextInput::new("https://…/sub/…", t.muted_fg, t.foreground, cx));
         let site_input = cx.new(|cx| TextInput::new(t!("app.add_site_placeholder"), t.muted_fg, t.foreground, cx));
         let site_changes = cx.observe(&site_input, |_, _, cx| cx.notify());
+        let server_search = cx.new(|cx| TextInput::new(t!("views.servers.search"), t.muted_fg, t.foreground, cx));
+        let settings_search = cx.new(|cx| TextInput::new(t!("overlays.settings.search"), t.muted_fg, t.foreground, cx));
+        let filter_changes = [&server_search, &settings_search].map(|i| cx.observe(i, |_, _, cx| cx.notify())).into();
         let (proxy, dns) = (vpn.read(cx).s.proxy.clone(), vpn.read(cx).s.dns.clone());
         let field = |text: &str, cx: &mut Context<Self>| {
             cx.new(|cx| {
@@ -346,6 +353,8 @@ impl Hitori {
             }
             cx.notify();
         });
+        let updater = cx.global::<crate::updater::Updates>().0.clone();
+        let updater_changes = cx.observe(&updater, |_, _, cx| cx.notify());
         let shared = vpn.read(cx).s.clone();
         let mut this = Self {
             focus,
@@ -355,6 +364,8 @@ impl Hitori {
             s: shared.clone(),
             published: shared,
             vpn,
+            updater,
+            _updater_changes: updater_changes,
             sidebar_open: true,
             panel: None,
             palette: None,
@@ -364,6 +375,8 @@ impl Hitori {
             link,
             paste_link: false,
             site_input,
+            server_search,
+            settings_search,
             socks_input,
             http_input,
             dns_input,
@@ -383,6 +396,7 @@ impl Hitori {
             lang: crate::i18n::current(),
             _search_changes: changes,
             _site_changes: site_changes,
+            _filter_changes: filter_changes,
             network_typed: vec![],
             _network_changes: network_changes,
             _vpn_changes: vpn_changes,
@@ -473,6 +487,8 @@ impl Hitori {
                     input.content = value.to_owned().into();
                     cx.notify();
                 }),
+                "find" => self.server_search.update(cx, |input, _| input.set_content(value)),
+                "settings-find" => self.settings_search.update(cx, |input, _| input.set_content(value)),
                 "menu" => {
                     self.menu = Some(match value {
                         "tray" => Menu::TrayAccount,
@@ -700,6 +716,9 @@ impl Hitori {
     pub fn open_panel(&mut self, panel: Panel, cx: &mut Context<Self>) {
         self.menu = None;
         self.panel = Some(panel);
+        if panel == Panel::Settings {
+            self.settings_search.update(cx, |input, _| input.reset());
+        }
         cx.notify();
     }
 
@@ -763,7 +782,7 @@ impl Hitori {
         cx.set_global(if dark { Theme::dark() } else { Theme::light() });
         self.s.dark = dark;
         let t = theme(cx);
-        for input in [&self.search, &self.link, &self.socks_input, &self.http_input, &self.dns_input] {
+        for input in [&self.search, &self.link, &self.site_input, &self.server_search, &self.settings_search, &self.socks_input, &self.http_input, &self.dns_input] {
             input.update(cx, |input, _| {
                 input.placeholder_color = t.muted_fg;
                 input.caret = t.foreground;
@@ -788,7 +807,13 @@ impl Hitori {
         self.lang = crate::i18n::current();
         window.set_window_title(t!("app.title"));
         let search = search_placeholder(self.palette.unwrap_or(Mode::Exit));
-        for (input, text) in [(&self.search, search.as_str()), (&self.site_input, t!("app.add_site_placeholder"))] {
+        let fields = [
+            (&self.search, search.as_str()),
+            (&self.site_input, t!("app.add_site_placeholder")),
+            (&self.server_search, t!("views.servers.search")),
+            (&self.settings_search, t!("overlays.settings.search")),
+        ];
+        for (input, text) in fields {
             input.update(cx, |input, cx| {
                 input.set_placeholder(text);
                 cx.notify();
@@ -812,6 +837,8 @@ impl Hitori {
         if self.menu.take().is_some() || self.map.pick.take().is_some() {
         } else if self.palette.is_some() {
             self.close_palette(window, cx);
+        } else if self.panel == Some(Panel::Settings) && !self.settings_search.read(cx).content.is_empty() {
+            self.settings_search.update(cx, |input, _| input.reset());
         } else if self.panel.is_some() {
             self.panel = None;
         } else if self.popover {

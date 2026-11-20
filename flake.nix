@@ -13,7 +13,8 @@
     in {
       devShells.${system} = {
         default = pkgs.mkShell {
-          packages = [ pkgs.rust-bin.stable.latest.default pkgs.pkg-config pkgs.clang pkgs.mold ] ++ libs;
+          # curl, jq, unzip: scripts/fetch-xray.sh (also run by build.rs).
+          packages = [ pkgs.rust-bin.stable.latest.default pkgs.pkg-config pkgs.clang pkgs.mold pkgs.curl pkgs.jq pkgs.unzip ] ++ libs;
           LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath libs;
         };
         # Windows and macOS builds from Linux: scripts/build-windows.sh, scripts/build-macos.sh.

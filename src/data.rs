@@ -52,6 +52,20 @@ pub struct Server {
     pub lon: f64,
     /// Core outbound per transport, as the subscription published it.
     pub variants: Vec<(Protocol, serde_json::Value)>,
+    /// Backend node name of this exit (Hitori backend), "" when unknown.
+    pub node: &'static str,
+    /// Nodes that carry this exit's traffic as a cascade entry (one tunnel instead of two).
+    pub entries: Vec<Entry>,
+}
+
+/// Dial `address:port` with `sni` to reach the exit through cascade entry `node`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Entry {
+    pub protocol: Protocol,
+    pub node: &'static str,
+    pub address: String,
+    pub port: u16,
+    pub sni: String,
 }
 
 impl Server {
@@ -77,6 +91,27 @@ impl Server {
         self.has(if p == Protocol::Hy2 { Protocol::Tls } else { p })
     }
 
+    /// The exit's outbound dialled at entry `via` when `via`'s node carries it (server-side cascade), else None.
+    pub fn relayed(&self, via: &Server, want: Protocol) -> Option<serde_json::Value> {
+        if via.node.is_empty() {
+            return None;
+        }
+        let (p, outbound) = self.chainable(want)?;
+        let e = self.entries.iter().find(|e| e.protocol == p && e.node == via.node)?;
+        let mut o = outbound.clone();
+        let settings = &mut o["settings"];
+        let target = if settings["vnext"].is_array() { &mut settings["vnext"][0] } else if settings["servers"].is_array() { &mut settings["servers"][0] } else { settings };
+        target["address"] = serde_json::json!(e.address);
+        target["port"] = serde_json::json!(e.port);
+        let stream = &mut o["streamSettings"];
+        for key in ["realitySettings", "tlsSettings"] {
+            if stream[key].is_object() {
+                stream[key]["serverName"] = serde_json::json!(e.sni);
+            }
+        }
+        Some(o)
+    }
+
     /// Transports that can carry another hop (no UDP-only ones).
     pub fn chainable(&self, want: Protocol) -> Option<(Protocol, &serde_json::Value)> {
         match self.variant(want) {
@@ -94,7 +129,7 @@ fn none() -> &'static Server {
     if let Some(s) = all.iter().find(|s| s.country == country && s.city == city) {
         return s;
     }
-    let s: &'static Server = Box::leak(Box::new(Server { id: "none", country, code: "", city, ip: "", lat: 52., lon: 30., variants: vec![] }));
+    let s: &'static Server = Box::leak(Box::new(Server { id: "none", country, code: "", city, ip: "", lat: 52., lon: 30., variants: vec![], node: "", entries: vec![] }));
     all.push(s);
     s
 }
@@ -165,7 +200,7 @@ pub fn learn_exit(id: &str, ip: &str, city: Option<&str>, lat: f64, lon: f64) {
         if s.ip == ip && s.city == city && s.lat == lat && s.lon == lon {
             return;
         }
-        *slot = Box::leak(Box::new(Server { ip: intern(ip), city, lat, lon, variants: s.variants.clone(), ..*s }));
+        *slot = Box::leak(Box::new(Server { ip: intern(ip), city, lat, lon, variants: s.variants.clone(), entries: s.entries.clone(), ..*s }));
     }
 }
 
@@ -177,7 +212,7 @@ pub fn relabel() {
         if let Some((country, ..)) = country(s.code)
             && country != s.country
         {
-            *slot = Box::leak(Box::new(Server { country, variants: s.variants.clone(), ..*s }));
+            *slot = Box::leak(Box::new(Server { country, variants: s.variants.clone(), entries: s.entries.clone(), ..*s }));
         }
     }
 }
@@ -627,7 +662,7 @@ mod tests {
 
     #[test]
     fn latency_order_and_timeouts() {
-        let node = |id: &'static str| &*Box::leak(Box::new(Server { id, country: "", code: "", city: "", ip: "", lat: 0., lon: 0., variants: vec![] }));
+        let node = |id: &'static str| &*Box::leak(Box::new(Server { id, country: "", code: "", city: "", ip: "", lat: 0., lon: 0., variants: vec![], node: "", entries: vec![] }));
         let mut list = vec![node("t-never"), node("t-dead"), node("t-slow"), node("t-fast")];
         set_pings([("t-dead", None), ("t-slow", Some(300)), ("t-fast", Some(40))]);
         by_latency(&mut list);
@@ -650,6 +685,8 @@ mod tests {
             lat: 0.,
             lon: 0.,
             variants: protos.iter().map(|p| (*p, serde_json::Value::Null)).collect(),
+            node: "",
+            entries: vec![],
         };
         set_servers(vec![
             node("o-ee-1", "EE", &[Protocol::Tls, Protocol::Grpc, Protocol::Hy2]),

@@ -82,8 +82,9 @@ pub fn restore() {
 mod wininet {
     use serde::{Deserialize, Serialize};
 
-    /// Local and private addresses never go through the proxy (WinINet wildcards).
-    const BYPASS: [&str; 26] = [
+    /// Local and private addresses never go through the proxy (WinINet wildcards). No IPv6 literals: newer Windows 11
+    /// builds refuse the whole write with ERROR_INVALID_PARAMETER when the list has one (`[::1]`, `fe80::*`).
+    const BYPASS: [&str; 24] = [
         "<local>",
         "localhost",
         "127.*",
@@ -107,10 +108,20 @@ mod wininet {
         "172.30.*",
         "172.31.*",
         "100.64.*",
-        "[::1]",
         "*.local",
-        "fe80::*",
     ];
+    /// WinINet refuses longer bypass lists on some versions; ours fits well below.
+    const MAX_BYPASS: usize = 2000;
+
+    /// An IPv6 literal (`::1`, `[fe80::1]`, `fd00::*`); a single colon is a scheme or port.
+    fn ipv6(entry: &str) -> bool {
+        entry.matches(':').count() >= 2
+    }
+
+    /// Bypass entries Windows accepts: the user's IPv6 ones (another proxy tool may have left them) dropped.
+    pub fn accepted(bypass: &str) -> String {
+        bypass.split(';').map(str::trim).filter(|e| !e.is_empty() && !ipv6(e)).collect::<Vec<_>>().join(";")
+    }
     pub const DIRECT: u32 = 1;
     pub const PROXY: u32 = 2;
 
@@ -126,8 +137,10 @@ mod wininet {
     /// Ours: only the manual proxy (no PAC, no auto-detect, which would win over it), the user's bypass entries kept.
     pub fn ours(previous: &Previous, host: &str, http: u16) -> Previous {
         let mut bypass: Vec<&str> = BYPASS.to_vec();
-        for entry in previous.bypass.iter().flat_map(|b| b.split([';', ' ', '\t', '\r', '\n'])).map(str::trim).filter(|e| !e.is_empty()) {
-            if !bypass.iter().any(|b| b.eq_ignore_ascii_case(entry)) {
+        let mut len = BYPASS.iter().map(|b| b.len() + 1).sum::<usize>();
+        for entry in previous.bypass.iter().flat_map(|b| b.split([';', ' ', '\t', '\r', '\n'])).map(str::trim).filter(|e| !e.is_empty() && !ipv6(e)) {
+            if !bypass.iter().any(|b| b.eq_ignore_ascii_case(entry)) && len + entry.len() < MAX_BYPASS {
+                len += entry.len() + 1;
                 bypass.push(entry);
             }
         }
@@ -205,8 +218,16 @@ mod platform {
         write(&super::wininet::ours(previous, host, http))
     }
 
+    /// Exactly what was there; if this Windows refuses that (an IPv6 bypass entry), the same without such entries,
+    /// rather than leaving the system pointing at a core that is gone.
     pub fn put_back(previous: &Previous) -> Result<(), String> {
-        write(previous)
+        write(previous).or_else(|e| {
+            let bypass = previous.bypass.as_deref().map(super::wininet::accepted).filter(|b| !b.is_empty());
+            if bypass == previous.bypass {
+                return Err(e);
+            }
+            write(&Previous { bypass, ..previous.clone() })
+        })
     }
 }
 
@@ -421,6 +442,14 @@ mod tests {
         assert_eq!(bypass.iter().filter(|b| **b == "10.*").count(), 1);
         assert_eq!(ours.pac, before.pac, "kept so restoring needs nothing but `before`");
         assert_eq!(wininet::ours(&before, "192.168.0.10", 8080).server.as_deref(), Some("192.168.0.10:8080"));
+        // Windows 11 refuses the whole write with any IPv6 literal in the list (ERROR_INVALID_PARAMETER).
+        let v6 = Previous { bypass: Some("::1;[::1];fe80::*;fd00::/8;*.corp;http://intranet".into()), ..before.clone() };
+        let bypass = wininet::ours(&v6, "127.0.0.1", 10809).bypass.unwrap();
+        assert!(!bypass.split(';').any(|b| b.matches(':').count() >= 2), "{bypass}");
+        assert!(bypass.ends_with(";*.corp;http://intranet"), "{bypass}");
+        assert_eq!(wininet::accepted("::1; *.corp ;[fe80::1];<local>"), "*.corp;<local>");
+        let long = Previous { bypass: Some((0..500).map(|i| format!("host-{i}.example")).collect::<Vec<_>>().join(";")), ..before.clone() };
+        assert!(wininet::ours(&long, "127.0.0.1", 10809).bypass.unwrap().len() <= 2000, "a bypass list WinINet accepts");
         let json = serde_json::to_string(&before).unwrap();
         assert_eq!(serde_json::from_str::<Previous>(&json).unwrap(), before, "the crash file round-trips");
     }

@@ -197,9 +197,14 @@ pub struct Vpn {
     /// Bumped by every connect/disconnect, so a late result of an older attempt is thrown away.
     attempt: u64,
     starting: Option<Task<()>>,
+    routing_task: Option<Task<()>>,
+    teardowns: Vec<Task<()>>,
+    updating: bool,
     ticker: Option<Task<()>>,
     reload: Option<Task<()>>,
     pinger: Option<Task<()>>,
+    /// Cascade entry the last latency test went through.
+    pinged_via: Option<&'static str>,
     tester: Option<Task<()>>,
     /// Output of the cores started this session, kept after one stops or fails for the log sheet.
     log: xray::Log,
@@ -291,9 +296,13 @@ impl Vpn {
             core: None,
             attempt: 0,
             starting: None,
+            routing_task: None,
+            teardowns: Vec::new(),
+            updating: false,
             ticker: None,
             reload: None,
             pinger: None,
+            pinged_via: None,
             log: xray::Log::default(),
             tester: None,
             login,
@@ -921,6 +930,7 @@ impl Vpn {
 
     /// Connect, or move the running connection to the current server and rules.
     pub fn connect(&mut self, cx: &mut Context<Self>) {
+        if self.updating { return; }
         if !self.s.signed_in || !data::has_server(self.s.server_id) {
             self.s.error = Some(if self.s.signed_in { t!("vpn.error.no_server").into() } else { t!("vpn.error.sign_in_to_connect").into() });
             cx.notify();
@@ -963,7 +973,7 @@ impl Vpn {
     fn started(&mut self, attempt: u64, routing: Routing, result: Result<Core, String>, cx: &mut Context<Self>) {
         if attempt != self.attempt {
             if let Ok(core) = result {
-                cx.background_executor().spawn(async move { core.stop() }).detach();
+                self.teardowns.push(cx.background_executor().spawn(async move { core.stop() }));
             }
             return;
         }
@@ -976,6 +986,7 @@ impl Vpn {
                 self.bytes = None;
                 self.connected(cx);
                 self.lookup_exit(probe, cx);
+                self.retest_if_moved(cx);
             }
             Err(e) => {
                 self.s.conn = Conn::Off;
@@ -1033,7 +1044,7 @@ impl Vpn {
             self.connect(cx);
         } else {
             let core = self.core.take();
-            cx.background_executor().spawn(async move { drop(core) }).detach();
+            self.teardowns.push(cx.background_executor().spawn(async move { drop(core) }));
             self.ticker = None;
             self.s.conn = Conn::Off;
             self.s.connected_at = None;
@@ -1096,6 +1107,7 @@ impl Vpn {
     }
 
     pub fn disconnect(&mut self, cx: &mut Context<Self>) {
+        if self.updating { return; }
         self.attempt += 1;
         self.starting = None;
         self.ticker = None;
@@ -1103,13 +1115,10 @@ impl Vpn {
         self.failures = 0;
         let stopped = self.core.take().map(|core| cx.background_executor().spawn(async move { core.stop() }));
         // Off the tunnel now: has the network changed meanwhile? (Once the core is down, so the lookup is direct.)
-        cx.spawn(async move |this, cx| {
-            if let Some(stopped) = stopped {
-                stopped.await;
-            }
-            this.update(cx, |this, cx| this.check_region(false, cx)).ok();
-        })
-        .detach();
+        self.teardowns.push(cx.spawn(async move |this, cx| {
+            if let Some(stopped) = stopped { stopped.await; }
+            this.update(cx, |this, cx| { if !this.updating { this.check_region(false, cx); } }).ok();
+        }));
         self.s.conn = Conn::Off;
         self.s.connected_at = None;
         self.s.stats = Stats::default();
@@ -1166,16 +1175,18 @@ impl Vpn {
 
     fn apply_routing(&mut self, cx: &mut Context<Self>) {
         self.reload = None;
+        if self.updating { return; }
         let Some(mut core) = self.core.take() else { return };
         let plan = self.plan();
         let routing = self.s.routing();
         let attempt = self.attempt;
-        cx.spawn(async move |this, cx| {
+        self.routing_task = Some(cx.spawn(async move |this, cx| {
             let result = cx.background_executor().spawn(async move { core.reload(&plan).map(|_| core) }).await;
             this.update(cx, |this, cx| {
+                this.routing_task = None;
                 if attempt != this.attempt {
                     if let Ok(core) = result {
-                        cx.background_executor().spawn(async move { core.stop() }).detach();
+                        this.teardowns.push(cx.background_executor().spawn(async move { core.stop() }));
                     }
                     return;
                 }
@@ -1195,9 +1206,32 @@ impl Vpn {
                 cx.notify();
             })
             .ok();
-        })
-        .detach();
+        }));
     }
+
+    /// Updating waits for teardown explicitly; GPUI's normal quit hook only allows 100 ms.
+    pub fn stop_for_update(&mut self, cx: &mut Context<Self>) -> Task<()> {
+        self.updating = true;
+        self.attempt += 1;
+        self.ticker = None;
+        self.reload = None;
+        let starting = self.starting.take();
+        let routing = self.routing_task.take();
+        let core = self.core.take();
+        self.s.conn = Conn::Off;
+        self.s.connected_at = None;
+        self.s.stats = Stats::default();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            if let Some(task) = starting { task.await; }
+            if let Some(task) = routing { task.await; }
+            let teardowns = this.update(cx, |this, _| std::mem::take(&mut this.teardowns)).unwrap_or_default();
+            for task in teardowns { task.await; }
+            cx.background_executor().spawn(async move { drop(core); crate::helper::close(); }).await;
+        })
+    }
+
+    pub fn cancel_update(&mut self) { self.updating = false; }
 
     // ---------- latency ----------
 
@@ -1220,8 +1254,12 @@ impl Vpn {
         if self.s.testing || servers.is_empty() {
             return;
         }
-        let via = self.core.as_ref().map(|c| c.ports.ping);
-        let rx = xray::ping_all(servers.clone(), self.s.protocol, via);
+        let (via, entry) = match self.core.as_ref() {
+            Some(c) => (Some(c.ports.ping), c.entry),
+            None => (None, self.s.entry_id.filter(|e| *e != self.s.server_id).map(data::server)),
+        };
+        let rx = xray::ping_all(servers.clone(), self.s.protocol, entry, via);
+        self.pinged_via = entry.map(|e| e.id);
         self.s.testing = true;
         self.s.pending = servers.iter().map(|s| s.id).collect();
         self.tester = Some(cx.spawn(async move |this, cx| {
@@ -1264,5 +1302,15 @@ impl Vpn {
         }
         self.s.servers_gen += 1;
         cx.notify();
+        self.retest_if_moved(cx);
+    }
+
+    /// Latencies are measured through the running core's first hop; another one makes them stale.
+    fn retest_if_moved(&mut self, cx: &mut Context<Self>) {
+        if let Some(core) = self.core.as_ref()
+            && self.pinged_via != core.entry.map(|e| e.id)
+        {
+            self.test_pings(cx);
+        }
     }
 }
